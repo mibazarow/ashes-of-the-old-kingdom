@@ -12,6 +12,9 @@ const DASH_COOLDOWN := 0.55
 const DASH_IFRAMES := 0.22
 const HIT_IFRAMES := 0.45
 
+const ABILITY_COST := 10
+const ABILITY_COOLDOWN := 1.5
+
 const WINDUP := 0.08
 const ACTIVE := 0.10
 const RECOVERY := 0.16
@@ -36,6 +39,7 @@ var spawn_point: Vector2 = Vector2.ZERO
 
 var _state_time := 0.0
 var _dash_cooldown_left := 0.0
+var _ability_cooldown_left := 0.0
 var _attack_cooldown_left := 0.0
 var _iframe_left := 0.0
 var _swing_counter := 0
@@ -88,6 +92,7 @@ func _physics_process(delta: float) -> void:
 
 func _tick_timers(delta: float) -> void:
 	_dash_cooldown_left = maxf(0.0, _dash_cooldown_left - delta)
+	_ability_cooldown_left = maxf(0.0, _ability_cooldown_left - delta)
 	_attack_cooldown_left = maxf(0.0, _attack_cooldown_left - delta)
 	_iframe_left = maxf(0.0, _iframe_left - delta)
 	if _flash_timer > 0.0:
@@ -114,7 +119,9 @@ func _process_free(delta: float) -> void:
 
 	_update_sprite()
 
-	if InputSource.is_action_just_pressed(&"attack") and _attack_cooldown_left <= 0.0:
+	if InputSource.is_action_just_pressed(&"ability"):
+		try_ability()
+	elif InputSource.is_action_just_pressed(&"attack") and _attack_cooldown_left <= 0.0:
 		_start_attack()
 	elif InputSource.is_action_just_pressed(&"dash") and _dash_cooldown_left <= 0.0:
 		_start_dash(input_dir)
@@ -191,6 +198,23 @@ func _start_dash(dir: Vector2) -> void:
 	velocity = facing * DASH_SPEED
 	_position_attack_area()
 	_update_sprite()
+
+
+## Placeholder ability (spec §6): a dash toward the cursor that costs mana and
+## has its own cooldown. Single entry point, reachable from _process_free and
+## from tests. Reuses the DASH state and its i-frames, so it is not a new state.
+func try_ability() -> bool:
+	if _ability_cooldown_left > 0.0:
+		return false
+	if not GameState.spend_mana(ABILITY_COST):
+		EventBus.toast.emit("Не хватает маны")
+		return false
+	_ability_cooldown_left = ABILITY_COOLDOWN
+	var aim := InputSource.aim_direction(global_position)
+	var dir := aim if aim.length() > 0.01 else facing
+	_start_dash(dir)
+	Telemetry.event(&"ability_used", {"cost": ABILITY_COST})
+	return true
 
 
 func _process_dash(delta: float) -> void:

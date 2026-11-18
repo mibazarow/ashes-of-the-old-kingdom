@@ -143,7 +143,7 @@ func _build_ui() -> void:
 	column.add_child(_quest_label)
 
 	_hint_label = _make_text(
-		"WASD · ЛКМ/геймпад X удар · Space рывок · E действие · I инвентарь · J журнал · M карта · F5/F9",
+		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · F5/F9",
 		Color(0.72, 0.74, 0.7)
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

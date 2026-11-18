@@ -36,6 +36,11 @@ func _init() -> void:
 	var attack_events: Array[InputEvent] = [_mouse_left(), _joy(JOY_BUTTON_X)]
 	ProjectSettings.set_setting("input/attack", {"deadzone": 0.2, "events": attack_events})
 
+	# The placeholder ability is right-mouse-driven, same explicit-list pattern as
+	# attack so the serialized events survive the save.
+	var ability_events: Array[InputEvent] = [_mouse_right()]
+	ProjectSettings.set_setting("input/ability", {"deadzone": 0.2, "events": ability_events})
+
 	var err := ProjectSettings.save()
 	print("input map written, save error=", err)
 	quit(0)
@@ -51,6 +56,12 @@ func _key(code: int) -> InputEventKey:
 func _mouse_left() -> InputEventMouseButton:
 	var mouse := InputEventMouseButton.new()
 	mouse.button_index = MOUSE_BUTTON_LEFT
+	return mouse
+
+
+func _mouse_right() -> InputEventMouseButton:
+	var mouse := InputEventMouseButton.new()
+	mouse.button_index = MOUSE_BUTTON_RIGHT
 	return mouse
 
 

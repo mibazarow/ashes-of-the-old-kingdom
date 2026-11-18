@@ -83,7 +83,10 @@ func _run() -> void:
 	print("== map panel ==")
 	await _test_map_panel()
 
-	_check(completed.size() == 14, "every test group ran to completion (got %d/14)" % completed.size())
+	print("== ability ==")
+	await _test_ability()
+
+	_check(completed.size() == 15, "every test group ran to completion (got %d/15)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -589,4 +592,93 @@ func _test_map_panel() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["map"] = true
+
+
+## Placeholder ability (spec §6): right mouse button dashes toward the cursor,
+## costs mana and has its own cooldown. Driven through a real InputEventMouseButton
+## so the human input path is exercised, not the bot override.
+func _test_ability() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	_check(InputMap.has_action(&"ability"), "ability action exists")
+	var ability_has_rmb := false
+	for ev in InputMap.action_get_events(&"ability"):
+		if ev is InputEventMouseButton and (ev as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT:
+			ability_has_rmb = true
+	_check(ability_has_rmb, "ability action is bound to right mouse button")
+
+	var player := get_first_node_in_group("player") as Node2D
+	_check(player != null, "player present for ability test")
+	if player == null:
+		scene.queue_free()
+		await process_frame
+		return
+
+	# Full mana: a real right-click spends exactly ABILITY_COST and enters DASH.
+	gs.mana = gs.max_mana
+	player.set("_ability_cooldown_left", 0.0)
+	await _settle_idle(player)
+	var mana_before: int = gs.mana
+	await _tap_rmb()
+	_check(gs.mana == mana_before - 10, "right-click spends exactly 10 mana (%d -> %d)" % [mana_before, gs.mana])
+	_check(int(player.get("state")) == 3, "right-click puts the player into DASH (state=%d)" % int(player.get("state")))
+
+	# Cooldown: wait out the dash, then tap again while the ability cooldown is
+	# still running; it must not spend more mana.
+	var mana_after_first: int = gs.mana
+	await _settle_idle(player)
+	await _tap_rmb()
+	_check(gs.mana == mana_after_first, "second press during cooldown spends no mana")
+
+	# Out of mana (cooldown forced expired): must not fire, mana stays 0.
+	await _settle_idle(player)
+	gs.mana = 0
+	player.set("_ability_cooldown_left", 0.0)
+	await _tap_rmb()
+	_check(gs.mana == 0, "no mana -> ability does not fire, mana stays 0")
+
+	# Cooldown expired with mana restored: the ability works again.
+	await _settle_idle(player)
+	gs.mana = gs.max_mana
+	player.set("_ability_cooldown_left", 0.0)
+	var mana_before_recover: int = gs.mana
+	await _tap_rmb()
+	_check(gs.mana == mana_before_recover - 10, "ability works again after cooldown expires")
+	_check(int(player.get("state")) == 3, "ability after cooldown enters DASH again (state=%d)" % int(player.get("state")))
+
+	await _settle_idle(player)
+	scene.queue_free()
+	await process_frame
+	completed["ability"] = true
+
+
+## Wait until the player leaves DASH/ATTACK and returns to a free state, so the
+## next input tap is observed from a known-clean state.
+func _settle_idle(player: Node) -> void:
+	for i in range(40):
+		await physics_frame
+		if int(player.get("state")) != 3 and int(player.get("state")) != 2:
+			return
+
+
+## A single right-mouse-button click through the real Input path, using fresh
+## event objects so a held state from an earlier tap cannot mask the edge.
+func _tap_rmb() -> void:
+	var down := InputEventMouseButton.new()
+	down.button_index = MOUSE_BUTTON_RIGHT
+	down.pressed = true
+	down.position = Vector2(360, 135)
+	Input.parse_input_event(down)
+	for i in range(2):
+		await physics_frame
+	var up := InputEventMouseButton.new()
+	up.button_index = MOUSE_BUTTON_RIGHT
+	up.pressed = false
+	up.position = Vector2(360, 135)
+	Input.parse_input_event(up)
 
