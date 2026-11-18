@@ -79,6 +79,7 @@ func _run() -> void:
 
 	print("== scene smoke ==")
 	await _test_scene_loads()
+	await _test_world_enemy_composition()
 
 	print("== map panel ==")
 	await _test_map_panel()
@@ -89,7 +90,7 @@ func _run() -> void:
 	print("== bot quest target ==")
 	await _test_bot_quest_target()
 
-	_check(completed.size() == 16, "every test group ran to completion (got %d/16)" % completed.size())
+	_check(completed.size() == 17, "every test group ran to completion (got %d/17)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -481,6 +482,41 @@ func _test_scene_loads() -> void:
 	completed["scene"] = true
 
 
+## Regression guard for the ArcherA spawn: the world must contain five melee
+## wolves and exactly one real ranged cultist, not six wolves as it did while
+## forest.gd instantiated WOLF_SCENE for the node named ArcherA.
+func _test_world_enemy_composition() -> void:
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var wolves: Array[Node] = []
+	var archers: Array[Node] = []
+	for node in get_nodes_in_group("enemy"):
+		if not node.is_in_group("enemy"):
+			continue
+		if node.get("enemy_type") == &"ash_wolf":
+			wolves.append(node)
+		elif node.get("enemy_type") == &"ash_archer":
+			archers.append(node)
+
+	_check(wolves.size() >= 5, "world spawns at least 5 melee wolves (got %d)" % wolves.size())
+	_check(archers.size() == 1, "world spawns exactly one ranged cultist (got %d)" % archers.size())
+
+	var archer: Node = archers[0] if archers.size() == 1 else null
+	_check(archer != null and String(archer.name) == "ArcherA",
+		"the ranged cultist is the node named ArcherA")
+	var wolf: Node = wolves[0] if not wolves.is_empty() else null
+	_check(archer != null and wolf != null and int(archer.get("kind")) != int(wolf.get("kind")),
+		"the cultist kind differs from the wolf kind (ranged vs melee)")
+
+	scene.queue_free()
+	await process_frame
+	completed["world_composition"] = true
+
+
 ## Zone map on M: explored-only tiles, fog, landmarks, and input blocking.
 func _test_map_panel() -> void:
 	gs.reset()
@@ -689,9 +725,9 @@ func _tap_rmb() -> void:
 ## BOT-002 determinism guard, pinned without a full bot run: the quest-aware
 ## target picker must lock onto the enemy type the objective counts (ash_wolf)
 ## and never a closer non-objective enemy, and must return null for an unknown
-## quest id. The world spawns every enemy as an ash_wolf, so we plant a real
-## cultist (archer.tscn, ash_archer) right next to the player — closer than any
-## wolf — and assert the picker still skips it and returns an ash_wolf.
+## quest id. The world does spawn one cultist, but far to the east, so we plant
+## a second one (archer.tscn, ash_archer) right next to the player — closer than
+## any wolf — and assert the picker still skips it and returns an ash_wolf.
 func _test_bot_quest_target() -> void:
 	var packed: PackedScene = load("res://scenes/main/main.tscn")
 	var scene := packed.instantiate()
