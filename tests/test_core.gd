@@ -86,7 +86,10 @@ func _run() -> void:
 	print("== ability ==")
 	await _test_ability()
 
-	_check(completed.size() == 15, "every test group ran to completion (got %d/15)" % completed.size())
+	print("== bot quest target ==")
+	await _test_bot_quest_target()
+
+	_check(completed.size() == 16, "every test group ran to completion (got %d/16)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -681,4 +684,51 @@ func _tap_rmb() -> void:
 	up.pressed = false
 	up.position = Vector2(360, 135)
 	Input.parse_input_event(up)
+
+
+## BOT-002 determinism guard, pinned without a full bot run: the quest-aware
+## target picker must lock onto the enemy type the objective counts (ash_wolf)
+## and never a closer non-objective enemy, and must return null for an unknown
+## quest id. The world spawns every enemy as an ash_wolf, so we plant a real
+## cultist (archer.tscn, ash_archer) right next to the player — closer than any
+## wolf — and assert the picker still skips it and returns an ash_wolf.
+func _test_bot_quest_target() -> void:
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var bot := scene.get_node_or_null("Bot")
+	var player := get_first_node_in_group("player") as Node2D
+	var world := scene.get_node_or_null("World")
+	_check(bot != null and player != null and world != null, "bot, player and world present for quest-target test")
+	if bot == null or player == null or world == null:
+		scene.queue_free()
+		await process_frame
+		completed["bot_quest_target"] = true
+		return
+
+	# A type-blind picker would lock onto this cultist (it is the nearest enemy);
+	# the quest-aware picker must ignore it because its type is not the objective.
+	var cultist: Node2D = (load("res://scenes/enemies/archer.tscn") as PackedScene).instantiate()
+	world.add_child(cultist)
+	cultist.global_position = player.global_position + Vector2(4, 0)
+	await process_frame
+	_check(String(cultist.get("enemy_type")) == "ash_archer", "planted enemy is the non-objective cultist")
+	var blind := bot.call("_nearest_enemy") as Node2D
+	_check(blind == cultist, "a type-blind picker would lock onto the nearer cultist")
+
+	var target := bot.call("_nearest_quest_enemy", "q01_ash_wolves") as Node2D
+	_check(target != null, "quest target picker returns an enemy")
+	_check(target != null and String(target.get("enemy_type")) == "ash_wolf",
+		"quest target picker skips the cultist and returns an ash_wolf")
+	_check(target != cultist, "quest target picker does not return the cultist")
+	_check(bot.call("_nearest_quest_enemy", "no_such_quest") == null,
+		"quest target picker returns null for unknown quest id")
+
+	cultist.queue_free()
+	scene.queue_free()
+	await process_frame
+	completed["bot_quest_target"] = true
 

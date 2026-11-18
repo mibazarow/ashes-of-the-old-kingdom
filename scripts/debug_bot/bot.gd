@@ -222,19 +222,64 @@ func _scenario_quest_loop() -> void:
 	# 2. hunt until the objective is met
 	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 2.2 * 1000.0)
 	var attacks := 0
+	# The bot's straight-line approach cannot always get around a tree that sits
+	# between it and the nearest wolf, so it can pin itself against the obstacle
+	# and grind for the whole budget without ever closing to attack range. When it
+	# stops making progress on a target it abandons that wolf (for a while) and
+	# works another one instead — there are more wolves than the objective needs.
+	# This is target selection only: movement, aiming, attacking and healing are
+	# untouched, and every kill is still earned by walking up and attacking.
+	var abandoned: Dictionary = {}
+	var cur_id := -1
+	var cur_best := INF
+	var stalled := 0
 	while Time.get_ticks_msec() < deadline:
 		if QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY:
 			break
 		if GameState.hp < GameState.max_hp * float(_profile["heal_at"]):
 			await _tap(&"quick_slot_1")
 			await _wait(0.2)
-		var enemy := _nearest_enemy()
+		_prune_abandoned(abandoned)
+		var enemy := _nearest_quest_enemy(QUEST_ID, abandoned)
 		if enemy == null:
-			break
+			# Nothing left that we have not just abandoned: forget the
+			# abandonments and retry once before declaring the objective impossible.
+			if not abandoned.is_empty():
+				abandoned.clear()
+				cur_id = -1
+				cur_best = INF
+				stalled = 0
+				continue
+			# Honest failure: the objective still needs kills but no matching
+			# enemy is left to fight, so report why instead of silently breaking
+			# into a vague objective_not_met.
+			if QuestManager.progress_of(QUEST_ID) < QuestManager.target_count(QUEST_ID):
+				_notes.append("progress=%d/%d" % [QuestManager.progress_of(QUEST_ID), QuestManager.target_count(QUEST_ID)])
+				_notes.append("no_quest_targets")
+			return
 		var dist := _player_pos().distance_to(enemy.global_position)
 		if dist > float(_profile["engage_range"]):
+			var eid := enemy.get_instance_id()
+			if eid != cur_id:
+				cur_id = eid
+				cur_best = dist
+				stalled = 0
+			elif dist < cur_best - 2.0:
+				cur_best = dist
+				stalled = 0
+			else:
+				stalled += 1
+			if stalled > 120:
+				abandoned[eid] = Engine.get_physics_frames()
+				cur_id = -1
+				cur_best = INF
+				stalled = 0
+				continue
 			await _move_step(enemy.global_position)
 			continue
+		cur_id = -1
+		cur_best = INF
+		stalled = 0
 		bot_input.set_aim(enemy.global_position)
 		await _tap(&"attack")
 		attacks += 1
@@ -371,6 +416,56 @@ func _nearest_enemy() -> Node2D:
 			best_dist = d
 			best = e
 	return best
+
+
+## Quest-aware target picker, used only by the quest scenario. It locks onto the
+## enemy type the objective actually counts, so the bot never wastes the run on
+## an enemy whose death does not advance the quest (e.g. the ranged cultist).
+## Aliveness is judged only from public facts: the node is still valid, still in
+## the "enemy" group, and not in the public DEAD state (a dying enemy lingers in
+## the group for a beat before queue_free, and the bot must not attack a corpse).
+## It never reads hp or any private field. `exclude` (instance_id -> frame) lets
+## the caller skip wolves it has just given up on; it defaults to empty so the
+## plain single-argument call still means "nearest matching live enemy".
+func _nearest_quest_enemy(quest_id: String, exclude: Dictionary = {}) -> Node2D:
+	var objective: Dictionary = QuestManager.get_quest(quest_id).get("objective", {})
+	if String(objective.get("type", "")) != "kill":
+		return null
+	var want_type := StringName(String(objective.get("target", "")))
+	if want_type == &"":
+		return null
+	var best: Node2D = null
+	var best_dist := INF
+	var me := _player_pos()
+	for n in get_tree().get_nodes_in_group("enemy"):
+		var e := n as Node2D
+		if e == null or not is_instance_valid(e):
+			continue
+		if not e.is_in_group("enemy"):
+			continue
+		if e.get("enemy_type") != want_type:
+			continue
+		if e.get("state") == Enemy.State.DEAD:
+			continue
+		if exclude.has(e.get_instance_id()):
+			continue
+		var d := me.distance_to(e.global_position)
+		if d < best_dist:
+			best_dist = d
+			best = e
+	return best
+
+
+## Drop abandoned entries whose enemy is gone or whose abandonment has aged out,
+## so a wolf can be retried once the bot has had time to reposition.
+func _prune_abandoned(abandoned: Dictionary) -> void:
+	if abandoned.is_empty():
+		return
+	var now := Engine.get_physics_frames()
+	for id: int in abandoned.keys():
+		var node := instance_from_id(id)
+		if not is_instance_valid(node) or now - int(abandoned[id]) > 900:
+			abandoned.erase(id)
 
 
 func _move_step(target: Vector2) -> void:
