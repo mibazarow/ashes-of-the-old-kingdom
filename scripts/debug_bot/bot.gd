@@ -54,7 +54,18 @@ class BotInput:
 			_pressed[key] = false
 
 
+## Behaviour profiles from the spec (§19.3). They change how the bot weighs
+## risk: when it heals, how close it lets enemies get, whether it detours.
+const PROFILES := {
+	"cautious": {"heal_at": 0.75, "engage_range": 14.0, "dash_chance": 0.35, "detour": true},
+	"normal": {"heal_at": 0.5, "engage_range": 16.0, "dash_chance": 0.15, "detour": true},
+	"aggressive": {"heal_at": 0.25, "engage_range": 20.0, "dash_chance": 0.05, "detour": false},
+	"explorer": {"heal_at": 0.6, "engage_range": 12.0, "dash_chance": 0.2, "detour": true},
+}
+
 var scenario: String = ""
+var profile: String = "normal"
+var _profile: Dictionary = {}
 var bot_input: BotInput
 var _world: Node = null
 var _result := "FAIL"
@@ -79,13 +90,16 @@ func start_from_cmdline() -> void:
 	for a in args:
 		if a.begins_with("--bot="):
 			scenario = a.substr("--bot=".length())
+		elif a.begins_with("--profile="):
+			profile = a.substr("--profile=".length())
 	if scenario == "":
 		return
+	_profile = PROFILES.get(profile, PROFILES["normal"])
 	_world = get_parent().get_node_or_null("World")
 	_running = true
 	_start_ms = Time.get_ticks_msec()
 	InputSource.set_override(bot_input)
-	Telemetry.event(&"bot_start", {"scenario": scenario})
+	Telemetry.event(&"bot_start", {"scenario": scenario, "profile": profile})
 	_run()
 
 
@@ -117,6 +131,7 @@ func _finish() -> void:
 	Telemetry.event(&"bot_finish", {"scenario": scenario, "result": _result, "notes": _notes})
 	Telemetry.write_summary(_result, {
 		"scenario": scenario,
+		"profile": profile,
 		"notes": "; ".join(_notes),
 		"hp": GameState.hp,
 		"kills": GameState.kills,
@@ -148,14 +163,14 @@ func _scenario_kill() -> void:
 	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
 	var attacks := 0
 	while Time.get_ticks_msec() < deadline:
-		if GameState.hp < GameState.max_hp * 0.4:
+		if GameState.hp < GameState.max_hp * float(_profile["heal_at"]):
 			await _tap(&"quick_slot_1")
 			await _wait(0.2)
 		var enemy := _nearest_enemy()
 		if enemy == null:
 			break
 		var dist := _player_pos().distance_to(enemy.global_position)
-		if dist > 15.0:
+		if dist > float(_profile["engage_range"]):
 			await _move_step(enemy.global_position)
 			continue
 		bot_input.set_aim(enemy.global_position)
@@ -210,14 +225,14 @@ func _scenario_quest_loop() -> void:
 	while Time.get_ticks_msec() < deadline:
 		if QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY:
 			break
-		if GameState.hp < GameState.max_hp * 0.4:
+		if GameState.hp < GameState.max_hp * float(_profile["heal_at"]):
 			await _tap(&"quick_slot_1")
 			await _wait(0.2)
 		var enemy := _nearest_enemy()
 		if enemy == null:
 			break
 		var dist := _player_pos().distance_to(enemy.global_position)
-		if dist > 15.0:
+		if dist > float(_profile["engage_range"]):
 			await _move_step(enemy.global_position)
 			continue
 		bot_input.set_aim(enemy.global_position)

@@ -21,8 +21,8 @@ Godot 4.7.2 уже установлен (`/Applications/Godot.app`, CLI `godot`)
 | Действие | Клавиша |
 | --- | --- |
 | Движение | W A S D / стрелки |
-| Атака | J, ЛКМ, геймпад X |
-| Рывок (неуязвимость) | Shift |
+| Атака | ЛКМ, J, геймпад X |
+| Рывок (неуязвимость) | Space, Shift |
 | Взаимодействие, закрыть диалог | E |
 | Инвентарь | I |
 | Быстрый слот: настой здоровья / маны | 1 / 2 |
@@ -71,6 +71,9 @@ godot --headless --path . -- --bot=BOT-008   # убить врага
 godot --headless --path . -- --bot=BOT-009   # save/load
 godot --headless --path . -- --bot=BOT-010   # soak с движением по карте
 godot --headless --path . -- --bot=BOT-011   # игрок получает урон
+
+# профили поведения: cautious | normal | aggressive | explorer
+godot --headless --path . -- --bot=BOT-002 --profile=cautious
 
 # скриншот без ручного запуска
 PEPEL_SCREENSHOT=/tmp/shot.png godot --path .
