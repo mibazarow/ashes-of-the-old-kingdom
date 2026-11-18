@@ -1,0 +1,300 @@
+class_name Player
+extends CharacterBody2D
+## Top-down player: 8-way movement, dash with i-frames, melee attack with
+## wind-up / active / recovery, and interaction through a single input funnel.
+
+signal attack_started(hit_id: String)
+
+const SPEED := 110.0
+const DASH_SPEED := 330.0
+const DASH_TIME := 0.16
+const DASH_COOLDOWN := 0.55
+const DASH_IFRAMES := 0.22
+const HIT_IFRAMES := 0.45
+
+const WINDUP := 0.08
+const ACTIVE := 0.10
+const RECOVERY := 0.16
+const ATTACK_COOLDOWN := 0.06
+
+const INTERACT_RADIUS := 26.0
+
+enum State { IDLE, MOVE, ATTACK, DASH, DEAD }
+
+const FRAME_DOWN := 0
+const FRAME_UP := 1
+const FRAME_SIDE := 2
+
+@onready var sprite: Sprite2D = $Sprite2D
+@onready var attack_area: Area2D = $AttackHitbox
+@onready var attack_shape: CollisionShape2D = $AttackHitbox/CollisionShape2D
+@onready var camera: Camera2D = $Camera2D
+
+var state: State = State.IDLE
+var facing: Vector2 = Vector2.DOWN
+var spawn_point: Vector2 = Vector2.ZERO
+
+var _state_time := 0.0
+var _dash_cooldown_left := 0.0
+var _attack_cooldown_left := 0.0
+var _iframe_left := 0.0
+var _swing_counter := 0
+var _current_hit_id := ""
+var _hit_this_swing: Dictionary = {}
+var _interactable: Node = null
+var _dead_timer := 0.0
+var _flash_timer := 0.0
+
+
+func _ready() -> void:
+	add_to_group("player")
+	spawn_point = global_position
+	attack_shape.disabled = true
+	EventBus.player_died.connect(_on_player_died)
+	EventBus.player_health_changed.connect(_on_health_changed)
+
+
+func get_defense() -> int:
+	return GameState.total_defense()
+
+
+func is_invulnerable() -> bool:
+	return _iframe_left > 0.0 or state == State.DASH or state == State.DEAD
+
+
+func _physics_process(delta: float) -> void:
+	_tick_timers(delta)
+
+	match state:
+		State.DEAD:
+			velocity = Vector2.ZERO
+			_dead_timer -= delta
+			if _dead_timer <= 0.0:
+				_respawn()
+			move_and_slide()
+			return
+		State.DASH:
+			_process_dash(delta)
+			return
+		State.ATTACK:
+			_process_attack(delta)
+			return
+		_:
+			_process_free(delta)
+
+	move_and_slide()
+
+
+func _tick_timers(delta: float) -> void:
+	_dash_cooldown_left = maxf(0.0, _dash_cooldown_left - delta)
+	_attack_cooldown_left = maxf(0.0, _attack_cooldown_left - delta)
+	_iframe_left = maxf(0.0, _iframe_left - delta)
+	if _flash_timer > 0.0:
+		_flash_timer -= delta
+		if _flash_timer <= 0.0:
+			modulate = Color.WHITE
+
+
+func _process_free(delta: float) -> void:
+	if GameState.ui_blocking:
+		velocity = Vector2.ZERO
+		state = State.IDLE
+		_update_sprite()
+		return
+
+	var input_dir := InputSource.get_vector(&"move_left", &"move_right", &"move_up", &"move_down")
+	if input_dir.length() > 0.01:
+		velocity = input_dir.normalized() * SPEED
+		state = State.MOVE
+		_update_facing(input_dir)
+	else:
+		velocity = Vector2.ZERO
+		state = State.IDLE
+
+	_update_sprite()
+
+	if InputSource.is_action_just_pressed(&"attack") and _attack_cooldown_left <= 0.0:
+		_start_attack()
+	elif InputSource.is_action_just_pressed(&"dash") and _dash_cooldown_left <= 0.0:
+		_start_dash(input_dir)
+	else:
+		_scan_interactable()
+		if InputSource.is_action_just_pressed(&"interact") and _interactable != null:
+			_interactable.call("interact", self)
+
+
+func _start_attack() -> void:
+	state = State.ATTACK
+	_state_time = 0.0
+	# Attack direction is aim-driven (mouse for a human, target for the bot),
+	# independent of the movement direction.
+	var aim := InputSource.aim_direction(global_position)
+	if aim.length() > 0.01:
+		facing = aim.normalized()
+	_swing_counter += 1
+	_current_hit_id = DamageResolver.make_hit_id(get_instance_id(), _swing_counter)
+	_hit_this_swing.clear()
+	velocity = Vector2.ZERO
+	_position_attack_area()
+	attack_started.emit(_current_hit_id)
+
+
+func _process_attack(delta: float) -> void:
+	_state_time += delta
+	velocity = Vector2.ZERO
+	_update_sprite()
+
+	if _state_time < WINDUP:
+		return
+	if _state_time < WINDUP + ACTIVE:
+		attack_shape.disabled = false
+		_apply_attack_hits()
+		return
+
+	attack_shape.disabled = true
+	if _state_time >= WINDUP + ACTIVE + RECOVERY:
+		state = State.IDLE
+		_attack_cooldown_left = ATTACK_COOLDOWN
+
+
+func _apply_attack_hits() -> void:
+	for body in attack_area.get_overlapping_bodies():
+		if body == self or not body.has_method("receive_damage"):
+			continue
+		var key := str(body.get_instance_id())
+		if _hit_this_swing.has(key):
+			continue
+		_hit_this_swing[key] = true
+		DamageResolver.resolve_hit(self, body, {
+			"damage": GameState.total_attack(),
+			"hit_id": _current_hit_id,
+			"damage_type": "physical",
+			"critical": randf() < 0.15,
+		})
+		_hit_stop(0.045)
+
+
+func _hit_stop(duration: float) -> void:
+	Engine.time_scale = 0.12
+	await get_tree().create_timer(duration, true, false, true).timeout
+	Engine.time_scale = 1.0
+
+
+func _start_dash(dir: Vector2) -> void:
+	state = State.DASH
+	_state_time = 0.0
+	_dash_cooldown_left = DASH_COOLDOWN
+	_iframe_left = maxf(_iframe_left, DASH_IFRAMES)
+	if dir.length() > 0.01:
+		facing = dir.normalized()
+	velocity = facing * DASH_SPEED
+	_position_attack_area()
+	_update_sprite()
+
+
+func _process_dash(delta: float) -> void:
+	_state_time += delta
+	velocity = velocity.move_toward(Vector2.ZERO, DASH_SPEED * 2.5 * delta)
+	move_and_slide()
+	if _state_time >= DASH_TIME:
+		state = State.IDLE
+		velocity = Vector2.ZERO
+
+
+func _update_facing(dir: Vector2) -> void:
+	if dir.length() < 0.01:
+		return
+	if absf(dir.x) > absf(dir.y):
+		facing = Vector2(signf(dir.x), 0)
+	else:
+		facing = Vector2(0, signf(dir.y))
+
+
+func _update_sprite() -> void:
+	if absf(facing.x) > absf(facing.y):
+		sprite.frame = FRAME_SIDE
+		sprite.flip_h = facing.x < 0.0
+	elif facing.y > 0.0:
+		sprite.frame = FRAME_DOWN
+		sprite.flip_h = false
+	else:
+		sprite.frame = FRAME_UP
+		sprite.flip_h = false
+
+
+func _position_attack_area() -> void:
+	var offset := facing * 14.0
+	attack_area.position = offset
+	attack_area.rotation = facing.angle()
+
+
+func _scan_interactable() -> void:
+	var best: Node = null
+	var best_dist := INTERACT_RADIUS
+	for node in get_tree().get_nodes_in_group("interactable"):
+		var n2d := node as Node2D
+		if n2d == null:
+			continue
+		var d := global_position.distance_to(n2d.global_position)
+		if d < best_dist:
+			best_dist = d
+			best = node
+	if best != _interactable:
+		_interactable = best
+		if best == null:
+			EventBus.interact_prompt.emit("")
+		else:
+			EventBus.interact_prompt.emit(String(best.call("prompt_text")))
+
+
+func receive_damage(amount: int, info: Dictionary = {}) -> void:
+	if is_invulnerable():
+		if Telemetry != null:
+			Telemetry.event(&"damage_ignored", {"reason": "iframes", "amount": amount})
+		return
+	GameState.take_damage(amount)
+	_iframe_left = HIT_IFRAMES
+	_flash_timer = 0.12
+	modulate = Color(1.0, 0.45, 0.45)
+	_spawn_damage_number(amount, Color(1.0, 0.35, 0.3))
+	Telemetry.event(&"player_hit", {"amount": amount, "source": info.get("attacker_id", 0)})
+
+
+func _on_health_changed(current: int, _maximum: int) -> void:
+	if current > 0 and state == State.DEAD:
+		return
+
+
+func _on_player_died() -> void:
+	if state == State.DEAD:
+		return
+	state = State.DEAD
+	_dead_timer = 1.6
+	velocity = Vector2.ZERO
+	modulate = Color(0.6, 0.6, 0.6, 0.75)
+	Telemetry.event(&"player_died", {"pos": [global_position.x, global_position.y]})
+
+
+func _respawn() -> void:
+	global_position = spawn_point
+	GameState.revive_full()
+	state = State.IDLE
+	_iframe_left = 1.0
+	modulate = Color.WHITE
+	EventBus.player_respawned.emit()
+	Telemetry.event(&"player_respawn", {})
+
+
+func _spawn_damage_number(amount: int, color: Color) -> void:
+	var label := Label.new()
+	label.text = str(amount)
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_font_size_override("font_size", 8)
+	label.position = global_position + Vector2(-3, -18)
+	label.z_index = 100
+	get_parent().add_child(label)
+	var tween := label.create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(label, "position:y", label.position.y - 14.0, 0.55)
+	tween.tween_property(label, "modulate:a", 0.0, 0.55)
+	tween.chain().tween_callback(label.queue_free)

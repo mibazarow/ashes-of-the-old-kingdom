@@ -1,0 +1,46 @@
+{
+  "items": {
+    "health_potion": {
+      "name": "Настой здоровья",
+      "type": "consumable",
+      "heal": 40,
+      "price": 25,
+      "description": "Восстанавливает 40 единиц здоровья."
+    },
+    "mana_potion": {
+      "name": "Настой маны",
+      "type": "consumable",
+      "mana": 30,
+      "price": 20,
+      "description": "Восстанавливает 30 единиц маны."
+    },
+    "iron_sword": {
+      "name": "Железный меч",
+      "type": "equipment",
+      "slot": "weapon",
+      "attack": 6,
+      "price": 80,
+      "description": "Простой, но честный клинок. +6 к атаке."
+    },
+    "leather_armor": {
+      "name": "Кожаный доспех",
+      "type": "equipment",
+      "slot": "armor",
+      "defense": 3,
+      "price": 60,
+      "description": "Дублёная кожа. +3 к защите."
+    },
+    "wolf_fang": {
+      "name": "Клык пепельного волка",
+      "type": "material",
+      "price": 8,
+      "description": "Материал для ремесла."
+    },
+    "rusted_seal": {
+      "name": "Ржавая печать",
+      "type": "quest",
+      "price": 0,
+      "description": "Обломок королевской печати. Не продаётся."
+    }
+  }
+}
