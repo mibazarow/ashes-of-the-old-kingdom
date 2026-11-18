@@ -16,3 +16,9 @@ Thumbs.db
 
 # User data (never commit saves or debug runs)
 user_data/
+
+# User folders in the project root that are not part of the game
+Telegram Desktop/
+Pepl_staryogo_korolevstva_TZ_RPG_Godot_v2.docx
+Pepl_staryogo_korolevstva_TZ_RPG_Godot_v2.md
+.localized/
