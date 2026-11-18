@@ -99,6 +99,18 @@ PEPEL_SCREENSHOT=/tmp/shot.png godot --path .
 План проверок (что, чем и с каким ожидаемым результатом): `TEST_PLAN.md`.
 Про отладочного бота (сценарии, профили, логи, воспроизведение): `BOT_GUIDE.md`.
 
+## Сборка
+
+```bash
+mkdir -p build/windows
+godot --headless --path . --export-release "Windows Desktop" build/windows/pepl.exe
+```
+
+Пресет `Windows Desktop` подготовлен и проверен, но **сборка не выполнена**:
+в системе нет шаблонов экспорта Godot `4.7.2.stable`, и скачать их (~1 ГБ)
+нельзя без решения владельца. Ни одного `.exe` на диске нет.
+Подробности и чек-лист проверки готового билда: `docs/BUILD_WINDOWS.md`.
+
 ## Структура
 
 ```
