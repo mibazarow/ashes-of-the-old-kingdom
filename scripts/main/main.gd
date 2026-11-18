@@ -33,6 +33,12 @@ func _maybe_capture_screenshot() -> void:
 		if hud != null:
 			hud.call("open_inventory_for_shot")
 		EventBus.toast.emit("Сундук: Железный меч")
+	elif ui_probe == "journal":
+		if QuestManager.quests.has("q01_ash_wolves"):
+			QuestManager.start("q01_ash_wolves")
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_journal_for_shot")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

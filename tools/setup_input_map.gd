@@ -10,10 +10,10 @@ const ACTIONS := {
 	"move_down": [KEY_S, KEY_DOWN],
 	"move_left": [KEY_A, KEY_LEFT],
 	"move_right": [KEY_D, KEY_RIGHT],
-	"attack": [KEY_J],
 	"dash": [KEY_SPACE, KEY_SHIFT],
 	"interact": [KEY_E],
 	"inventory": [KEY_I],
+	"journal": [KEY_J],
 	"pause": [KEY_ESCAPE],
 	"quick_slot_1": [KEY_1],
 	"quick_slot_2": [KEY_2],
@@ -29,10 +29,10 @@ func _init() -> void:
 			events.append(_key(code))
 		ProjectSettings.set_setting("input/" + action, {"deadzone": 0.2, "events": events})
 
-	# attack is mouse-driven per the spec, with the keyboard and gamepad as
-	# alternatives. Build the whole list at once: assigning twice silently
-	# dropped the earlier events.
-	var attack_events: Array[InputEvent] = [_mouse_left(), _key(KEY_J), _joy(JOY_BUTTON_X)]
+	# attack is mouse-driven per the spec, with the gamepad button as the only
+	# alternative; J now opens the quest journal instead of attacking. Build the
+	# whole list at once: assigning twice silently dropped the earlier events.
+	var attack_events: Array[InputEvent] = [_mouse_left(), _joy(JOY_BUTTON_X)]
 	ProjectSettings.set_setting("input/attack", {"deadzone": 0.2, "events": attack_events})
 
 	var err := ProjectSettings.save()

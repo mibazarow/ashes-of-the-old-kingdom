@@ -292,23 +292,58 @@ func _test_human_keyboard_moves_player() -> void:
 		await physics_frame
 	_check(player.global_position.distance_to(idle_start) < 2.0, "player stops after key release")
 
-	# Attack must be reachable from the keyboard too, not only from the bot.
-	var attack := InputEventKey.new()
-	attack.physical_keycode = KEY_J
-	attack.keycode = KEY_J
-	attack.pressed = true
-	Input.parse_input_event(attack)
-	for i in range(3):
+	# J must open the quest journal, never attack (attack is mouse / gamepad X).
+	_check(InputMap.has_action(&"journal"), "journal action exists")
+	var journal_has_j := false
+	for ev in InputMap.action_get_events(&"journal"):
+		if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_J:
+			journal_has_j = true
+	_check(journal_has_j, "journal action is bound to key J")
+	var attack_has_j := false
+	for ev in InputMap.action_get_events(&"attack"):
+		if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_J:
+			attack_has_j = true
+	_check(not attack_has_j, "attack action no longer contains key J")
+
+	var hud := scene.get_node_or_null("HUD")
+	_check(hud != null, "HUD present for journal test")
+	if hud != null:
+		var before_journal := player.global_position
+		var j_down := InputEventKey.new()
+		j_down.physical_keycode = KEY_J
+		j_down.keycode = KEY_J
+		j_down.pressed = true
+		Input.parse_input_event(j_down)
+		for i in range(4):
+			await physics_frame
+		_check(bool(hud.call("is_journal_open")), "key J opens the journal")
+		_check(int(player.get("state")) != 2, "key J does not start an attack (state=%d)" % int(player.get("state")))
+		_check(player.global_position.distance_to(before_journal) < 1.0, "journal open blocks movement")
+
+		var j_up := InputEventKey.new()
+		j_up.physical_keycode = KEY_J
+		j_up.keycode = KEY_J
+		j_up.pressed = false
+		Input.parse_input_event(j_up)
 		await physics_frame
-	var in_attack := int(player.get("state")) == 2
-	_check(in_attack, "key J starts an attack (state=%d)" % int(player.get("state")))
-	var attack_up := InputEventKey.new()
-	attack_up.physical_keycode = KEY_J
-	attack_up.keycode = KEY_J
-	attack_up.pressed = false
-	Input.parse_input_event(attack_up)
-	for i in range(30):
-		await physics_frame
+
+		var j_down2 := InputEventKey.new()
+		j_down2.physical_keycode = KEY_J
+		j_down2.keycode = KEY_J
+		j_down2.pressed = true
+		Input.parse_input_event(j_down2)
+		for i in range(4):
+			await physics_frame
+		_check(not bool(hud.call("is_journal_open")), "key J again closes the journal")
+		_check(not gs.ui_blocking, "ui_blocking cleared after closing the journal")
+
+		var j_up2 := InputEventKey.new()
+		j_up2.physical_keycode = KEY_J
+		j_up2.keycode = KEY_J
+		j_up2.pressed = false
+		Input.parse_input_event(j_up2)
+		for i in range(30):
+			await physics_frame
 
 	# Dash must be on Space per the spec.
 	var space := InputEventKey.new()

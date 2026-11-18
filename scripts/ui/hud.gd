@@ -21,11 +21,14 @@ var _dialogue_speaker: Label
 var _dialogue_text: Label
 var _inventory_panel: PanelContainer
 var _inventory_list: VBoxContainer
+var _journal_panel: PanelContainer
+var _journal_list: VBoxContainer
 var _pause_panel: PanelContainer
 var _hint_label: Label
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
+var _journal_open := false
 var _paused := false
 
 
@@ -138,7 +141,7 @@ func _build_ui() -> void:
 	column.add_child(_quest_label)
 
 	_hint_label = _make_text(
-		"WASD · ЛКМ/J удар · Space рывок · E действие · I инвентарь · F5/F9",
+		"WASD · ЛКМ/геймпад X удар · Space рывок · E действие · I инвентарь · J журнал · F5/F9",
 		Color(0.72, 0.74, 0.7)
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -147,6 +150,7 @@ func _build_ui() -> void:
 
 	_build_dialogue_panel()
 	_build_inventory_panel()
+	_build_journal_panel()
 	_build_pause_panel()
 
 
@@ -208,6 +212,31 @@ func _build_inventory_panel() -> void:
 	box.add_child(_inventory_list)
 
 	box.add_child(_make_text("1/2 — выпить настой", Color(0.62, 0.64, 0.6)))
+
+
+func _build_journal_panel() -> void:
+	_journal_panel = PanelContainer.new()
+	_journal_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_journal_panel.position = Vector2(-104, -70)
+	_journal_panel.custom_minimum_size = Vector2(208, 0)
+	_journal_panel.visible = false
+	_journal_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.06, 0.07, 0.09, 0.97)))
+	_root.add_child(_journal_panel)
+
+	var margin := MarginContainer.new()
+	for side in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+		margin.add_theme_constant_override(side, 6)
+	_journal_panel.add_child(margin)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	margin.add_child(box)
+
+	box.add_child(_make_text("Журнал заданий  [J] закрыть", Color(0.96, 0.86, 0.5)))
+
+	_journal_list = VBoxContainer.new()
+	_journal_list.add_theme_constant_override("separation", 1)
+	box.add_child(_journal_list)
 
 
 func _build_pause_panel() -> void:
@@ -403,23 +432,61 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
-	GameState.ui_blocking = _inventory_open or _paused
+	GameState.ui_blocking = _inventory_open or _journal_open or _paused
 	EventBus.dialogue_closed.emit()
 
 
 func _toggle_inventory() -> void:
 	_inventory_open = not _inventory_open
-	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _paused
 	if _inventory_open:
+		_journal_open = false
+		_journal_panel.visible = false
 		_refresh_inventory()
+	_inventory_panel.visible = _inventory_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused
+
+
+func _toggle_journal() -> void:
+	_journal_open = not _journal_open
+	if _journal_open:
+		_inventory_open = false
+		_inventory_panel.visible = false
+		_refresh_journal()
+	_journal_panel.visible = _journal_open
+	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused
+
+
+func _refresh_journal() -> void:
+	if _journal_list == null:
+		return
+	for child in _journal_list.get_children():
+		child.queue_free()
+	var shown := 0
+	for quest_id: String in QuestManager.quests.keys():
+		var q: Variant = QuestManager.quests[quest_id]
+		if not (q is Dictionary):
+			continue
+		var title := String((q as Dictionary).get("title", quest_id))
+		var state: String = QuestManager.state_of(quest_id)
+		if state == QuestManager.STATE_ACTIVE:
+			var line := "• %s — %d/%d" % [title, QuestManager.progress_of(quest_id), QuestManager.target_count(quest_id)]
+			_journal_list.add_child(_make_text(line, Color(0.9, 0.92, 0.86)))
+			shown += 1
+		elif state == QuestManager.STATE_READY:
+			_journal_list.add_child(_make_text("✔ %s — сдать" % title, Color(0.96, 0.86, 0.5)))
+			shown += 1
+		elif state == QuestManager.STATE_DONE:
+			_journal_list.add_child(_make_text("✓ %s — выполнено" % title, Color(0.55, 0.57, 0.55)))
+			shown += 1
+	if shown == 0:
+		_journal_list.add_child(_make_text("пока пусто", Color(0.6, 0.6, 0.58)))
 
 
 func _toggle_pause() -> void:
 	_paused = not _paused
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open
 	EventBus.game_paused.emit(_paused)
 
 
@@ -430,10 +497,15 @@ func _process(_delta: float) -> void:
 	if InputSource.is_action_just_pressed(&"pause"):
 		if _dialogue_open:
 			close_dialogue()
+		elif _journal_open:
+			_toggle_journal()
 		else:
 			_toggle_pause()
 		return
 	if _paused:
+		return
+	if InputSource.is_action_just_pressed(&"journal"):
+		_toggle_journal()
 		return
 	if InputSource.is_action_just_pressed(&"inventory"):
 		_toggle_inventory()
@@ -441,7 +513,7 @@ func _process(_delta: float) -> void:
 	if InputSource.is_action_just_pressed(&"interact") and _dialogue_open:
 		close_dialogue()
 		return
-	if _dialogue_open or _inventory_open:
+	if _dialogue_open or _inventory_open or _journal_open:
 		return
 	if InputSource.is_action_just_pressed(&"quick_slot_1"):
 		_use_item("health_potion")
@@ -463,6 +535,16 @@ func open_inventory_for_shot() -> void:
 	_inventory_open = true
 	_inventory_panel.visible = true
 	_refresh_inventory()
+
+
+func is_journal_open() -> bool:
+	return _journal_open
+
+
+func open_journal_for_shot() -> void:
+	_journal_open = true
+	_journal_panel.visible = true
+	_refresh_journal()
 
 
 func _use_item(item_id: String) -> void:
