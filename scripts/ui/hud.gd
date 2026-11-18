@@ -25,10 +25,12 @@ var _journal_panel: PanelContainer
 var _journal_list: VBoxContainer
 var _pause_panel: PanelContainer
 var _hint_label: Label
+var _map_panel: MapPanel
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
 var _journal_open := false
+var _map_open := false
 var _paused := false
 
 
@@ -141,7 +143,7 @@ func _build_ui() -> void:
 	column.add_child(_quest_label)
 
 	_hint_label = _make_text(
-		"WASD · ЛКМ/геймпад X удар · Space рывок · E действие · I инвентарь · J журнал · F5/F9",
+		"WASD · ЛКМ/геймпад X удар · Space рывок · E действие · I инвентарь · J журнал · M карта · F5/F9",
 		Color(0.72, 0.74, 0.7)
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -152,6 +154,17 @@ func _build_ui() -> void:
 	_build_inventory_panel()
 	_build_journal_panel()
 	_build_pause_panel()
+	_build_map_panel()
+
+
+func _build_map_panel() -> void:
+	var parent := get_parent()
+	var world: Node = parent.get_node_or_null("World") if parent != null else null
+	_map_panel = MapPanel.new()
+	_map_panel.name = "MapPanel"
+	_map_panel.setup(world)
+	_map_panel.visible = false
+	_root.add_child(_map_panel)
 
 
 func _build_dialogue_panel() -> void:
@@ -432,7 +445,7 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
-	GameState.ui_blocking = _inventory_open or _journal_open or _paused
+	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open
 	EventBus.dialogue_closed.emit()
 
 
@@ -443,7 +456,7 @@ func _toggle_inventory() -> void:
 		_journal_panel.visible = false
 		_refresh_inventory()
 	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open
 
 
 func _toggle_journal() -> void:
@@ -453,7 +466,7 @@ func _toggle_journal() -> void:
 		_inventory_panel.visible = false
 		_refresh_journal()
 	_journal_panel.visible = _journal_open
-	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused
+	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open
 
 
 func _refresh_journal() -> void:
@@ -486,7 +499,7 @@ func _toggle_pause() -> void:
 	_paused = not _paused
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open
 	EventBus.game_paused.emit(_paused)
 
 
@@ -494,6 +507,16 @@ func _toggle_pause() -> void:
 ## drive menus through one code path. Real InputEvents would be invisible to the
 ## bot, which is exactly the privileged/unequal access the spec forbids.
 func _process(_delta: float) -> void:
+	if _map_open:
+		if InputSource.is_action_just_pressed(&"pause") or InputSource.is_action_just_pressed(&"map"):
+			_close_map()
+			return
+		if _map_panel != null:
+			_map_panel.refresh()
+		return
+	if InputSource.is_action_just_pressed(&"map"):
+		_open_map()
+		return
 	if InputSource.is_action_just_pressed(&"pause"):
 		if _dialogue_open:
 			close_dialogue()
@@ -545,6 +568,35 @@ func open_journal_for_shot() -> void:
 	_journal_open = true
 	_journal_panel.visible = true
 	_refresh_journal()
+
+
+func _open_map() -> void:
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	_map_open = true
+	if _map_panel != null:
+		_map_panel.visible = true
+		_map_panel.refresh()
+	GameState.ui_blocking = true
+
+
+func _close_map() -> void:
+	_map_open = false
+	if _map_panel != null:
+		_map_panel.visible = false
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused
+
+
+func is_map_open() -> bool:
+	return _map_open
+
+
+func open_map_for_shot() -> void:
+	_open_map()
 
 
 func _use_item(item_id: String) -> void:

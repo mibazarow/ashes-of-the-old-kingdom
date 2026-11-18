@@ -14,6 +14,7 @@ const ACTIONS := {
 	"interact": [KEY_E],
 	"inventory": [KEY_I],
 	"journal": [KEY_J],
+	"map": [KEY_M],
 	"pause": [KEY_ESCAPE],
 	"quick_slot_1": [KEY_1],
 	"quick_slot_2": [KEY_2],

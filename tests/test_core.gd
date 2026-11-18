@@ -80,7 +80,10 @@ func _run() -> void:
 	print("== scene smoke ==")
 	await _test_scene_loads()
 
-	_check(completed.size() == 13, "every test group ran to completion (got %d/13)" % completed.size())
+	print("== map panel ==")
+	await _test_map_panel()
+
+	_check(completed.size() == 14, "every test group ran to completion (got %d/14)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -470,4 +473,120 @@ func _test_scene_loads() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["scene"] = true
+
+
+## Zone map on M: explored-only tiles, fog, landmarks, and input blocking.
+func _test_map_panel() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var hud := scene.get_node_or_null("HUD")
+	var world := scene.get_node_or_null("World")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and world != null and player != null, "hud, world and player present for map test")
+	if hud == null or world == null or player == null:
+		scene.queue_free()
+		await process_frame
+		return
+
+	_check(InputMap.has_action(&"map"), "map action exists")
+	var map_has_m := false
+	for ev in InputMap.action_get_events(&"map"):
+		if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_M:
+			map_has_m = true
+	_check(map_has_m, "map action is bound to key M")
+
+	_check(Vector2i(world.call("map_size")) == Vector2i(52, 32), "map_size matches the 52x32 grid")
+	var explored: Array = world.call("explored_tiles")
+	_check(explored.size() > 0, "explored tiles are non-empty right after load")
+	var ptile: Vector2i = world.call("player_tile")
+	_check(bool(world.call("is_explored", ptile)), "player tile is explored")
+	_check(explored.size() < 52 * 32, "fog works: explored set is smaller than the whole map")
+
+	var lms: Array = world.call("landmarks")
+	_check(lms.size() >= 3, "landmarks returns at least three entries")
+	var landmarks_ok := lms.size() >= 3
+	for lm in lms:
+		var entry: Dictionary = lm
+		if String(entry.get("id", "")) == "" or String(entry.get("kind", "")) == "":
+			landmarks_ok = false
+	_check(landmarks_ok, "every landmark has a non-empty id and kind")
+
+	_check(String(world.call("cell_at", Vector2i(0, 0))) == "#", "border tile reads as stone wall")
+	_check(String(world.call("cell_at", ptile)) != "", "player tile has a non-empty cell")
+	_check(String(world.call("cell_at", Vector2i(-1, -1))) == "", "out-of-bounds cell is empty")
+
+	# A real M key press opens the map and blocks gameplay input.
+	var m_down := InputEventKey.new()
+	m_down.physical_keycode = KEY_M
+	m_down.keycode = KEY_M
+	m_down.pressed = true
+	Input.parse_input_event(m_down)
+	for i in range(4):
+		await physics_frame
+	_check(bool(hud.call("is_map_open")), "key M opens the map")
+	_check(gs.ui_blocking, "ui_blocking is true while the map is open")
+
+	var before := player.global_position
+	var d_down := InputEventKey.new()
+	d_down.physical_keycode = KEY_D
+	d_down.keycode = KEY_D
+	d_down.pressed = true
+	Input.parse_input_event(d_down)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) < 2.0, "map open blocks movement")
+	var d_up := InputEventKey.new()
+	d_up.physical_keycode = KEY_D
+	d_up.keycode = KEY_D
+	d_up.pressed = false
+	Input.parse_input_event(d_up)
+
+	var m_up := InputEventKey.new()
+	m_up.physical_keycode = KEY_M
+	m_up.keycode = KEY_M
+	m_up.pressed = false
+	Input.parse_input_event(m_up)
+	await physics_frame
+
+	var m_down2 := InputEventKey.new()
+	m_down2.physical_keycode = KEY_M
+	m_down2.keycode = KEY_M
+	m_down2.pressed = true
+	Input.parse_input_event(m_down2)
+	for i in range(4):
+		await physics_frame
+	_check(not bool(hud.call("is_map_open")), "key M again closes the map")
+	_check(not gs.ui_blocking, "ui_blocking cleared after closing the map")
+	var m_up2 := InputEventKey.new()
+	m_up2.physical_keycode = KEY_M
+	m_up2.keycode = KEY_M
+	m_up2.pressed = false
+	Input.parse_input_event(m_up2)
+	await physics_frame
+
+	# Movement must work again once the map is closed.
+	var d_down2 := InputEventKey.new()
+	d_down2.physical_keycode = KEY_D
+	d_down2.keycode = KEY_D
+	d_down2.pressed = true
+	Input.parse_input_event(d_down2)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) > 4.0, "movement works again after closing the map")
+	var d_up2 := InputEventKey.new()
+	d_up2.physical_keycode = KEY_D
+	d_up2.keycode = KEY_D
+	d_up2.pressed = false
+	Input.parse_input_event(d_up2)
+	for i in range(6):
+		await physics_frame
+
+	scene.queue_free()
+	await process_frame
+	completed["map"] = true
 

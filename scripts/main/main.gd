@@ -39,6 +39,17 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_journal_for_shot")
+	elif ui_probe == "map":
+		# Walk the player east along the road so the explored area grows past the
+		# spawn clearing and the trap landmark falls inside the visited radius.
+		var world := get_node_or_null("World")
+		if world != null:
+			var player := world.get_node_or_null("Player") as Node2D
+			if player != null:
+				player.position = Vector2(21 * 16 + 8, 9 * 16 + 8)
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_map_for_shot")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

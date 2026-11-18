@@ -29,12 +29,99 @@ var player: Node2D
 var tile_layer: TileMapLayer
 var _map: Array[String] = []
 
+## Radius (in tiles) around the player that counts as explored on the map.
+const VISIT_RADIUS := 3
+
+## Tiles the player has seen, keyed by Vector2i. Read-only for the map panel.
+var _visited: Dictionary = {}
+var _last_visited_tile := Vector2i(-9999, -9999)
+
+## Points of interest kept as live node references so the map can show them
+## without fragile path lookups. Populated in _spawn_actors.
+var _npc_node: Node2D
+var _chest_node: Node2D
+var _trap_node: Node2D
+
 
 func _ready() -> void:
 	_generate_map()
 	_build_tileset_and_layer()
 	_spawn_actors()
 	_configure_camera()
+	_last_visited_tile = player_tile()
+	_mark_visited(_last_visited_tile)
+
+
+func _process(_delta: float) -> void:
+	var tile := player_tile()
+	if tile == _last_visited_tile:
+		return
+	_last_visited_tile = tile
+	_mark_visited(tile)
+
+
+func _mark_visited(center: Vector2i) -> void:
+	for dy in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+		for dx in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+			var t := Vector2i(center.x + dx, center.y + dy)
+			if t.x < 0 or t.y < 0 or t.x >= MAP_W or t.y >= MAP_H:
+				continue
+			_visited[t] = true
+
+
+func map_size() -> Vector2i:
+	return Vector2i(MAP_W, MAP_H)
+
+
+func cell_at(tile: Vector2i) -> String:
+	if tile.x < 0 or tile.y < 0 or tile.y >= _map.size():
+		return ""
+	var row: String = _map[tile.y]
+	if tile.x >= row.length():
+		return ""
+	return row[tile.x]
+
+
+func is_explored(tile: Vector2i) -> bool:
+	return _visited.has(tile)
+
+
+func explored_tiles() -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for key: Vector2i in _visited.keys():
+		out.append(key)
+	return out
+
+
+func player_tile() -> Vector2i:
+	if player == null:
+		return Vector2i(-1, -1)
+	return Vector2i(
+		floori(player.global_position.x / float(TILE)),
+		floori(player.global_position.y / float(TILE))
+	)
+
+
+func landmarks() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for entry: Array in [
+		["Edrik", "npc", _npc_node],
+		["Chest", "chest", _chest_node],
+		["Trap", "trap", _trap_node],
+	]:
+		var node: Node2D = entry[2]
+		if node == null or not is_instance_valid(node):
+			continue
+		out.append({
+			"id": String(entry[0]),
+			"kind": String(entry[1]),
+			"tile": Vector2i(
+				floori(node.global_position.x / float(TILE)),
+				floori(node.global_position.y / float(TILE))
+			),
+		})
+	return out
+
 
 
 func _generate_map() -> void:
@@ -149,12 +236,15 @@ func _spawn_actors() -> void:
 
 	var npc := _instantiate(NPC_SCENE, _tile_center(7, 9), "Edrik")
 	npc.name = "Edrik"
+	_npc_node = npc
 
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"
+	_chest_node = chest
 
 	var trap := _instantiate(TRAP_SCENE, _tile_center(24, 9), "Trap")
 	trap.name = "Trap"
+	_trap_node = trap
 
 	_spawn_enemy(WOLF_SCENE, 18, 14, "WolfA")
 	_spawn_enemy(WOLF_SCENE, 21, 16, "WolfB")
