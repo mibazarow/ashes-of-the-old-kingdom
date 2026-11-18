@@ -48,9 +48,6 @@ func _apply_pending_load() -> void:
 		return
 	var res: Dictionary = SaveManager.load_game(slot)
 	if bool(res.get("ok", false)):
-		var pos: Array = res.get("player_position", [])
-		if pos.size() == 2 and world.get("player") != null:
-			world.get("player").global_position = Vector2(float(pos[0]), float(pos[1]))
 		Telemetry.event(&"load_on_start", {"slot": slot})
 
 

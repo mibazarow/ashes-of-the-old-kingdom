@@ -34,7 +34,8 @@ func _ready() -> void:
 
 func _make_run_id() -> String:
 	var stamp := Time.get_datetime_string_from_system(false, true)
-	stamp = stamp.replace("-", "").replace(":", "").replace("T", "-")
+	# "2026-11-18 18:17:11" -> "20261118-181711"; spaces are not safe in paths.
+	stamp = stamp.replace("-", "").replace(":", "").replace(" ", "-").replace("T", "-")
 	return "%s-%03d" % [stamp, Time.get_ticks_msec() % 1000]
 
 

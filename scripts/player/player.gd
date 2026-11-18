@@ -52,6 +52,7 @@ func _ready() -> void:
 	attack_shape.disabled = true
 	EventBus.player_died.connect(_on_player_died)
 	EventBus.player_health_changed.connect(_on_health_changed)
+	EventBus.save_loaded.connect(_on_save_loaded)
 
 
 func get_defense() -> int:
@@ -258,6 +259,14 @@ func receive_damage(amount: int, info: Dictionary = {}) -> void:
 	modulate = Color(1.0, 0.45, 0.45)
 	_spawn_damage_number(amount, Color(1.0, 0.35, 0.3))
 	Telemetry.event(&"player_hit", {"amount": amount, "source": info.get("attacker_id", 0)})
+
+
+func _on_save_loaded(pos: Vector2) -> void:
+	global_position = pos
+	velocity = Vector2.ZERO
+	state = State.IDLE
+	_iframe_left = 0.6
+	spawn_point = pos
 
 
 func _on_health_changed(current: int, _maximum: int) -> void:

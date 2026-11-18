@@ -159,6 +159,8 @@ func _spawn_actors() -> void:
 	_spawn_enemy(WOLF_SCENE, 18, 14, "WolfA")
 	_spawn_enemy(WOLF_SCENE, 21, 16, "WolfB")
 	_spawn_enemy(WOLF_SCENE, 25, 13, "WolfC")
+	_spawn_enemy(WOLF_SCENE, 30, 18, "WolfD")
+	_spawn_enemy(WOLF_SCENE, 34, 20, "WolfE")
 	_spawn_enemy(WOLF_SCENE, MAP_W - 6, 6, "ArcherA")
 
 	_instantiate(PICKUP_SCENE, _tile_center(13, 10), "PickupA")

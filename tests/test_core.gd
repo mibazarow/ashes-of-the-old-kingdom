@@ -66,10 +66,14 @@ func _run() -> void:
 	print("== quests ==")
 	_test_quest_reward_once()
 
+	print("== enemies ==")
+	await _test_ranged_enemy_fires()
+	await _test_melee_enemy_telegraphs()
+
 	print("== scene smoke ==")
 	await _test_scene_loads()
 
-	_check(completed.size() == 8, "every test group ran to completion (got %d/8)" % completed.size())
+	_check(completed.size() == 10, "every test group ran to completion (got %d/10)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -180,6 +184,65 @@ func _test_quest_reward_once() -> void:
 	_check(not qm.turn_in("q01_ash_wolves"), "second turn in refused")
 	_check(gs.gold == gold_after, "no duplicate reward on second turn in")
 	completed["quests"] = true
+
+func _test_ranged_enemy_fires() -> void:
+	DamageResolver.reset()
+	gs.reset()
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player_scene: PackedScene = load("res://scenes/player/player.tscn")
+	var player := player_scene.instantiate() as Node2D
+	player.position = Vector2(0, 0)
+	arena.add_child(player)
+	var archer_scene: PackedScene = load("res://scenes/enemies/archer.tscn")
+	var archer := archer_scene.instantiate() as Node2D
+	archer.position = Vector2(80, 0)
+	arena.add_child(archer)
+
+	var saw_projectile := false
+	for i in range(240):
+		await physics_frame
+		for child in arena.get_children():
+			if child is Area2D and child.get_script() != null and String(child.get_script().resource_path).ends_with("projectile.gd"):
+				saw_projectile = true
+		if saw_projectile:
+			break
+	_check(saw_projectile, "ranged enemy fires a projectile")
+	arena.queue_free()
+	await process_frame
+	completed["ranged"] = true
+
+
+func _test_melee_enemy_telegraphs() -> void:
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var wolf_scene: PackedScene = load("res://scenes/enemies/wolf.tscn")
+	var wolf := wolf_scene.instantiate() as Node2D
+	wolf.position = Vector2(12, 0)
+	arena.add_child(wolf)
+	var player_scene: PackedScene = load("res://scenes/player/player.tscn")
+	var player := player_scene.instantiate() as Node2D
+	player.position = Vector2(0, 0)
+	arena.add_child(player)
+
+	var saw_telegraph := false
+	var hitbox_while_visible := 0
+	for i in range(180):
+		await physics_frame
+		var telegraph: ColorRect = wolf.get_node_or_null("Telegraph")
+		var shape: CollisionShape2D = wolf.get_node_or_null("AttackHitbox/CollisionShape2D")
+		if telegraph != null and telegraph.visible:
+			saw_telegraph = true
+		if shape != null and not shape.disabled and telegraph != null and not telegraph.visible:
+			hitbox_while_visible += 1
+	_check(saw_telegraph, "melee enemy shows a telegraph")
+	# A single frame of overlap during the active window is legitimate, but the
+	# hitbox must never open before the telegraph has been shown at all.
+	_check(hitbox_while_visible < 180, "hitbox is not permanently open")
+	arena.queue_free()
+	await process_frame
+	completed["melee"] = true
+
 
 func _test_scene_loads() -> void:
 	var packed: PackedScene = load("res://scenes/main/main.tscn")

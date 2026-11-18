@@ -54,8 +54,9 @@ Godot 4.7.2 уже установлен (`/Applications/Godot.app`, CLI `godot`)
 - **Логи** — `user://debug_runs/<run_id>/`: `events.jsonl`, `combat.jsonl`,
   `decisions.jsonl`, `errors.log`, `run_meta.json`, `summary.md`. Ошибки движка
   попадают в `errors.log` через `OS.add_logger`.
-- **Отладочный бот** — управляет игроком через тот же `InputSource`, что и
-  человек; не телепортируется и не читает скрытое состояние.
+- **Отладочный бот** — 6 сценариев, управляет игроком через тот же
+  `InputSource`, что и человек; не телепортируется и не читает скрытое
+  состояние. Умеет обходить препятствия и пишет свои решения в лог.
 
 ## Проверки
 
@@ -68,7 +69,8 @@ godot --headless --path . -- --bot=BOT-001   # дойти до NPC и взять
 godot --headless --path . -- --bot=BOT-002   # полный цикл квеста
 godot --headless --path . -- --bot=BOT-008   # убить врага
 godot --headless --path . -- --bot=BOT-009   # save/load
-godot --headless --path . -- --bot=BOT-010   # soak
+godot --headless --path . -- --bot=BOT-010   # soak с движением по карте
+godot --headless --path . -- --bot=BOT-011   # игрок получает урон
 
 # скриншот без ручного запуска
 PEPEL_SCREENSHOT=/tmp/shot.png godot --path .

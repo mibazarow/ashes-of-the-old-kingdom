@@ -98,6 +98,13 @@ func load_game(slot: int) -> Dictionary:
 	GameState.from_dict(payload.get("game_state", {}))
 	QuestManager.from_dict(payload.get("quests", {}))
 	Telemetry.event(&"save_loaded", {"slot": slot, "schema": int(payload.get("schema_version", 0))})
+
+	# Tell the player where the save left them. This is the player's own saved
+	# position, not a shortcut into world state.
+	var pos_raw: Array = payload.get("player_position", [])
+	if pos_raw.size() == 2:
+		EventBus.save_loaded.emit(Vector2(float(pos_raw[0]), float(pos_raw[1])))
+
 	return {
 		"ok": true,
 		"slot": slot,

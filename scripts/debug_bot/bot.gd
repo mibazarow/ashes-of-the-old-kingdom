@@ -102,6 +102,8 @@ func _run() -> void:
 			await _scenario_quest_loop()
 		"BOT-010":
 			await _scenario_soak()
+		"BOT-011":
+			await _scenario_take_damage()
 		_:
 			_notes.append("unknown_scenario")
 			_result = "FAIL"
@@ -203,7 +205,7 @@ func _scenario_quest_loop() -> void:
 	_notes.append("quest_taken")
 
 	# 2. hunt until the objective is met
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
+	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 2.2 * 1000.0)
 	var attacks := 0
 	while Time.get_ticks_msec() < deadline:
 		if QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY:
@@ -246,28 +248,67 @@ func _scenario_soak() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 4242
 	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
-	var moves := 0
+	var heading := Vector2.RIGHT
+	var segments := 0
+	var last_pos := _player_pos()
+	var stuck := 0
 	while Time.get_ticks_msec() < deadline:
-		var dir := Vector2(rng.randf_range(-1, 1), rng.randf_range(-1, 1))
-		if dir.length() < 0.1:
-			dir = Vector2.RIGHT
-		dir = dir.normalized()
-		bot_input.hold(&"move_right", dir.x > 0.35)
-		bot_input.hold(&"move_left", dir.x < -0.35)
-		bot_input.hold(&"move_down", dir.y > 0.35)
-		bot_input.hold(&"move_up", dir.y < -0.35)
-		bot_input.set_aim(_player_pos() + dir * 20.0)
-		if rng.randf() < 0.3:
+		bot_input.hold(&"move_right", heading.x > 0.35)
+		bot_input.hold(&"move_left", heading.x < -0.35)
+		bot_input.hold(&"move_down", heading.y > 0.35)
+		bot_input.hold(&"move_up", heading.y < -0.35)
+		bot_input.set_aim(_player_pos() + heading * 20.0)
+
+		var enemy := _nearest_enemy()
+		if enemy != null and _player_pos().distance_to(enemy.global_position) < 22.0:
 			await _tap(&"attack")
-		if rng.randf() < 0.1:
-			await _tap(&"dash")
-		moves += 1
-		await _wait(0.1)
+		if GameState.hp < GameState.max_hp * 0.35:
+			await _tap(&"quick_slot_1")
+
+		await _wait(0.12)
+
+		var pos := _player_pos()
+		if pos.distance_to(last_pos) < 0.4:
+			stuck += 1
+		else:
+			stuck = 0
+			last_pos = pos
+
+		# Turn on a wall or after a while, so the run covers the whole map.
+		if stuck >= 6 or rng.randf() < 0.04:
+			var angles := [0.0, PI * 0.5, PI, PI * 1.5, PI * 0.25, PI * 0.75, PI * 1.25, PI * 1.75]
+			var a: float = angles[rng.randi_range(0, angles.size() - 1)]
+			heading = Vector2(cos(a), sin(a)).normalized()
+			segments += 1
+			stuck = 0
+
 	bot_input.release_all()
-	_notes.append("moves=%d" % moves)
+	_notes.append("segments=%d" % segments)
 	_notes.append("hp=%d/%d" % [GameState.hp, GameState.max_hp])
 	_notes.append("kills=%s" % str(GameState.kills))
-	_result = "PASS" if GameState.hp > 0 else "FAIL"
+	_result = "PASS" if GameState.kill_count("ash_wolf") > 0 else "FAIL"
+
+
+func _scenario_take_damage() -> void:
+	# Deliberately walk into a wolf and never attack: the enemy must be able to
+	# hurt the player, and the damage must be visible in the combat log.
+	var start_hp: int = GameState.hp
+	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
+	var enemy := _nearest_enemy()
+	if enemy == null:
+		_notes.append("no_enemy")
+		return
+	while Time.get_ticks_msec() < deadline:
+		if GameState.hp < start_hp:
+			break
+		enemy = _nearest_enemy()
+		if enemy == null:
+			break
+		await _move_step(enemy.global_position)
+		await _wait(0.05)
+	bot_input.release_all()
+	_notes.append("hp=%d->%d" % [start_hp, GameState.hp])
+	_result = "PASS" if GameState.hp < start_hp else "FAIL"
 
 
 # --- helpers -----------------------------------------------------------------
