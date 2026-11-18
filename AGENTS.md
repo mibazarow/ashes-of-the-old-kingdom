@@ -1,6 +1,7 @@
 # AGENTS.md — правила работы над проектом
 
-Проект: «Пепел старого королевства», Godot 4.7.2, корень `/Users/mb/Downloads`.
+Проект: «Пепел старого королевства», Godot 4.7.2, корень
+`/Users/mb/Documents/hdd_camouf_ru/MY_PET_PROJECTS/AINZ_MIND/pepl-game`.
 Источники требований и плана:
 
 1. `Pepl_staryogo_korolevstva_TZ_RPG_Godot_v2.md` — техническое задание.
@@ -89,7 +90,8 @@
 Шаблон (по-английски, как и положено):
 
 ```
-Context: Godot 4.7.2 project at /Users/mb/Downloads, 2D action RPG slice.
+Context: Godot 4.7.2 project at
+/Users/mb/Documents/hdd_camouf_ru/MY_PET_PROJECTS/AINZ_MIND/pepl-game, 2D action RPG slice.
 Goal: <one sentence>.
 Files you may edit: <exact paths>.
 Do not touch: <paths>.

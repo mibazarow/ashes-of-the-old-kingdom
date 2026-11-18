@@ -7,14 +7,18 @@
 ## Запуск
 
 ```bash
+# из корня проекта
+cd /Users/mb/Documents/hdd_camouf_ru/MY_PET_PROJECTS/AINZ_MIND/pepl-game
+
 # редактор
-open /Applications/Godot.app --args --path /Users/mb/Downloads
+open /Applications/Godot.app --args --path "$PWD"
 
 # игра из терминала
-godot --path /Users/mb/Downloads
+godot --path .
 ```
 
-Godot 4.7.2 уже установлен (`/Applications/Godot.app`, CLI `godot`).
+Godot 4.7.2 уже установлен: `/Applications/Godot.app`, CLI —
+`/opt/homebrew/bin/godot` (симлинк на бинарник внутри `.app`).
 
 ## Управление
 

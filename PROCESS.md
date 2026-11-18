@@ -40,7 +40,7 @@
 | Параметр | Значение |
 | --- | --- |
 | Движок | Godot `4.7.2.stable.official.ed1daf0bf` |
-| Корень проекта | `/Users/mb/Downloads` |
+| Корень проекта | `/Users/mb/Documents/hdd_camouf_ru/MY_PET_PROJECTS/AINZ_MIND/pepl-game` |
 | Этап по §23 ТЗ | Гейт 2 (вертикальный срез) — закрыт, Гейт 3 в работе |
 | Тесты | `checks: 55  failures: 0` |
 | Боты | BOT-001/002/008/009/010/011 — PASS |
