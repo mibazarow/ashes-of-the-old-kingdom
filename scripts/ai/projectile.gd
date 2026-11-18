@@ -32,13 +32,15 @@ func _physics_process(delta: float) -> void:
 
 
 func _on_body_entered(body: Node) -> void:
-	if _spent or body == shooter:
+	if _spent or body == null or body == shooter:
 		return
+	_spent = true
 	if body.has_method("receive_damage"):
-		_spent = true
 		DamageResolver.resolve_hit(shooter, body, {
 			"damage": damage,
 			"hit_id": DamageResolver.make_hit_id(get_instance_id(), 1),
 			"damage_type": "physical",
 		})
-		queue_free()
+	# Anything without receive_damage (walls, trees, any solid body) absorbs
+	# the projectile without taking damage.
+	queue_free()

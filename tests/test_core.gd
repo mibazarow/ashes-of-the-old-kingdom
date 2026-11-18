@@ -90,7 +90,10 @@ func _run() -> void:
 	print("== bot quest target ==")
 	await _test_bot_quest_target()
 
-	_check(completed.size() == 17, "every test group ran to completion (got %d/17)" % completed.size())
+	print("== projectile vs walls ==")
+	await _test_projectile_wall_collision()
+
+	_check(completed.size() == 18, "every test group ran to completion (got %d/18)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -767,4 +770,102 @@ func _test_bot_quest_target() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["bot_quest_target"] = true
+
+
+## Defect #2 regression: an enemy projectile must stop at walls and trees
+## (TileMapLayer collision, physics layer 1) instead of flying through them,
+## and a wall hit must not damage the player. The solid tile and the open
+## control stretch are located by scanning the deterministic map through the
+## public Forest API (map_size / cell_at), never hardcoded.
+func _test_projectile_wall_collision() -> void:
+	DamageResolver.reset()
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(world != null and player != null, "world and player present for projectile-wall test")
+	if world == null or player == null:
+		scene.queue_free()
+		await process_frame
+		completed["projectile_wall"] = true
+		return
+
+	var size: Vector2i = world.call("map_size")
+	# First solid tile whose two tiles to the left are open, so the projectile
+	# starts on clear ground and flies straight right into the solid one.
+	var solid := Vector2i(-1, -1)
+	for y in range(2, size.y - 2):
+		for x in range(4, size.x - 2):
+			var cell := String(world.call("cell_at", Vector2i(x, y)))
+			var left1 := String(world.call("cell_at", Vector2i(x - 1, y)))
+			var left2 := String(world.call("cell_at", Vector2i(x - 2, y)))
+			if (cell == "#" or cell == "T") and left1 != "#" and left1 != "T" \
+					and left2 != "#" and left2 != "T":
+				solid = Vector2i(x, y)
+				break
+		if solid.x >= 0:
+			break
+	_check(solid.x >= 0, "found a solid wall/tree tile with an open approach")
+
+	# First stretch of 10 open tiles in a row for the control case.
+	var open_run := Vector2i(-1, -1)
+	for y in range(2, size.y - 2):
+		for x in range(3, size.x - 11):
+			var clear := true
+			for dx in range(0, 10):
+				var c := String(world.call("cell_at", Vector2i(x + dx, y)))
+				if c == "#" or c == "T":
+					clear = false
+					break
+			if clear:
+				open_run = Vector2i(x, y)
+				break
+		if open_run.x >= 0:
+			break
+	_check(open_run.x >= 0, "found an open ground stretch for the control case")
+	if solid.x < 0 or open_run.x < 0:
+		scene.queue_free()
+		await process_frame
+		completed["projectile_wall"] = true
+		return
+
+	var hp_before: int = gs.hp
+	var wall_center := Vector2(solid.x * 16 + 8, solid.y * 16 + 8)
+	var proj := (load("res://scenes/items/projectile.tscn") as PackedScene).instantiate()
+	proj.setup(Vector2.RIGHT, 6, null)
+	proj.global_position = wall_center + Vector2(-32, 0)
+	world.add_child(proj)
+	var freed_frame := -1
+	for i in range(60):
+		await physics_frame
+		if not is_instance_valid(proj):
+			freed_frame = i
+			break
+	_check(freed_frame >= 0, "projectile is freed when it hits a wall/tree (frame %d)" % freed_frame)
+	_check(gs.hp == hp_before, "wall hit does not damage the player")
+
+	# Control: the same projectile over open ground must keep flying.
+	var ctrl := (load("res://scenes/items/projectile.tscn") as PackedScene).instantiate()
+	ctrl.setup(Vector2.RIGHT, 6, null)
+	ctrl.global_position = Vector2(open_run.x * 16 + 8, open_run.y * 16 + 8)
+	world.add_child(ctrl)
+	var survived := true
+	for i in range(30):
+		await physics_frame
+		if not is_instance_valid(ctrl):
+			survived = false
+			break
+	_check(survived, "control projectile survives 30 frames over open ground")
+	_check(gs.hp == hp_before, "control flight does not damage the player")
+	if is_instance_valid(ctrl):
+		ctrl.queue_free()
+
+	scene.queue_free()
+	await process_frame
+	completed["projectile_wall"] = true
 
