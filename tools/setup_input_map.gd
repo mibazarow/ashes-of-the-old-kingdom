@@ -26,21 +26,34 @@ func _init() -> void:
 	for action: String in ACTIONS:
 		var events: Array[InputEvent] = []
 		for code: int in ACTIONS[action]:
-			var key := InputEventKey.new()
-			key.physical_keycode = code
-			events.append(key)
+			events.append(_key(code))
 		ProjectSettings.set_setting("input/" + action, {"deadzone": 0.2, "events": events})
 
-	var mouse := InputEventMouseButton.new()
-	mouse.button_index = MOUSE_BUTTON_LEFT
-	var attack_events: Array[InputEvent] = [mouse]
+	# attack is mouse-driven per the spec, with the keyboard and gamepad as
+	# alternatives. Build the whole list at once: assigning twice silently
+	# dropped the earlier events.
+	var attack_events: Array[InputEvent] = [_mouse_left(), _key(KEY_J), _joy(JOY_BUTTON_X)]
 	ProjectSettings.set_setting("input/attack", {"deadzone": 0.2, "events": attack_events})
-
-	var joy_attack := InputEventJoypadButton.new()
-	joy_attack.button_index = JOY_BUTTON_X
-	var with_joy: Array[InputEvent] = [mouse, joy_attack]
-	ProjectSettings.set_setting("input/attack", {"deadzone": 0.2, "events": with_joy})
 
 	var err := ProjectSettings.save()
 	print("input map written, save error=", err)
 	quit(0)
+
+
+func _key(code: int) -> InputEventKey:
+	var key := InputEventKey.new()
+	key.physical_keycode = code
+	key.keycode = code
+	return key
+
+
+func _mouse_left() -> InputEventMouseButton:
+	var mouse := InputEventMouseButton.new()
+	mouse.button_index = MOUSE_BUTTON_LEFT
+	return mouse
+
+
+func _joy(button: int) -> InputEventJoypadButton:
+	var joy := InputEventJoypadButton.new()
+	joy.button_index = button
+	return joy

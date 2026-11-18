@@ -70,10 +70,13 @@ func _run() -> void:
 	await _test_ranged_enemy_fires()
 	await _test_melee_enemy_telegraphs()
 
+	print("== human input path ==")
+	await _test_human_keyboard_moves_player()
+
 	print("== scene smoke ==")
 	await _test_scene_loads()
 
-	_check(completed.size() == 10, "every test group ran to completion (got %d/10)" % completed.size())
+	_check(completed.size() == 11, "every test group ran to completion (got %d/11)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -242,6 +245,104 @@ func _test_melee_enemy_telegraphs() -> void:
 	arena.queue_free()
 	await process_frame
 	completed["melee"] = true
+
+
+## The bot drives InputSource directly. This test proves the *human* path also
+## works: a real InputEventKey pressed through Input must move the player.
+func _test_human_keyboard_moves_player() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var player := get_first_node_in_group("player") as Node2D
+	if player == null:
+		_check(false, "player present for input test")
+		return
+
+	var start := player.global_position
+	var press := InputEventKey.new()
+	press.physical_keycode = KEY_D
+	press.keycode = KEY_D
+	press.pressed = true
+	Input.parse_input_event(press)
+
+	for i in range(20):
+		await physics_frame
+
+	var moved := player.global_position.x - start.x
+
+	var release := InputEventKey.new()
+	release.physical_keycode = KEY_D
+	release.keycode = KEY_D
+	release.pressed = false
+	Input.parse_input_event(release)
+	await physics_frame
+
+	_check(moved > 4.0, "real key event moves the player right (dx=%.1f)" % moved)
+
+	var idle_start := player.global_position
+	for i in range(10):
+		await physics_frame
+	_check(player.global_position.distance_to(idle_start) < 2.0, "player stops after key release")
+
+	# Attack must be reachable from the keyboard too, not only from the bot.
+	var attack := InputEventKey.new()
+	attack.physical_keycode = KEY_J
+	attack.keycode = KEY_J
+	attack.pressed = true
+	Input.parse_input_event(attack)
+	for i in range(3):
+		await physics_frame
+	var in_attack := int(player.get("state")) == 2
+	_check(in_attack, "key J starts an attack (state=%d)" % int(player.get("state")))
+	var attack_up := InputEventKey.new()
+	attack_up.physical_keycode = KEY_J
+	attack_up.keycode = KEY_J
+	attack_up.pressed = false
+	Input.parse_input_event(attack_up)
+	for i in range(30):
+		await physics_frame
+
+	# Dash must be on Space per the spec.
+	var space := InputEventKey.new()
+	space.physical_keycode = KEY_SPACE
+	space.keycode = KEY_SPACE
+	space.pressed = true
+	Input.parse_input_event(space)
+	for i in range(3):
+		await physics_frame
+	_check(int(player.get("state")) == 3, "Space starts a dash (state=%d)" % int(player.get("state")))
+	var space_up := InputEventKey.new()
+	space_up.physical_keycode = KEY_SPACE
+	space_up.keycode = KEY_SPACE
+	space_up.pressed = false
+	Input.parse_input_event(space_up)
+	for i in range(40):
+		await physics_frame
+
+	# Left mouse button must also attack.
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.pressed = true
+	click.position = Vector2(240, 135)
+	Input.parse_input_event(click)
+	for i in range(3):
+		await physics_frame
+	_check(int(player.get("state")) == 2, "left mouse button starts an attack (state=%d)" % int(player.get("state")))
+	var unclick := InputEventMouseButton.new()
+	unclick.button_index = MOUSE_BUTTON_LEFT
+	unclick.pressed = false
+	unclick.position = Vector2(240, 135)
+	Input.parse_input_event(unclick)
+	for i in range(30):
+		await physics_frame
+
+	scene.queue_free()
+	await process_frame
+	completed["human_input"] = true
 
 
 func _test_scene_loads() -> void:
