@@ -4,6 +4,7 @@ extends CanvasLayer
 
 const BAR_W := 92.0
 const BAR_H := 7.0
+const QUICK_SLOT_ACTIONS := [&"quick_slot_1", &"quick_slot_2", &"quick_slot_3", &"quick_slot_4"]
 
 var _root: Control
 var _hp_bar: ProgressBar
@@ -21,6 +22,7 @@ var _dialogue_speaker: Label
 var _dialogue_text: Label
 var _inventory_panel: PanelContainer
 var _inventory_list: VBoxContainer
+var _quick_slot_list: VBoxContainer
 var _journal_panel: PanelContainer
 var _journal_list: VBoxContainer
 var _pause_panel: PanelContainer
@@ -224,7 +226,11 @@ func _build_inventory_panel() -> void:
 	_inventory_list.add_theme_constant_override("separation", 1)
 	box.add_child(_inventory_list)
 
-	box.add_child(_make_text("1/2 — выпить настой", Color(0.62, 0.64, 0.6)))
+	# Quick slots live here instead of a static hint so a re-assigned slot shows
+	# up without a rebuild. Four short lines keep the panel inside 480x270.
+	_quick_slot_list = VBoxContainer.new()
+	_quick_slot_list.add_theme_constant_override("separation", 1)
+	box.add_child(_quick_slot_list)
 
 
 func _build_journal_panel() -> void:
@@ -379,6 +385,7 @@ func _on_gold(amount: int) -> void:
 func _refresh_inventory() -> void:
 	if _inventory_list == null:
 		return
+	_refresh_quick_slots()
 	for child in _inventory_list.get_children():
 		child.queue_free()
 	if GameState.inventory.is_empty():
@@ -395,6 +402,20 @@ func _refresh_inventory() -> void:
 			label += "  [надето]"
 		var row := _make_text(label, Color(0.9, 0.92, 0.86))
 		_inventory_list.add_child(row)
+
+
+## One line per quick slot: "1: Настой здоровья", empty slots show "—".
+func _refresh_quick_slots() -> void:
+	if _quick_slot_list == null:
+		return
+	for child in _quick_slot_list.get_children():
+		child.queue_free()
+	for index in GameState.QUICK_SLOT_COUNT:
+		var item_id := GameState.quick_slot_item(index)
+		var shown := ItemDB.display_name(item_id) if item_id != "" else "—"
+		_quick_slot_list.add_child(
+			_make_text("%d: %s" % [index + 1, shown], Color(0.62, 0.64, 0.6))
+		)
 
 
 func _refresh_quest() -> void:
@@ -538,12 +559,11 @@ func _process(_delta: float) -> void:
 		return
 	if _dialogue_open or _inventory_open or _journal_open:
 		return
-	if InputSource.is_action_just_pressed(&"quick_slot_1"):
-		_use_item("health_potion")
-		return
-	if InputSource.is_action_just_pressed(&"quick_slot_2"):
-		_use_item("mana_potion")
-		return
+	for index in QUICK_SLOT_ACTIONS.size():
+		var action: StringName = QUICK_SLOT_ACTIONS[index]
+		if InputSource.is_action_just_pressed(action):
+			_use_quick_slot(index)
+			return
 	if InputSource.is_action_just_pressed(&"save_game"):
 		var res: Dictionary = SaveManager.save_game(1)
 		EventBus.toast.emit("Сохранено" if bool(res.get("ok", false)) else "Ошибка сохранения")
@@ -597,6 +617,15 @@ func is_map_open() -> bool:
 
 func open_map_for_shot() -> void:
 	_open_map()
+
+
+## Quick slot index is 0-based; the toast shows the 1-based key number.
+func _use_quick_slot(index: int) -> void:
+	var item_id := GameState.quick_slot_item(index)
+	if item_id == "":
+		EventBus.toast.emit("Слот %d пуст" % (index + 1))
+		return
+	_use_item(item_id)
 
 
 func _use_item(item_id: String) -> void:

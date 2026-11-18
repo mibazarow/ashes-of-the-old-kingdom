@@ -3,6 +3,7 @@ extends Node
 
 const XP_PER_LEVEL := 40
 const MAX_LEVEL := 20
+const QUICK_SLOT_COUNT := 4
 
 var level: int = 1
 var xp: int = 0
@@ -18,6 +19,9 @@ var gold: int = 0
 
 var inventory: Array[Dictionary] = []
 var equipment: Dictionary = {"weapon": "", "armor": ""}
+
+## Quick slots 1–4 (index 0..3); an empty string means the slot is unassigned.
+var quick_slots: Array[String] = ["health_potion", "mana_potion", "", ""]
 
 var flags: Dictionary = {}
 var kills: Dictionary = {}
@@ -53,6 +57,7 @@ func reset() -> void:
 	gold = 0
 	inventory = []
 	equipment = {"weapon": "", "armor": ""}
+	quick_slots = _default_quick_slots()
 	flags = {}
 	kills = {}
 	play_time_ms = 0
@@ -216,6 +221,29 @@ func equip(item_id: String) -> bool:
 	return true
 
 
+# --- quick slots --------------------------------------------------------------
+
+func _default_quick_slots() -> Array[String]:
+	return ["health_potion", "mana_potion", "", ""]
+
+
+## Assigns a consumable to quick slot `index` (0..3); "" clears the slot.
+## Rejects an out-of-range index and anything that is not a consumable.
+func set_quick_slot(index: int, item_id: String) -> bool:
+	if index < 0 or index >= QUICK_SLOT_COUNT:
+		return false
+	if item_id != "" and not ItemDB.is_consumable(item_id):
+		return false
+	quick_slots[index] = item_id
+	return true
+
+
+func quick_slot_item(index: int) -> String:
+	if index < 0 or index >= quick_slots.size():
+		return ""
+	return quick_slots[index]
+
+
 # --- flags / counters ---------------------------------------------------------
 
 func set_flag(key: String, value: Variant = true) -> void:
@@ -250,6 +278,7 @@ func to_dict() -> Dictionary:
 		"gold": gold,
 		"inventory": inventory.duplicate(true),
 		"equipment": equipment.duplicate(true),
+		"quick_slots": quick_slots.duplicate(),
 		"flags": flags.duplicate(true),
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
@@ -272,7 +301,24 @@ func from_dict(d: Dictionary) -> void:
 		if slot is Dictionary and slot.has("id"):
 			inventory.append({"id": String(slot["id"]), "amount": int(slot.get("amount", 1))})
 	equipment = d.get("equipment", {"weapon": "", "armor": ""}).duplicate(true)
+	quick_slots = _restore_quick_slots(d.get("quick_slots", null))
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
 	_emit_all()
+
+
+## Saves written before quick slots existed have no such key, and a hand-edited
+## one may hold anything, so anything unexpected falls back to the defaults
+## rather than failing the load.
+func _restore_quick_slots(raw: Variant) -> Array[String]:
+	if raw is Array:
+		var arr: Array = raw as Array
+		if arr.size() == QUICK_SLOT_COUNT:
+			var restored: Array[String] = []
+			for value: Variant in arr:
+				if not (value is String):
+					return _default_quick_slots()
+				restored.append(String(value))
+			return restored
+	return _default_quick_slots()

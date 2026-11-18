@@ -73,6 +73,9 @@ func _run() -> void:
 	print("== human input path ==")
 	await _test_human_keyboard_moves_player()
 
+	print("== quick slots ==")
+	await _test_quick_slots()
+
 	print("== movement and camera ==")
 	await _test_diagonal_is_normalized()
 	_test_camera_limits()
@@ -93,7 +96,7 @@ func _run() -> void:
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
-	_check(completed.size() == 18, "every test group ran to completion (got %d/18)" % completed.size())
+	_check(completed.size() == 19, "every test group ran to completion (got %d/19)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -395,6 +398,100 @@ func _test_human_keyboard_moves_player() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["human_input"] = true
+
+
+## Quick slots 1–4 (spec §6): the assignment is data on GameState, not a
+## hard-wired HUD branch, so it can be re-assigned, listed in the inventory
+## panel and carried through a save.
+func _test_quick_slots() -> void:
+	gs.reset()
+	qm.reset()
+
+	for index in range(1, 5):
+		var action := StringName("quick_slot_%d" % index)
+		_check(InputMap.has_action(action), "action %s exists" % action)
+		var bound := false
+		for ev in InputMap.action_get_events(action):
+			if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_1 + index - 1:
+				bound = true
+		_check(bound, "%s is bound to key %d" % [action, index])
+
+	_check(gs.quick_slot_item(0) == "health_potion", "slot 1 defaults to health_potion")
+	_check(gs.quick_slot_item(1) == "mana_potion", "slot 2 defaults to mana_potion")
+	_check(gs.quick_slot_item(2) == "", "slot 3 defaults to empty")
+	_check(gs.quick_slot_item(3) == "", "slot 4 defaults to empty")
+	_check(gs.quick_slot_item(-1) == "" and gs.quick_slot_item(4) == "", "out-of-range slot reads as empty")
+
+	_check(not gs.set_quick_slot(2, "iron_sword"), "equipment is rejected by set_quick_slot")
+	_check(not gs.set_quick_slot(4, "health_potion"), "index past the last slot is rejected")
+	_check(not gs.set_quick_slot(-1, "health_potion"), "negative index is rejected")
+	_check(gs.quick_slot_item(2) == "", "rejected writes left slot 3 empty")
+	_check(gs.set_quick_slot(2, "mana_potion"), "consumable is accepted")
+	_check(gs.quick_slot_item(2) == "mana_potion", "slot 3 now holds mana_potion")
+	_check(gs.set_quick_slot(2, ""), "slot is cleared with an empty id")
+	_check(gs.quick_slot_item(2) == "", "slot 3 is empty after clearing")
+
+	gs.set_quick_slot(2, "health_potion")
+	var save: Dictionary = sm.save_game(2)
+	_check(bool(save.get("ok", false)), "save slot 2 ok for quick slots")
+	gs.quick_slots[2] = "mana_potion"
+	gs.quick_slots[3] = "mana_potion"
+	var load_res: Dictionary = sm.load_game(2)
+	_check(bool(load_res.get("ok", false)), "load slot 2 ok for quick slots")
+	_check(gs.quick_slot_item(2) == "health_potion", "slot 3 assignment came back from the save")
+	_check(gs.quick_slot_item(3) == "", "cleared slot came back empty")
+
+	var legacy: Dictionary = gs.to_dict()
+	legacy.erase("quick_slots")
+	gs.quick_slots[0] = ""
+	gs.from_dict(legacy)
+	_check(gs.quick_slot_item(0) == "health_potion", "save without quick_slots falls back to defaults")
+	legacy["quick_slots"] = ["a"]
+	gs.quick_slots[0] = ""
+	gs.from_dict(legacy)
+	_check(gs.quick_slot_item(0) == "health_potion" and gs.quick_slot_item(2) == "",
+		"malformed quick_slots falls back to defaults")
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	gs.reset()
+	gs.set_quick_slot(2, "health_potion")
+	gs.add_item("health_potion", 1)
+	gs.hp = 50
+	var toasts: Array[String] = []
+	var listener := func(message: String) -> void: toasts.append(message)
+	bus.toast.connect(listener)
+
+	await _tap_key(KEY_3)
+	_check(gs.count_item("health_potion") == 0, "key 3 consumed exactly one potion")
+	_check(gs.hp == 90, "key 3 healed exactly 40 hp (hp=%d)" % gs.hp)
+
+	gs.hp = 50
+	var items_before: int = gs.inventory.size()
+	toasts.clear()
+	await _tap_key(KEY_4)
+	_check(gs.hp == 50, "key 4 on an empty slot heals nothing (hp=%d)" % gs.hp)
+	_check(gs.inventory.size() == items_before and gs.count_item("health_potion") == 0,
+		"key 4 on an empty slot consumes nothing")
+	_check(toasts.has("Слот 4 пуст"), "key 4 on an empty slot says the slot is empty")
+
+	bus.toast.disconnect(listener)
+	scene.queue_free()
+	await process_frame
+
+	var slot_file: String = sm.slot_path(2)
+	if FileAccess.file_exists(slot_file):
+		DirAccess.remove_absolute(slot_file)
+	var slot_backup: String = sm.slot_backup_path(2)
+	if FileAccess.file_exists(slot_backup):
+		DirAccess.remove_absolute(slot_backup)
+	gs.reset()
+	qm.reset()
+	completed["quick_slots"] = true
 
 
 ## Diagonal movement must not be faster than cardinal movement.
@@ -706,6 +803,24 @@ func _settle_idle(player: Node) -> void:
 		await physics_frame
 		if int(player.get("state")) != 3 and int(player.get("state")) != 2:
 			return
+
+
+## A single key tap through the real Input path, with fresh event objects so a
+## held state from an earlier tap cannot mask the edge.
+func _tap_key(key: int) -> void:
+	var down := InputEventKey.new()
+	down.physical_keycode = key
+	down.keycode = key
+	down.pressed = true
+	Input.parse_input_event(down)
+	for i in range(4):
+		await physics_frame
+	var up := InputEventKey.new()
+	up.physical_keycode = key
+	up.keycode = key
+	up.pressed = false
+	Input.parse_input_event(up)
+	await physics_frame
 
 
 ## A single right-mouse-button click through the real Input path, using fresh

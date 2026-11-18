@@ -18,6 +18,8 @@ const ACTIONS := {
 	"pause": [KEY_ESCAPE],
 	"quick_slot_1": [KEY_1],
 	"quick_slot_2": [KEY_2],
+	"quick_slot_3": [KEY_3],
+	"quick_slot_4": [KEY_4],
 	"save_game": [KEY_F5],
 	"load_game": [KEY_F9],
 }
