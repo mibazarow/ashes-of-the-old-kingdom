@@ -73,10 +73,14 @@ func _run() -> void:
 	print("== human input path ==")
 	await _test_human_keyboard_moves_player()
 
+	print("== movement and camera ==")
+	await _test_diagonal_is_normalized()
+	_test_camera_limits()
+
 	print("== scene smoke ==")
 	await _test_scene_loads()
 
-	_check(completed.size() == 11, "every test group ran to completion (got %d/11)" % completed.size())
+	_check(completed.size() == 13, "every test group ran to completion (got %d/13)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -343,6 +347,74 @@ func _test_human_keyboard_moves_player() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["human_input"] = true
+
+
+## Diagonal movement must not be faster than cardinal movement.
+func _test_diagonal_is_normalized() -> void:
+	var scene: PackedScene = load("res://scenes/main/main.tscn")
+	var inst := scene.instantiate()
+	root.add_child(inst)
+	await process_frame
+	await process_frame
+	var player := get_first_node_in_group("player") as Node2D
+	if player == null:
+		_check(false, "player present for movement test")
+		return
+	player.set("spawn_point", player.global_position)
+
+	var right := await _measure_speed(player, [KEY_D])
+	var diag := await _measure_speed(player, [KEY_D, KEY_S])
+
+	_check(right > 20.0, "cardinal movement produces speed (%.1f px/s)" % right)
+	_check(absf(diag - right) < right * 0.12, "diagonal speed matches cardinal (%.1f vs %.1f)" % [diag, right])
+
+	inst.queue_free()
+	await process_frame
+	completed["diagonal"] = true
+
+
+func _measure_speed(player: Node2D, keys: Array) -> float:
+	for k in keys:
+		var ev := InputEventKey.new()
+		ev.physical_keycode = k
+		ev.keycode = k
+		ev.pressed = true
+		Input.parse_input_event(ev)
+	await physics_frame
+	await physics_frame
+	var start := player.global_position
+	var frames := 20
+	for i in range(frames):
+		await physics_frame
+	var travelled := player.global_position.distance_to(start)
+	for k in keys:
+		var up := InputEventKey.new()
+		up.physical_keycode = k
+		up.keycode = k
+		up.pressed = false
+		Input.parse_input_event(up)
+	for i in range(6):
+		await physics_frame
+	return travelled / (float(frames) / 60.0)
+
+
+func _test_camera_limits() -> void:
+	var scene: PackedScene = load("res://scenes/main/main.tscn")
+	var inst := scene.instantiate()
+	root.add_child(inst)
+	var world := inst.get_node_or_null("World")
+	_check(world != null, "world node exists")
+	if world != null:
+		var player := inst.get_node_or_null("World/Player")
+		_check(player != null, "player is a child of World")
+		if player != null:
+			var cam := player.get_node_or_null("Camera2D") as Camera2D
+			_check(cam != null, "player has a Camera2D")
+			if cam != null:
+				_check(cam.limit_right > 0 and cam.limit_bottom > 0, "camera limits cover the map")
+				_check(cam.position_smoothing_enabled, "camera smoothing is on")
+	inst.queue_free()
+	completed["camera"] = true
 
 
 func _test_scene_loads() -> void:
