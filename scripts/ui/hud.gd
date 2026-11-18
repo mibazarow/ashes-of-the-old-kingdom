@@ -28,12 +28,15 @@ var _journal_list: VBoxContainer
 var _pause_panel: PanelContainer
 var _hint_label: Label
 var _map_panel: MapPanel
+var _settings_panel: SettingsPanel
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
 var _journal_open := false
 var _map_open := false
 var _paused := false
+var _settings_open := false
+var _settings_just_closed := false
 
 
 func _ready() -> void:
@@ -156,7 +159,18 @@ func _build_ui() -> void:
 	_build_inventory_panel()
 	_build_journal_panel()
 	_build_pause_panel()
+	_build_settings_panel()
 	_build_map_panel()
+
+
+## Rebinding lives in its own script (like MapPanel): it has its own raw-event
+## capture and paging logic, and hud.gd only opens, closes and gates it.
+func _build_settings_panel() -> void:
+	_settings_panel = SettingsPanel.new()
+	_settings_panel.name = "SettingsPanel"
+	_settings_panel.visible = false
+	_settings_panel.closed.connect(_close_settings)
+	_root.add_child(_settings_panel)
 
 
 func _build_map_panel() -> void:
@@ -274,6 +288,7 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("Esc — продолжить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("F5 — сохранить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("F9 — загрузить", Color(0.9, 0.9, 0.86)))
+	box.add_child(_make_text("E — Настройки управления", Color(0.9, 0.9, 0.86)))
 
 
 func _make_theme() -> Theme:
@@ -528,6 +543,16 @@ func _toggle_pause() -> void:
 ## drive menus through one code path. Real InputEvents would be invisible to the
 ## bot, which is exactly the privileged/unequal access the spec forbids.
 func _process(_delta: float) -> void:
+	# The settings screen captures raw events itself; while it is open no
+	# action polling may reach the gameplay paths below.
+	if _settings_open:
+		return
+	# The very Esc edge that closed the settings screen must not also unpause
+	# the game in the same frame: it belongs to the settings screen alone.
+	if _settings_just_closed:
+		_settings_just_closed = false
+		if InputSource.is_action_just_pressed(&"pause"):
+			return
 	if _map_open:
 		if InputSource.is_action_just_pressed(&"pause") or InputSource.is_action_just_pressed(&"map"):
 			_close_map()
@@ -547,6 +572,8 @@ func _process(_delta: float) -> void:
 			_toggle_pause()
 		return
 	if _paused:
+		if InputSource.is_action_just_pressed(&"interact"):
+			_open_settings()
 		return
 	if InputSource.is_action_just_pressed(&"journal"):
 		_toggle_journal()
@@ -617,6 +644,33 @@ func is_map_open() -> bool:
 
 func open_map_for_shot() -> void:
 	_open_map()
+
+
+## Settings replaces the pause panel visually; the game stays paused underneath.
+## Only reachable from the pause panel, and the bot never pauses, so it can
+## never open this screen.
+func _open_settings() -> void:
+	_settings_open = true
+	_pause_panel.visible = false
+	_settings_panel.visible = true
+	_settings_panel.open()
+	GameState.ui_blocking = true
+
+
+func _close_settings() -> void:
+	_settings_open = false
+	_settings_just_closed = true
+	_settings_panel.visible = false
+	_pause_panel.visible = _paused
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open
+
+
+func is_settings_open() -> bool:
+	return _settings_open
+
+
+func open_settings_for_shot() -> void:
+	_open_settings()
 
 
 ## Quick slot index is 0-based; the toast shows the 1-based key number.

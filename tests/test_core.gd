@@ -53,6 +53,15 @@ func _run() -> void:
 	sm = root.get_node_or_null("SaveManager")
 	bus = root.get_node_or_null("EventBus")
 	_check(gs != null and qm != null and sm != null and bus != null, "autoloads present")
+
+	# Put the InputMap into a known state before any group injects real key
+	# events: a stale controls.json (a real user's rebind, or one left by a
+	# crashed run) must not leak into the groups that rely on project defaults.
+	_reset_input_to_known_state()
+
+	print("== input isolation ==")
+	_test_input_isolation()
+
 	print("== damage resolver ==")
 	_test_damage_dedupe()
 	_test_damage_reduces_by_defense()
@@ -100,7 +109,15 @@ func _run() -> void:
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
-	_check(completed.size() == 21, "every test group ran to completion (got %d/21)" % completed.size())
+	print("== input bindings ==")
+	_test_input_bindings()
+
+	# Leave no settings residue for the next run, a bot or the editor.
+	_reset_input_to_known_state()
+	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
+		"suite left no controls file behind")
+
+	_check(completed.size() == 23, "every test group ran to completion (got %d/23)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1190,4 +1207,147 @@ func _test_projectile_wall_collision() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["projectile_wall"] = true
+
+
+## The suite must produce the same result no matter what user://settings/
+## controls.json was on disk when it started. This group runs before any group
+## that injects real key events and before the input_bindings group, so the only
+## thing that could have produced the current state is the suite-start reset. It
+## then proves that reset neutralises a pre-existing rebind by planting one
+## through the engine (exactly as the settings screen would) and resetting again.
+func _test_input_isolation() -> void:
+	var ib := root.get_node_or_null("InputBindings")
+	_check(ib != null, "InputBindings present for isolation test")
+	if ib == null:
+		completed["input_isolation"] = true
+		return
+
+	# State the suite-start reset is responsible for.
+	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
+		"suite start removed any pre-existing controls file")
+	_check(_action_has_key("interact", KEY_E), "interact is on default E at suite start")
+	_check(not _action_has_key("interact", KEY_F),
+		"no pre-existing interact->F rebind survived the suite-start reset")
+
+	# Plant a realistic pre-existing rebind through the engine, then show the
+	# suite-start reset neutralises it. Deterministic in every run, not only
+	# when an external poison file happens to be present.
+	_check(bool(ib.call("rebind", "interact", _key_event(KEY_F))),
+		"isolation: planted an interact->F rebind")
+	_check(_action_has_key("interact", KEY_F) and not _action_has_key("interact", KEY_E),
+		"isolation: planted rebind is live before the reset")
+	_check(FileAccess.file_exists(String(InputBindings.PATH)),
+		"isolation: planted rebind wrote a controls file")
+
+	_reset_input_to_known_state()
+
+	_check(_action_has_key("interact", KEY_E),
+		"suite-start reset neutralises a pre-existing interact->F rebind (E restored)")
+	_check(not _action_has_key("interact", KEY_F),
+		"suite-start reset drops the pre-existing F binding")
+	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
+		"suite-start reset removes the pre-existing controls file")
+	completed["input_isolation"] = true
+
+
+## Spec §6/§18: rebinding through the InputBindings autoload, persisted in a
+## settings file that lives outside user://saves. The group owns the whole
+## control state: it starts from defaults with no settings file and leaves
+## neither behind, so no other group, bot or later run sees its bindings.
+func _test_input_bindings() -> void:
+	var ib := root.get_node_or_null("InputBindings")
+	_check(ib != null, "InputBindings autoload present")
+	if ib == null:
+		completed["input_bindings"] = true
+		return
+
+	_restore_control_defaults(ib)
+	_delete_settings_file()
+
+	_check(not bool(ib.call("rebind", "not_an_action", _key_event(KEY_F))),
+		"rebind rejects an action outside REBINDABLE")
+	_check(not bool(ib.call("rebind", "interact", null)), "rebind rejects a null event")
+
+	_check(bool(ib.call("rebind", "interact", _key_event(KEY_F))), "rebind interact to F succeeds")
+	_check(_action_has_key("interact", KEY_F), "interact is bound to F after rebind")
+	_check(not _action_has_key("interact", KEY_E), "interact no longer bound to E")
+
+	_check(not bool(ib.call("rebind", "inventory", _key_event(KEY_F))),
+		"rebind to a key owned by another rebindable action is refused")
+	_check(_action_has_key("interact", KEY_F), "refused rebind keeps interact on F")
+	_check(_action_has_key("inventory", KEY_I), "refused rebind keeps inventory on I")
+
+	var save_res: Dictionary = ib.call("save_bindings")
+	_check(bool(save_res.get("ok", false)), "save_bindings reports ok")
+	_check(FileAccess.file_exists(String(InputBindings.PATH)), "controls file written")
+	_check(not String(InputBindings.PATH).begins_with("user://saves"),
+		"controls live outside the saves directory")
+
+	# Real round-trip: wipe the runtime change by hand, let the file put it back.
+	InputMap.action_erase_events(&"interact")
+	_check(not _action_has_key("interact", KEY_F), "interact cleared before reload")
+	ib.call("load_bindings")
+	_check(_action_has_key("interact", KEY_F), "F binding comes back from the file")
+
+	ib.call("reset_action", "interact")
+	_check(_action_has_key("interact", KEY_E), "reset_action restores E")
+	_check(not _action_has_key("interact", KEY_F), "reset_action drops F")
+
+	# A corrupt file must keep the defaults instead of crashing the load.
+	var file := FileAccess.open(String(InputBindings.PATH), FileAccess.WRITE)
+	_check(file != null, "corrupt controls fixture opens for writing")
+	if file != null:
+		file.store_string("{ this is not json")
+		file.close()
+	ib.call("load_bindings")
+	_check(_action_has_key("interact", KEY_E), "corrupt controls file keeps default bindings")
+
+	_restore_control_defaults(ib)
+	_delete_settings_file()
+	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
+		"input bindings group left no settings file behind")
+	_check(not FileAccess.file_exists(String(InputBindings.PATH) + ".tmp"),
+		"input bindings group left no tmp file behind")
+	completed["input_bindings"] = true
+
+
+func _key_event(code: int) -> InputEventKey:
+	var event := InputEventKey.new()
+	event.physical_keycode = code
+	event.keycode = code
+	return event
+
+
+func _action_has_key(action: String, code: int) -> bool:
+	for event in InputMap.action_get_events(action):
+		if event is InputEventKey and (event as InputEventKey).physical_keycode == code:
+			return true
+	return false
+
+
+func _restore_control_defaults(ib: Node) -> void:
+	for action in InputBindings.REBINDABLE:
+		ib.call("reset_action", action)
+
+
+func _delete_settings_file() -> void:
+	for path in [String(InputBindings.PATH), String(InputBindings.PATH) + ".tmp"]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+
+## Single source of truth for putting the controls back into a known state.
+## Called once at suite start (so a pre-existing user://settings/controls.json
+## cannot leak into the groups that inject real key events) and once at the end
+## (so the suite leaves no residue). reset_action() persists the defaults it
+## writes, so the file it recreates is deleted again here. The pristine defaults
+## come from InputBindings._defaults, captured before load_bindings() ran, so a
+## poisoned file cannot contaminate them.
+func _reset_input_to_known_state() -> void:
+	var ib := root.get_node_or_null("InputBindings")
+	if ib == null:
+		return
+	_delete_settings_file()
+	_restore_control_defaults(ib)
+	_delete_settings_file()
 

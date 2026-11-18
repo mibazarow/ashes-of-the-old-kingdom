@@ -26,7 +26,7 @@ TESTS='godot --headless --path . --script res://tests/test_core.gd'   # $TESTS
 
 | Уровень | Что покрывает | Команда | Ожидаемый результат |
 | --- | --- | --- | --- |
-| unit | Чистая логика: `DamageResolver`, `GameState`, `QuestManager`, `SaveManager` | `$TESTS` | `failures: 0`, строка `got 21/21` |
+| unit | Чистая логика: `DamageResolver`, `GameState`, `QuestManager`, `SaveManager` | `$TESTS` | `failures: 0`, строка `got 23/23` |
 | integration | `main.tscn` целиком: враги, HUD, журнал, карта, быстрый слот, умение | `$TESTS` | те же строки, `SCRIPT ERROR` нет |
 | smoke | Чистый запуск сцены без тестов | `godot --headless --path . --quit-after 120 2>&1 \| grep -cE 'ERROR\|SCRIPT ERROR'` | `0` |
 | bot | Реальный игровой путь через `InputSource` | `godot --headless --path . -- --bot=BOT-001` | `[bot] BOT-001 -> PASS (...)` |
@@ -35,10 +35,10 @@ TESTS='godot --headless --path . --script res://tests/test_core.gd'   # $TESTS
 
 ## 3. Инвентарь тестовых групп
 
-Все 21 группа живут в одном файле `tests/test_core.gd` и запускаются **одной**
+Все 23 группы живут в одном файле `tests/test_core.gd` и запускаются **одной**
 командой `$TESTS`: фильтра по группе в коде нет, отдельные группы запустить
 нельзя. Каждая группа помечает себя в счётчик `completed`, и в конце стоит
-проверка `every test group ran to completion (got 21/21)` — если группа упала
+проверка `every test group ran to completion (got 23/23)` — если группа упала
 до своей метки, счётчик это покажет.
 
 Команда для каждой строки таблицы: `$TESTS`.
@@ -66,11 +66,13 @@ TESTS='godot --headless --path . --script res://tests/test_core.gd'   # $TESTS
 | `world_composition` | мир спавнит ≥5 `ash_wolf` и ровно одного `ash_archer` с именем `ArcherA`, его `kind` отличается от волчьего |
 | `bot_quest_target` | выбор цели по квесту возвращает `ash_wolf`, пропуская подсаженного рядом культиста, и `null` для неизвестного `quest_id`; слепой выбор на культисте бы попался |
 | `projectile_wall` | снаряд гаснет о стену/дерево (`TileMapLayer`) и не наносит игроку урона; контрольный снаряд над открытой землёй летит все 30 кадров |
+| `input_isolation` | идёт первой, до групп с реальным вводом: стартовый сброс возвращает InputMap к известному состоянию — любой заранее лежащий `user://settings/controls.json` удалён, `interact` снова на `E`; группа сажает реальный ребинд `interact`→`F` движком и доказывает, что этот сброс его нейтрализует (вернулся `E`, файл удалён); в конце прогона сброс повторяется, и `controls.json` не остаётся |
+| `input_bindings` | ребинд отклоняет действие вне `REBINDABLE`, `null` и занятую клавишу; `interact`→`F` применяется и снимает `E`; `save_bindings` пишет файл вне `user://saves`, `load_bindings` возвращает привязку из файла; `reset_action` возвращает `E`; битый файл не ломает привязки |
 
 ## 4. Как читать результат
 
 - `$TESTS` печатает `checks: N  failures: M`. Норма — `failures: 0`.
-  Актуально на 2026-11-18: `checks: 179  failures: 0`.
+  Актуально на 2026-11-18: `checks: 210  failures: 0`.
 - Код возврата у Godot **не** является доказательством: движок выходит `0`
   и после ошибок времени выполнения. Смысл имеет только вывод.
 - Любая строка `ERROR` или `SCRIPT ERROR` в выводе — прогон считается

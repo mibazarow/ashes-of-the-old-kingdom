@@ -39,6 +39,10 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_journal_for_shot")
+	elif ui_probe == "settings":
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_settings_for_shot")
 	elif ui_probe == "map":
 		# Walk the player east along the road so the explored area grows past the
 		# spawn clearing and the trap landmark falls inside the visited radius.
