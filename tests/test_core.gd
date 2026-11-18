@@ -62,6 +62,7 @@ func _run() -> void:
 	print("== save / load ==")
 	_test_save_load_roundtrip()
 	_test_corrupt_slot()
+	_test_slot_isolation()
 
 	print("== quests ==")
 	_test_quest_reward_once()
@@ -96,7 +97,7 @@ func _run() -> void:
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
-	_check(completed.size() == 19, "every test group ran to completion (got %d/19)" % completed.size())
+	_check(completed.size() == 20, "every test group ran to completion (got %d/20)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -177,19 +178,113 @@ func _test_save_load_roundtrip() -> void:
 	_check(qm.state_of("q01_ash_wolves") == qm.STATE_ACTIVE, "quest state restored")
 	completed["save_load"] = true
 
+## A corrupt primary with no valid backup must be refused. The whole slot state
+## is owned by this test: a backup left behind by an earlier run (a bot, or a
+## previous suite) would let load_game recover and mask the corruption, which is
+## exactly how this test used to depend on whether bots had run before.
 func _test_corrupt_slot() -> void:
+	_clear_slot(3)
 	var path: String = sm.slot_path(3)
 	var f := FileAccess.open(path, FileAccess.WRITE)
+	_check(f != null, "corrupt slot fixture opens for writing")
+	if f == null:
+		_clear_slot(3)
+		completed["corrupt"] = true
+		return
 	f.store_string("{ this is not json")
 	f.close()
+	# The refusal below has to come from corruption, not from a missing file:
+	# an absent primary reports "empty_slot" and would pass for the wrong reason.
+	_check(FileAccess.file_exists(path), "corrupt primary is on disk before the load")
+	_check(not FileAccess.file_exists(sm.slot_backup_path(3)), "corrupt slot has no backup")
 	var res: Dictionary = sm.load_game(3)
 	_check(not bool(res.get("ok", false)), "corrupt slot refuses to load")
 	_check(String(res.get("error", "")) != "", "corrupt slot reports an error")
-	DirAccess.remove_absolute(path)
-	var bak: String = sm.slot_backup_path(3)
-	if FileAccess.file_exists(bak):
-		DirAccess.remove_absolute(bak)
+	_check(String(res.get("error", "")) == "corrupt_and_no_backup",
+		"corrupt slot error names the corrupt-and-no-backup case")
+	_clear_slot(3)
 	completed["corrupt"] = true
+
+
+## Isolation regression: pins the property the corrupt-slot test used to violate.
+## A valid save followed by a corrupt primary *does* load (the backup recovery
+## that used to hide the corruption), while the same corruption with no backup is
+## refused — and the corrupt-slot test above leaves slot 3 completely empty.
+func _test_slot_isolation() -> void:
+	# Runs immediately after _test_corrupt_slot, before this test touches slot 3
+	# itself, so any residue found here belongs to the test above.
+	var leftover: Array[String] = _slot_residue(3)
+	_check(leftover.is_empty(),
+		"corrupt slot test left no slot_3 residue (found: %s)" % ", ".join(leftover))
+
+	_clear_slot(3)
+	var first: Dictionary = sm.save_game(3)
+	_check(bool(first.get("ok", false)), "isolation: save into an empty slot 3 ok")
+	_check(not FileAccess.file_exists(sm.slot_backup_path(3)),
+		"isolation: first save creates no backup")
+	var second: Dictionary = sm.save_game(3)
+	_check(bool(second.get("ok", false)), "isolation: rewrite of slot 3 ok")
+	_check(FileAccess.file_exists(sm.slot_backup_path(3)),
+		"isolation: rewrite keeps the previous copy as a backup")
+
+	# The exact failure mode: corrupt primary + valid backup = a successful load.
+	_write_corrupt_primary(3)
+	var recovered: Dictionary = sm.load_game(3)
+	_check(bool(recovered.get("ok", false)),
+		"isolation: corrupt primary with a valid backup recovers from the backup")
+
+	# Same corruption, no backup: refused, and refused *as corruption*.
+	_clear_slot(3)
+	_write_corrupt_primary(3)
+	_check(FileAccess.file_exists(sm.slot_path(3)),
+		"isolation: corrupt primary is on disk when the load is refused")
+	var refused: Dictionary = sm.load_game(3)
+	_check(not bool(refused.get("ok", false)), "isolation: corrupt primary without a backup is refused")
+	_check(String(refused.get("error", "")) == "corrupt_and_no_backup",
+		"isolation: refusal is corrupt_and_no_backup, not empty_slot")
+	_clear_slot(3)
+	completed["slot_isolation"] = true
+
+
+## Remove every file the save manager keeps for a slot, through its own public
+## path helpers, so a test always starts from a slot it fully controls.
+func _clear_slot(slot: int) -> void:
+	var paths: Array[String] = [
+		String(sm.slot_path(slot)),
+		String(sm.slot_backup_path(slot)),
+		String(sm.slot_temp_path(slot)),
+	]
+	for path in paths:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+
+## Write an unparseable primary save, bypassing the atomic writer on purpose.
+func _write_corrupt_primary(slot: int) -> void:
+	var f := FileAccess.open(String(sm.slot_path(slot)), FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string("{ this is not json")
+	f.close()
+
+
+## Names of the files still present for a slot, read from the saves directory
+## the save manager itself derives its paths from.
+func _slot_residue(slot: int) -> Array[String]:
+	var found: Array[String] = []
+	var saves_dir := String(sm.slot_path(1)).get_base_dir()
+	var dir := DirAccess.open(saves_dir)
+	if dir == null:
+		return found
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if not dir.current_is_dir() and entry.begins_with("slot_%d." % slot):
+			found.append(entry)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	found.sort()
+	return found
 
 func _test_quest_reward_once() -> void:
 	gs.reset()

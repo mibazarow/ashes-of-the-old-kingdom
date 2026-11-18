@@ -189,11 +189,16 @@ func _scenario_save_load() -> void:
 	var save := SaveManager.save_game(3)
 	if not bool(save.get("ok", false)):
 		_notes.append("save_failed:" + String(save.get("error", "")))
+		_clear_save_slot(3)
 		return
 	_notes.append("saved")
 	GameState.add_gold(100)
 	GameState.take_damage(25)
 	var load := SaveManager.load_game(3)
+	# Slot 3 belongs to this scenario. Drop the save and the backup the rewrite
+	# produced: a leftover backup turns a later corrupt-primary check into a
+	# successful recovery, so a bot run must never leave slot 3 populated.
+	_clear_save_slot(3)
 	if not bool(load.get("ok", false)):
 		_notes.append("load_failed:" + String(load.get("error", "")))
 		return
@@ -389,6 +394,19 @@ func _scenario_take_damage() -> void:
 
 func _player() -> Node2D:
 	return get_tree().get_first_node_in_group("player") as Node2D
+
+
+## Delete every file the save manager keeps for a slot (primary, backup, temp),
+## so a bot run never leaves residue a later run could mistake for its own save.
+func _clear_save_slot(slot: int) -> void:
+	var paths: Array[String] = [
+		SaveManager.slot_path(slot),
+		SaveManager.slot_backup_path(slot),
+		SaveManager.slot_temp_path(slot),
+	]
+	for path in paths:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
 
 
 func _player_pos() -> Vector2:
