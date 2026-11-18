@@ -1,0 +1,32 @@
+{
+	"schema_version": 1,
+	"saved_at": "2026-01-14T18:05:22",
+	"play_time_ms": 600000,
+	"zone": "forest",
+	"player_position": [640.0, 384.0],
+	"game_state": {
+		"level": 7,
+		"xp": 30,
+		"xp_to_next": 190,
+		"hp": 84,
+		"max_hp": 120,
+		"mana": 40,
+		"max_mana": 90,
+		"base_attack": 5,
+		"base_defense": 1,
+		"gold": 123,
+		"inventory": [
+			{"id": "health_potion", "amount": 2},
+			{"id": "wolf_fang", "amount": 5},
+			{"id": "iron_sword", "amount": 1}
+		],
+		"equipment": {"weapon": "iron_sword", "armor": "leather_armor"},
+		"quick_slots": ["health_potion", "mana_potion", "health_potion", ""],
+		"flags": {"chest_forest_opened": true},
+		"kills": {"ash_wolf": 4},
+		"play_time_ms": 600000
+	},
+	"quests": {
+		"q01_ash_wolves": {"state": "done", "progress": 3}
+	}
+}

@@ -96,7 +96,8 @@ scenes/     main, world, player, enemies, npcs, interactables, items, ui
 scripts/    core, save, player, combat, ai, npc, quests, inventory, world, ui, debug_bot
 data/       items.json, quests.json
 assets/     сгенерированные 16x16 спрайты (см. docs/TODO_TEMP_ASSETS.md)
-tests/      test_core.gd
+tests/      test_core.gd, fixtures/saves/ — три фикстуры сохранений для теста
+            загрузки и миграции схемы (без персональных данных, см. README там же)
 tools/      генератор спрайтов, генератор InputMap
 docs/       ARCHITECTURE.md, TEST_REPORT.md, ASSET_CREDITS.md, TODO_TEMP_ASSETS.md
 ```

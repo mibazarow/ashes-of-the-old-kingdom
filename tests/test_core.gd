@@ -5,6 +5,8 @@ extends SceneTree
 ## The engine exits 0 even after runtime errors, so failures are counted here
 ## and reflected in the exit code on purpose.
 
+const FIXTURE_DIR := "res://tests/fixtures/saves"
+
 var failures := 0
 var checks := 0
 
@@ -63,6 +65,7 @@ func _run() -> void:
 	_test_save_load_roundtrip()
 	_test_corrupt_slot()
 	_test_slot_isolation()
+	_test_save_fixtures()
 
 	print("== quests ==")
 	_test_quest_reward_once()
@@ -97,7 +100,7 @@ func _run() -> void:
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
-	_check(completed.size() == 20, "every test group ran to completion (got %d/20)" % completed.size())
+	_check(completed.size() == 21, "every test group ran to completion (got %d/21)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -285,6 +288,115 @@ func _slot_residue(slot: int) -> Array[String]:
 	dir.list_dir_end()
 	found.sort()
 	return found
+
+
+## Read one of the committed save fixtures out of the repo.
+func _read_fixture(file_name: String) -> Dictionary:
+	var path := "%s/%s" % [FIXTURE_DIR, file_name]
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return parsed if parsed is Dictionary else {}
+
+
+## Read back whatever is currently stored in a slot, bypassing the load path on
+## purpose, so a refused load can be shown to have left the file alone.
+func _read_slot(slot: int) -> Dictionary:
+	var path := String(sm.slot_path(slot))
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return parsed if parsed is Dictionary else {}
+
+
+## Put a payload into a slot as an already existing save, dropping the backup and
+## the temp file first so the load reads exactly this payload and nothing else.
+func _write_payload_to_slot(payload: Dictionary, slot: int) -> void:
+	var stale: Array[String] = [String(sm.slot_backup_path(slot)), String(sm.slot_temp_path(slot))]
+	for path in stale:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+	var f := FileAccess.open(String(sm.slot_path(slot)), FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string(JSON.stringify(payload))
+	f.close()
+
+
+## Spec §25: three committed save fixtures are loaded through the real
+## SaveManager, which pins both the load path and the v0 -> v1 schema migration.
+## Slot 1 belongs to this group alone and is emptied again before it finishes.
+func _test_save_fixtures() -> void:
+	DirAccess.make_dir_recursive_absolute(String(sm.slot_path(1)).get_base_dir())
+	_clear_slot(1)
+
+	# A complete v1 save: every asserted value has to come out of the file.
+	var full: Dictionary = _read_fixture("fixture_v1_full.json")
+	_check(not full.is_empty(), "fixture_v1_full parses as a JSON object")
+	_check(int(full.get("schema_version", -1)) == 1, "fixture_v1_full is a schema v1 save")
+	gs.reset()
+	qm.reset()
+	_write_payload_to_slot(full, 1)
+	var full_res: Dictionary = sm.load_game(1)
+	_check(bool(full_res.get("ok", false)), "fixture_v1_full loads through SaveManager")
+	_check(gs.level == 7, "fixture_v1_full: level came from the file")
+	_check(gs.gold == 123, "fixture_v1_full: gold came from the file")
+	_check(gs.count_item("wolf_fang") == 5, "fixture_v1_full: inventory came from the file")
+	_check(String(gs.equipment.get("weapon", "")) == "iron_sword", "fixture_v1_full: equipment came from the file")
+	_check(gs.quick_slot_item(2) == "health_potion", "fixture_v1_full: quick slot 3 came from the file")
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_DONE, "fixture_v1_full: quest state came from the file")
+
+	# v0 -> v1 migration: a save written before quest blocks existed must gain an
+	# empty one instead of failing or leaving the quest manager half-initialised.
+	var no_quests: Dictionary = _read_fixture("fixture_v0_no_quests.json")
+	_check(not no_quests.is_empty(), "fixture_v0_no_quests parses as a JSON object")
+	_check(not no_quests.has("quests"), "fixture_v0_no_quests really has no quest block")
+	gs.reset()
+	qm.reset()
+	_write_payload_to_slot(no_quests, 1)
+	var migrated_res: Dictionary = sm.load_game(1)
+	_check(bool(migrated_res.get("ok", false)), "fixture_v0_no_quests loads through SaveManager")
+	_check(gs.level == 2, "fixture_v0_no_quests: level came from the file")
+	_check(qm.states.is_empty(), "fixture_v0_no_quests: migration produced an empty quest block")
+
+	# A sparse v0 save holds almost nothing: every missing field must fall back to
+	# a safe default rather than crash or leave nulls behind.
+	var sparse: Dictionary = _read_fixture("fixture_v0_sparse.json")
+	_check(not sparse.is_empty(), "fixture_v0_sparse parses as a JSON object")
+	gs.reset()
+	qm.reset()
+	_write_payload_to_slot(sparse, 1)
+	var sparse_res: Dictionary = sm.load_game(1)
+	_check(bool(sparse_res.get("ok", false)), "fixture_v0_sparse loads through SaveManager")
+	_check(gs.level == 3, "fixture_v0_sparse: the field the file does have is honoured")
+	_check(gs.gold == 9, "fixture_v0_sparse: gold came from the file")
+	_check(gs.hp > 0, "fixture_v0_sparse: missing hp falls back to a live player")
+	_check(gs.inventory is Array and gs.inventory.size() == 0,
+		"fixture_v0_sparse: missing inventory is an empty array, not null")
+	_check(gs.quick_slot_item(0) == "health_potion",
+		"fixture_v0_sparse: missing quick_slots fall back to the defaults")
+	var sparse_pos: Variant = sparse_res.get("player_position", null)
+	_check(sparse_pos is Array and (sparse_pos as Array).is_empty(),
+		"fixture_v0_sparse: missing player_position reads as empty")
+
+	# Negative case on the same fixture, no extra file: a save from a newer schema
+	# must be refused as it is, never loaded and never rewritten by this game.
+	var newer: Dictionary = full.duplicate(true)
+	newer["schema_version"] = 99
+	_write_payload_to_slot(newer, 1)
+	var refused: Dictionary = sm.load_game(1)
+	_check(not bool(refused.get("ok", false)), "save from a newer schema is refused")
+	_check(String(refused.get("error", "")) == "newer_schema_99",
+		"newer schema is refused as newer_schema_99")
+	_check(int(_read_slot(1).get("schema_version", 0)) == 99,
+		"refused newer-schema load leaves the file untouched")
+
+	_clear_slot(1)
+	var leftover: Array[String] = _slot_residue(1)
+	_check(leftover.is_empty(),
+		"save fixture group left no slot_1 residue (found: %s)" % ", ".join(leftover))
+	completed["save_fixtures"] = true
+
 
 func _test_quest_reward_once() -> void:
 	gs.reset()

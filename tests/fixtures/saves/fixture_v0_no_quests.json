@@ -1,0 +1,27 @@
+{
+	"schema_version": 0,
+	"saved_at": "2025-11-03T09:41:07",
+	"play_time_ms": 95000,
+	"zone": "forest",
+	"player_position": [512.0, 320.0],
+	"game_state": {
+		"level": 2,
+		"xp": 8,
+		"xp_to_next": 65,
+		"hp": 100,
+		"max_hp": 112,
+		"mana": 66,
+		"max_mana": 66,
+		"base_attack": 5,
+		"base_defense": 0,
+		"gold": 15,
+		"inventory": [
+			{"id": "health_potion", "amount": 1}
+		],
+		"equipment": {"weapon": "", "armor": ""},
+		"quick_slots": ["health_potion", "mana_potion", "", ""],
+		"flags": {},
+		"kills": {"ash_wolf": 1},
+		"play_time_ms": 95000
+	}
+}
