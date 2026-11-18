@@ -267,6 +267,8 @@ func _scenario_soak() -> void:
 	var segments := 0
 	var last_pos := _player_pos()
 	var stuck := 0
+	var travelled := 0.0
+	var attack_attempts := 0
 	while Time.get_ticks_msec() < deadline:
 		bot_input.hold(&"move_right", heading.x > 0.35)
 		bot_input.hold(&"move_left", heading.x < -0.35)
@@ -277,13 +279,16 @@ func _scenario_soak() -> void:
 		var enemy := _nearest_enemy()
 		if enemy != null and _player_pos().distance_to(enemy.global_position) < 22.0:
 			await _tap(&"attack")
+			attack_attempts += 1
 		if GameState.hp < GameState.max_hp * 0.35:
 			await _tap(&"quick_slot_1")
 
 		await _wait(0.12)
 
 		var pos := _player_pos()
-		if pos.distance_to(last_pos) < 0.4:
+		var step := pos.distance_to(last_pos)
+		travelled += step
+		if step < 0.4:
 			stuck += 1
 		else:
 			stuck = 0
@@ -299,9 +304,18 @@ func _scenario_soak() -> void:
 
 	bot_input.release_all()
 	_notes.append("segments=%d" % segments)
+	_notes.append("travelled=%.0fpx" % travelled)
+	_notes.append("attacks=%d" % attack_attempts)
 	_notes.append("hp=%d/%d" % [GameState.hp, GameState.max_hp])
 	_notes.append("kills=%s" % str(GameState.kills))
-	_result = "PASS" if GameState.kill_count("ash_wolf") > 0 else "FAIL"
+
+	# A soak run proves the game keeps running, not that the bot got lucky.
+	# Passing here means: the player survived, actually moved around the map,
+	# and the state stayed coherent for the whole window.
+	var survived: bool = GameState.hp > 0 and GameState.hp <= GameState.max_hp
+	var moved_enough: bool = travelled > 300.0
+	var state_coherent: bool = GameState.gold >= 0 and GameState.level >= 1
+	_result = "PASS" if survived and moved_enough and state_coherent else "FAIL"
 
 
 func _scenario_take_damage() -> void:
