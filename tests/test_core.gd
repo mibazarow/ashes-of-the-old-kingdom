@@ -197,6 +197,9 @@ func _run() -> void:
 	print("== combinations ==")
 	await _test_combinations()
 
+	print("== stagger recovery ==")
+	await _test_stagger_recovery()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -205,7 +208,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 27, "every test group ran to completion (got %d/27)" % completed.size())
+	_check(completed.size() == 28, "every test group ran to completion (got %d/28)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2054,6 +2057,147 @@ func _test_combinations() -> void:
 	Combinations.reset()
 	gs.reset()
 	completed["combinations"] = true
+
+
+## Defect #10 regression: STAGGER used to have no exit, so the first player hit
+## froze an enemy forever and made combat free. Now the stagger clock runs down
+## and the enemy rejoins the fight (spec §10.4). Deterministic: each wolf's own
+## StatusComponent is stopped so only the explicit hits and the fixed 60 Hz
+## physics clock move time, and every wolf is driven through real physics frames.
+## States are spelled as numbers (3 CHASE, 5 STAGGER, 6 DEAD) so the suite stays
+## out of enemy.gd's compile graph, whose autoloads do not exist under --script.
+func _test_stagger_recovery() -> void:
+	DamageResolver.reset()
+	gs.reset()
+
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	player.position = Vector2.ZERO
+	arena.add_child(player)
+	await process_frame
+
+	# --- a plain hit staggers, then the wolf re-acquires a visible player -------
+	var wolf := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	wolf.position = Vector2(40, 0)
+	arena.add_child(wolf)
+	var wsc := wolf.get_node_or_null("StatusComponent") as StatusComponent
+	_check(wsc != null, "stagger wolf owns a StatusComponent")
+	if wsc != null:
+		wsc.set_process(false)
+	DamageResolver.resolve_hit(null, wolf, {
+		"damage": 3, "hit_id": "stag-plain-1", "damage_type": "physical",
+	})
+	var plain_clock := float(wolf.get("_stagger_left"))
+	_check(int(wolf.get("state")) == 5, "a physical hit puts the wolf into STAGGER (state=%s)" % str(wolf.get("state")))
+	_check(plain_clock > 0.0, "the plain stagger clock is running (%.2f s)" % plain_clock)
+
+	# The player is visible and on a short leash, so the sensible next state is
+	# CHASE, and the wolf only leaves once its clock is actually spent.
+	var frames := await _drive_out_of_stagger(wolf, 120)
+	_check(frames >= 0, "the wolf left STAGGER before the frame cap (%d)" % frames)
+	_check(int(wolf.get("state")) != 5, "the wolf is no longer STAGGER once the clock expires (state=%s)" % str(wolf.get("state")))
+	_check(float(wolf.get("_stagger_left")) <= 0.0, "the wolf left STAGGER only after its clock was spent")
+	_check(int(wolf.get("state")) == 3, "a staggered wolf with a visible leashed player recovers into CHASE (state=%s)" % str(wolf.get("state")))
+
+	# It must not slip back into STAGGER on its own: only a hit enters it.
+	var self_recover := true
+	for i in range(30):
+		await physics_frame
+		if int(wolf.get("state")) == 5:
+			self_recover = false
+	_check(self_recover, "the wolf does not re-enter STAGGER without a new hit")
+
+	# --- ice + physical keeps the wolf down longer than a plain hit -------------
+	var chilled := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	chilled.position = Vector2(40, 60)
+	arena.add_child(chilled)
+	var csc := chilled.get_node_or_null("StatusComponent") as StatusComponent
+	if csc != null:
+		csc.set_process(false)
+		csc.apply_status("chill", 30.0)
+	DamageResolver.resolve_hit(null, chilled, {
+		"damage": 3, "hit_id": "stag-chill-1", "damage_type": "physical",
+	})
+	var chilled_clock := float(chilled.get("_stagger_left"))
+	_check(int(chilled.get("state")) == 5, "the ice+physical hit staggers the second wolf (state=%s)" % str(chilled.get("state")))
+	_check(chilled_clock > plain_clock,
+		"ice+physical extends the stagger clock (%.2f > %.2f s)" % [chilled_clock, plain_clock])
+	# Drive the chilled wolf frame by frame: it must still be down at the frame a
+	# plain hit would already be over, and only rise after its own longer clock.
+	var plain_frames := int(ceil(plain_clock * 60.0))
+	var chilled_total := -1
+	var down_at_plain := false
+	for i in range(120):
+		await physics_frame
+		var stag := int(chilled.get("state")) == 5
+		if i + 1 == plain_frames:
+			down_at_plain = stag
+		if not stag:
+			chilled_total = i + 1
+			break
+	_check(down_at_plain, "the chilled wolf is still staggered where a plain hit would have released it (frame %d)" % plain_frames)
+	_check(chilled_total > 0, "the chilled wolf eventually leaves STAGGER (%d)" % chilled_total)
+	_check(int(chilled.get("state")) != 5, "the chilled wolf is no longer STAGGER after its longer clock")
+	_check(chilled_total > plain_frames,
+		"the chilled wolf stayed staggered for more frames than a plain hit (%d > %d)" % [chilled_total, plain_frames])
+
+	# --- no visible player: the wolf gives up and INVESTIGATEs ------------------
+	var far := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	far.position = Vector2(200, 0)
+	arena.add_child(far)
+	var fsc := far.get_node_or_null("StatusComponent") as StatusComponent
+	if fsc != null:
+		fsc.set_process(false)
+	DamageResolver.resolve_hit(null, far, {
+		"damage": 3, "hit_id": "stag-far-1", "damage_type": "physical",
+	})
+	_check(int(far.get("state")) == 5, "the far wolf is staggered by the hit (state=%s)" % str(far.get("state")))
+	var far_frames := await _drive_out_of_stagger(far, 120)
+	_check(far_frames >= 0, "the far wolf leaves STAGGER (%d)" % far_frames)
+	_check(int(far.get("state")) == 2,
+		"a staggered wolf with no visible player recovers into INVESTIGATE (state=%s)" % str(far.get("state")))
+
+	# --- a killing blow taken mid-stagger still kills cleanly -------------------
+	var victim := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	victim.position = Vector2(40, 120)
+	arena.add_child(victim)
+	var vsc := victim.get_node_or_null("StatusComponent") as StatusComponent
+	if vsc != null:
+		vsc.set_process(false)
+	DamageResolver.resolve_hit(null, victim, {
+		"damage": 3, "hit_id": "stag-kill-1", "damage_type": "physical",
+	})
+	_check(int(victim.get("state")) == 5, "the victim is staggered before the killing blow (state=%s)" % str(victim.get("state")))
+	DamageResolver.resolve_hit(null, victim, {
+		"damage": 999, "hit_id": "stag-kill-2", "damage_type": "physical",
+	})
+	_check(int(victim.get("state")) == 6, "a killing blow during stagger leaves the wolf DEAD (state=%s)" % str(victim.get("state")))
+	var stays_dead := true
+	for i in range(8):
+		await physics_frame
+		if is_instance_valid(victim) and int(victim.get("state")) != 6:
+			stays_dead = false
+	_check(stays_dead, "a wolf killed while staggered stays DEAD (never pops back to STAGGER)")
+
+	arena.queue_free()
+	await process_frame
+	DamageResolver.reset()
+	gs.reset()
+	completed["stagger_recovery"] = true
+
+
+## Drive real physics frames until the enemy leaves STAGGER. Returns the number of
+## frames driven, or -1 if it never left within the cap. The caller separately
+## asserts the stagger clock is spent at exit, which catches a premature exit;
+## this loop returning -1 catches a wolf stuck in STAGGER after its clock hit zero.
+## 5 == Enemy.State.STAGGER, spelled as a number on purpose (see the group header).
+func _drive_out_of_stagger(node: Node, max_frames: int) -> int:
+	for i in range(max_frames):
+		await physics_frame
+		if int(node.get("state")) != 5:
+			return i + 1
+	return -1
 
 
 ## Current HP of a ComboTarget-shaped fixture, read through the HealthComponent

@@ -168,11 +168,13 @@ func _physics_process(delta: float) -> void:
 		State.STAGGER:
 			velocity = velocity.move_toward(Vector2.ZERO, 400.0 * delta)
 			# The stagger clock runs down, so a combination hit holds the target
-			# down longer than a plain one. The FSM has no STAGGER -> next
-			# transition yet: that gap predates the combinations (STAGGER_TIME was
-			# dead code before this) and is recorded as a known defect, so nothing
-			# leaves the state here and the enemy AI behaves exactly as before.
+			# down longer than a plain one. When it expires the enemy rejoins the
+			# fight (spec §10.4): back onto the player while it is still in reach,
+			# otherwise it gives up and investigates on its own. DEAD is matched
+			# before this branch, so a killing blow taken mid-stagger keeps priority.
 			_stagger_left = maxf(0.0, _stagger_left - delta)
+			if _stagger_left <= 0.0:
+				_leave_stagger()
 		State.IDLE:
 			_process_idle(delta)
 		State.PATROL:
@@ -189,6 +191,18 @@ func _physics_process(delta: float) -> void:
 		if mult != 1.0:
 			velocity *= mult
 	move_and_slide()
+
+
+## Exit from STAGGER once the clock runs out (spec §10.4). Re-acquire the player
+## only when it is still both visible and on a short leash from the post it was
+## hit at; otherwise fall back to INVESTIGATE, which drops to IDLE/PATROL on its
+## own. _player_visible() resolves the player through _player_ref(), so a null or
+## freed player reads as "not visible" and routes to INVESTIGATE.
+func _leave_stagger() -> void:
+	if _player_visible() and global_position.distance_to(spawn_position) <= LEASH_RADIUS:
+		_enter(State.CHASE)
+	else:
+		_enter(State.INVESTIGATE)
 
 
 func _tick(delta: float) -> void:
