@@ -99,6 +99,13 @@ func get_defense() -> int:
 	return 0
 
 
+## Resistance answer for StatusComponent. Enemies have no attributes, so the
+## answer is an explicit zero rather than the component's "no hook" fallback:
+## the contract the player satisfies is the same one an enemy satisfies.
+func get_status_resistance(_status: String) -> float:
+	return 0.0
+
+
 ## Dead answer for StatusComponent / DamageResolver, which probe the owner
 ## instead of assuming where HP lives.
 func is_status_owner_dead() -> bool:

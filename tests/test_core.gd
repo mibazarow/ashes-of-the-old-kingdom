@@ -164,6 +164,9 @@ func _run() -> void:
 	_test_inventory()
 	_test_xp_and_gold()
 
+	print("== attributes ==")
+	await _test_attributes()
+
 	print("== save / load ==")
 	_test_save_load_roundtrip()
 	_test_corrupt_slot()
@@ -238,7 +241,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 32, "every test group ran to completion (got %d/32)" % completed.size())
+	_check(completed.size() == 33, "every test group ran to completion (got %d/33)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -293,6 +296,409 @@ func _test_xp_and_gold() -> void:
 	_check(not gs.spend_gold(999), "cannot overspend")
 	_check(gs.gold == 20, "failed spend keeps balance")
 	completed["xp_gold"] = true
+
+
+## Attributes and progression (spec §7.1–7.2): the four stats, the data-driven XP
+## curve, the per-level point pool, and the single recomputation path that turns
+## points into numbers. The bulk of it is pure state work, so nothing can drift
+## between two checks; the tail runs on a real player and a real enemy in a bare
+## arena, because the derived numbers only count once a combatant actually reads
+## them. The arena is freed and GameState reset at both ends.
+func _test_attributes() -> void:
+	gs.reset()
+
+	# --- defaults --------------------------------------------------------------
+	_check(gs.attribute("strength") == 5, "strength starts at 5")
+	_check(gs.attribute("agility") == 5, "agility starts at 5")
+	_check(gs.attribute("intelligence") == 5, "intelligence starts at 5")
+	_check(gs.attribute("endurance") == 5, "endurance starts at 5")
+	_check(gs.attribute_points == 0, "no attribute points at level 1")
+	_check(gs.level == 1, "level 1 after reset")
+	_check(gs.max_attribute() == 30, "the single attribute cap is 30")
+	_check(absf(gs.crit_chance() - 0.05) < 0.0001, "crit chance at agility 5 is the data base 0.05")
+	_check(absf(gs.move_speed_multiplier() - 1.0) < 0.0001, "movement multiplier at agility 5 is 1.0")
+	_check(absf(gs.magic_multiplier() - 1.0) < 0.0001, "magic multiplier at intelligence 5 is 1.0")
+	_check(absf(gs.control_resistance()) < 0.0001, "control resistance at endurance 5 is 0.0")
+	_check(gs.max_hp == 100 and gs.max_mana == 60 and gs.base_attack == 5,
+		"derived base values at level 1 with no points (hp=%d mana=%d attack=%d)"
+		% [gs.max_hp, gs.max_mana, gs.base_attack])
+	_check(gs.total_attack() == 5, "unarmed total attack equals the base attack")
+
+	# --- the curve lives in the data ------------------------------------------
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/progression.json"))
+	_check(raw is Dictionary, "data/progression.json parses as a JSON object")
+	var data: Dictionary = raw if raw is Dictionary else {}
+	var curve: Array = data.get("xp_curve", [])
+	_check(curve.size() == 21, "xp_curve has 21 entries (got %d)" % curve.size())
+	_check(int(data.get("max_level", 0)) == 20, "data max_level is 20")
+	_check(int(data.get("points_per_level", 0)) == 2, "data points_per_level is 2")
+	_check(not curve.is_empty() and int(curve[0]) == 0, "xp_curve starts at 0 total xp")
+	var monotonic := true
+	for i in range(1, curve.size()):
+		if int(curve[i]) <= int(curve[i - 1]):
+			monotonic = false
+	_check(monotonic, "xp_curve is strictly increasing")
+	# What has to stay smooth is the requirement of a single level (the difference
+	# of two neighbouring totals), not the totals themselves.
+	var smooth := true
+	var worst_factor := 0.0
+	for i in range(2, curve.size()):
+		var previous := float(int(curve[i - 1]) - int(curve[i - 2]))
+		var current := float(int(curve[i]) - int(curve[i - 1]))
+		if previous <= 0.0:
+			smooth = false
+			break
+		var factor := current / previous
+		worst_factor = maxf(worst_factor, factor)
+		if factor < 1.0 or factor > 1.8:
+			smooth = false
+	_check(smooth, "every per-level requirement grows by a factor within 1.0..1.8 (worst %.3f)" % worst_factor)
+	_check(gs.max_level() == 20, "GameState reads max_level from the data")
+	_check(gs.points_per_level() == 2, "GameState reads points_per_level from the data")
+	_check(curve.size() == 21 and gs.xp_needed_for(1) == int(curve[1]) - int(curve[0]),
+		"level 1 needs the first curve difference (got %d)" % gs.xp_needed_for(1))
+	_check(gs.xp_to_next == gs.xp_needed_for(1), "xp_to_next at level 1 comes from the curve")
+
+	# --- a level-up pays exactly one point grant -------------------------------
+	var points_before: int = gs.attribute_points
+	var level_before: int = gs.level
+	gs.add_xp(gs.xp_to_next)
+	_check(gs.level == level_before + 1, "one full bar raises the level by exactly 1")
+	_check(gs.attribute_points == points_before + 2, "a level-up grants exactly 2 points (got %d)" % gs.attribute_points)
+	var two_more: int = gs.xp_needed_for(2) + gs.xp_needed_for(3)
+	gs.add_xp(two_more)
+	_check(gs.level == 4, "exactly two more requirements buy exactly two levels (level %d)" % gs.level)
+	_check(gs.attribute_points == 6, "three level-ups paid 3 x 2 = 6 points (got %d)" % gs.attribute_points)
+
+	# --- the cap: no levels and no points past it ------------------------------
+	gs.reset()
+	gs.add_xp(1000000)
+	_check(gs.level == 20, "a huge xp grant stops at the level cap (level %d)" % gs.level)
+	_check(gs.attribute_points == 38, "19 level-ups grant 19 x 2 = 38 points (got %d)" % gs.attribute_points)
+	var points_at_cap: int = gs.attribute_points
+	gs.add_xp(1000000)
+	_check(gs.level == 20, "xp past the cap does not level further")
+	_check(gs.attribute_points == points_at_cap, "xp past the cap awards no points")
+	_check(gs.xp <= gs.xp_to_next, "xp stops at the cap (xp=%d of %d)" % [gs.xp, gs.xp_to_next])
+
+	# --- spending: what it refuses --------------------------------------------
+	gs.reset()
+	_check(not gs.spend_attribute_point("strength"), "spending out of an empty pool is refused")
+	_check(gs.attribute("strength") == 5, "a refused spend leaves the attribute untouched")
+	gs.attribute_points = 5
+	_check(not gs.spend_attribute_point("charisma"), "an unknown attribute name is refused")
+	_check(not gs.spend_attribute_point(""), "an empty attribute name is refused")
+	_check(gs.attribute_points == 5, "a refused spend costs no point")
+	_check(gs.spend_attribute_point("strength"), "spending into a known attribute succeeds")
+	_check(gs.attribute("strength") == 6, "the point lands in the attribute")
+	_check(gs.attribute_points == 4, "the pool went down by exactly 1")
+
+	# --- strength -> attack, exactly one point per level -----------------------
+	_check(gs.total_attack() == 6, "one point of strength raises total attack by exactly 1 (got %d)" % gs.total_attack())
+	var attack_before: int = gs.total_attack()
+	gs.spend_attribute_point("strength")
+	_check(gs.total_attack() == attack_before + 1,
+		"the second point of strength adds exactly 1 more (got %d)" % gs.total_attack())
+
+	# --- endurance -> hp and control resistance --------------------------------
+	gs.reset()
+	gs.attribute_points = 3
+	_check(gs.spend_attribute_point("endurance"), "endurance accepts a point")
+	_check(gs.max_hp == 105, "one point of endurance raises max hp by exactly 5 (got %d)" % gs.max_hp)
+	_check(absf(gs.control_resistance() - 0.02) < 0.0001,
+		"one point of endurance adds 0.02 control resistance (got %.4f)" % gs.control_resistance())
+	gs.spend_attribute_point("endurance")
+	gs.spend_attribute_point("endurance")
+	_check(gs.max_hp == 115, "three points of endurance raise max hp by 15 (got %d)" % gs.max_hp)
+	_check(absf(gs.control_resistance() - 0.06) < 0.0001,
+		"three points of endurance add 0.06 control resistance (got %.4f)" % gs.control_resistance())
+	_check(gs.hp <= gs.max_hp, "raising a maximum never leaves hp above it")
+	# The 0.6 ceiling is a guard against out-of-range data: the attribute cap on
+	# its own tops out at 0.5, so only a hand-edited save can push past it.
+	gs.attributes["endurance"] = 200
+	gs.recompute_derived()
+	_check(absf(gs.control_resistance() - 0.6) < 0.0001,
+		"control resistance is capped at 0.6 (got %.4f)" % gs.control_resistance())
+
+	# --- intelligence -> mana and magic power ----------------------------------
+	gs.reset()
+	gs.attribute_points = 2
+	_check(gs.spend_attribute_point("intelligence"), "intelligence accepts a point")
+	_check(gs.max_mana == 64, "one point of intelligence raises max mana by exactly 4 (got %d)" % gs.max_mana)
+	# Corrected, not deleted: these two asserted the old +0.6-per-point curve
+	# (1.6 / 2.2), which made intelligence 20 a ~10x spell. The tuned curve is
+	# +0.06 per point above the base 5.
+	_check(absf(gs.magic_multiplier() - 1.06) < 0.0001,
+		"one point of intelligence raises the magic multiplier by 0.06 (got %.4f)" % gs.magic_multiplier())
+	gs.spend_attribute_point("intelligence")
+	_check(gs.max_mana == 68, "two points of intelligence raise max mana by 8 (got %d)" % gs.max_mana)
+	_check(absf(gs.magic_multiplier() - 1.12) < 0.0001,
+		"two points of intelligence raise the magic multiplier by 0.12 (got %.4f)" % gs.magic_multiplier())
+
+	# --- the magic curve is tuned, clamped and read from the data ---------------
+	_check(absf(float(data.get("magic_per_intelligence", 0.0)) - 0.06) < 0.0001,
+		"data/progression.json sets magic_per_intelligence to 0.06")
+	gs.attributes["intelligence"] = 15
+	gs.recompute_derived()
+	_check(absf(gs.magic_multiplier() - 1.6) < 0.001,
+		"intelligence 15 gives the magic multiplier 1.6 (got %.4f)" % gs.magic_multiplier())
+	gs.attributes["intelligence"] = 20
+	gs.recompute_derived()
+	_check(absf(gs.magic_multiplier() - 1.9) < 0.001,
+		"intelligence 20 gives the magic multiplier 1.9 (got %.4f)" % gs.magic_multiplier())
+	gs.attributes["intelligence"] = 30
+	gs.recompute_derived()
+	_check(absf(gs.magic_multiplier() - 2.5) < 0.001,
+		"intelligence 30 sits exactly on the 2.5 ceiling (got %.4f)" % gs.magic_multiplier())
+	gs.attributes["intelligence"] = 200
+	gs.recompute_derived()
+	_check(absf(gs.magic_multiplier() - 2.5) < 0.001,
+		"the magic multiplier never climbs past its 2.5 ceiling (got %.4f)" % gs.magic_multiplier())
+	gs.attributes["intelligence"] = 2
+	gs.recompute_derived()
+	_check(gs.magic_multiplier() >= 1.0 - 0.0001,
+		"intelligence below the base 5 never weakens a spell below 1.0 (got %.4f)" % gs.magic_multiplier())
+	gs.reset()
+
+	# --- agility -> crit and speed --------------------------------------------
+	gs.reset()
+	gs.attribute_points = 3
+	var crit_before: float = gs.crit_chance()
+	var speed_before: float = gs.move_speed_multiplier()
+	_check(gs.spend_attribute_point("agility"), "agility accepts a point")
+	_check(gs.crit_chance() > crit_before, "agility raises the crit chance")
+	_check(absf(gs.crit_chance() - (crit_before + 0.005)) < 0.0001,
+		"one point of agility adds 0.005 crit (got %.4f)" % gs.crit_chance())
+	_check(gs.move_speed_multiplier() > speed_before, "agility raises the movement multiplier")
+	_check(absf(gs.move_speed_multiplier() - 1.008) < 0.0001,
+		"one point of agility adds 0.8 percent speed (got %.4f)" % gs.move_speed_multiplier())
+	gs.spend_attribute_point("agility")
+	gs.spend_attribute_point("agility")
+	_check(absf(gs.crit_chance() - 0.065) < 0.0001,
+		"agility 8 gives 0.065 crit (got %.4f)" % gs.crit_chance())
+	gs.attributes["agility"] = 500
+	gs.recompute_derived()
+	_check(absf(gs.move_speed_multiplier() - 1.3) < 0.0001,
+		"movement multiplier is capped at 1.3 (got %.4f)" % gs.move_speed_multiplier())
+
+	# --- the per-attribute cap -------------------------------------------------
+	gs.reset()
+	gs.attribute_points = 100
+	for i in range(40):
+		gs.spend_attribute_point("strength")
+	_check(gs.attribute("strength") == gs.max_attribute(),
+		"strength stops at the per-attribute cap (got %d)" % gs.attribute("strength"))
+	var points_stuck: int = gs.attribute_points
+	_check(not gs.spend_attribute_point("strength"), "spending into a capped attribute is refused")
+	_check(gs.attribute_points == points_stuck, "a spend into a capped attribute costs no point")
+	_check(gs.attribute("agility") == 5, "the cap on one attribute leaves the others alone")
+
+	# --- one recomputation, called twice, changes nothing ----------------------
+	gs.reset()
+	gs.attribute_points = 6
+	gs.spend_attribute_point("strength")
+	gs.spend_attribute_point("endurance")
+	gs.spend_attribute_point("intelligence")
+	gs.spend_attribute_point("agility")
+	gs.level = 5
+	gs.recompute_derived()
+	var snapshot := _derived_snapshot()
+	gs.recompute_derived()
+	gs.recompute_derived()
+	_check(snapshot == _derived_snapshot(),
+		"recompute_derived() is idempotent (three calls produced the same numbers)")
+
+	# --- the strength bonus and the weapon bonus never double ------------------
+	gs.reset()
+	gs.attribute_points = 3
+	gs.spend_attribute_point("strength")
+	gs.add_item("iron_sword", 1)
+	_check(gs.total_attack() == 6, "unarmed with strength 6 attacks for 6 (got %d)" % gs.total_attack())
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == 12, "strength 6 plus the sword's 6 attacks for 12 (got %d)" % gs.total_attack())
+	gs.unequip("weapon")
+	_check(gs.total_attack() == 6, "taking the sword off leaves the strength bonus intact (got %d)" % gs.total_attack())
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == 12, "equip -> unequip -> equip does not double the weapon bonus (got %d)" % gs.total_attack())
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == 12, "equipping the same weapon twice still does not double it (got %d)" % gs.total_attack())
+	gs.spend_attribute_point("strength")
+	_check(gs.total_attack() == 13, "the next strength point adds exactly 1 on top of the weapon (got %d)" % gs.total_attack())
+	gs.unequip("weapon")
+	gs.reset()
+
+	# --- persistence -----------------------------------------------------------
+	gs.attribute_points = 7
+	gs.spend_attribute_point("strength")
+	gs.spend_attribute_point("endurance")
+	var saved: Dictionary = gs.to_dict()
+	_check(saved.get("attributes") is Dictionary, "to_dict writes an attributes block")
+	_check(int(saved.get("attribute_points", -1)) == 5, "to_dict writes the remaining points")
+	gs.reset()
+	_check(gs.attribute("strength") == 5 and gs.attribute_points == 0, "reset clears attributes and pool")
+	gs.from_dict(saved)
+	_check(gs.attribute("strength") == 6, "round-trip keeps the spent strength")
+	_check(gs.attribute("endurance") == 6, "round-trip keeps the spent endurance")
+	_check(gs.attribute("agility") == 5 and gs.attribute("intelligence") == 5,
+		"round-trip keeps the untouched attributes at 5")
+	_check(gs.attribute_points == 5, "round-trip keeps the unspent points (got %d)" % gs.attribute_points)
+	_check(gs.total_attack() == 6, "round-trip recomputes the same attack (got %d)" % gs.total_attack())
+	_check(gs.max_hp == 105, "round-trip recomputes the same max hp (got %d)" % gs.max_hp)
+
+	# a save written before the attributes existed
+	var legacy: Dictionary = saved.duplicate(true)
+	legacy.erase("attributes")
+	legacy.erase("attribute_points")
+	gs.from_dict(legacy)
+	_check(gs.attribute("strength") == 5 and gs.attribute("agility") == 5
+			and gs.attribute("intelligence") == 5 and gs.attribute("endurance") == 5,
+			"a save with no attributes restores 5/5/5/5")
+	_check(gs.attribute_points == 0, "a save with no point pool restores 0 points")
+
+	# a hand-edited block falls back per key instead of taking the block down
+	var junk: Dictionary = saved.duplicate(true)
+	junk["attributes"] = {"strength": -3, "agility": "quick", "intelligence": 9, "endurance": null}
+	junk["attribute_points"] = "many"
+	gs.from_dict(junk)
+	_check(gs.attribute("strength") == 5, "a negative strength falls back to 5")
+	_check(gs.attribute("agility") == 5, "a string agility falls back to 5")
+	_check(gs.attribute("endurance") == 5, "a null endurance falls back to 5")
+	_check(gs.attribute("intelligence") == 9, "a valid intelligence in the same block survives")
+	_check(gs.attribute_points == 0, "a string point pool falls back to 0")
+	_check(gs.max_mana == 76, "the recomputed maxima follow the restored attributes (got %d)" % gs.max_mana)
+
+	# --- the pools never outlive a maximum that shrank -------------------------
+	var inflated: Dictionary = saved.duplicate(true)
+	inflated["attributes"] = {"strength": 5, "agility": 5, "intelligence": 5, "endurance": 5}
+	inflated["attribute_points"] = 0
+	inflated["level"] = 1
+	inflated["max_hp"] = 400
+	inflated["hp"] = 400
+	inflated["max_mana"] = 300
+	inflated["mana"] = 300
+	gs.from_dict(inflated)
+	_check(gs.max_hp == 100, "the loaded max hp comes from the recompute (got %d)" % gs.max_hp)
+	_check(gs.hp == 100, "hp above the recomputed maximum is clamped on load (got %d)" % gs.hp)
+	_check(gs.max_mana == 60, "the loaded max mana comes from the recompute (got %d)" % gs.max_mana)
+	_check(gs.mana == 60, "mana above the recomputed maximum is clamped on load (got %d)" % gs.mana)
+	gs.attributes["endurance"] = 30
+	gs.recompute_derived()
+	gs.hp = gs.max_hp
+	_check(gs.hp == 225, "endurance 30 owns 225 hp (got %d)" % gs.hp)
+	gs.attributes["endurance"] = 5
+	gs.recompute_derived()
+	_check(gs.hp == 100 and gs.hp <= gs.max_hp,
+		"a shrunken maximum pulls hp back under its ceiling (hp=%d max=%d)" % [gs.hp, gs.max_hp])
+	gs.reset()
+
+	# --- control resistance reaches the status system ---------------------------
+	# `GameState.control_resistance()` used to be computed and never consumed:
+	# StatusComponent asks its owner for `get_status_resistance(status)`, no
+	# combatant had that method, so every control status landed at full duration.
+	# A real player in a bare arena proves the whole chain, and the same hook is
+	# pinned on an enemy so the contract is symmetrical.
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var hero := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(hero)
+	await process_frame
+	gs.reset()
+	gs.attributes["endurance"] = 15
+	gs.recompute_derived()
+	_check(absf(gs.control_resistance() - 0.2) < 0.0001,
+		"endurance 15 owns 0.2 control resistance (got %.4f)" % gs.control_resistance())
+	_check(hero.has_method("get_status_resistance"), "Player exposes get_status_resistance()")
+	if hero.has_method("get_status_resistance"):
+		_check(absf(float(hero.call("get_status_resistance", "root")) - 0.2) < 0.0001,
+			"the player answers 0.2 resistance for root (got %.4f)" % float(hero.call("get_status_resistance", "root")))
+		_check(absf(float(hero.call("get_status_resistance", "stun")) - 0.2) < 0.0001,
+			"the player answers 0.2 resistance for stun (got %.4f)" % float(hero.call("get_status_resistance", "stun")))
+		_check(absf(float(hero.call("get_status_resistance", "shock")) - 0.2) < 0.0001,
+			"the player answers 0.2 resistance for shock (got %.4f)" % float(hero.call("get_status_resistance", "shock")))
+		_check(absf(float(hero.call("get_status_resistance", "burn"))) < 0.0001,
+			"the player answers 0.0 resistance for burn (got %.4f)" % float(hero.call("get_status_resistance", "burn")))
+	var hero_statuses := hero.get_node_or_null("StatusComponent") as StatusComponent
+	_check(hero_statuses != null, "the player owns a StatusComponent")
+	if hero_statuses != null:
+		# Nothing may tick between the apply and the read, or the clock measured
+		# below would be the resistance minus a frame of physics.
+		hero_statuses.set_process(false)
+		hero_statuses.clear_all()
+		_check(bool(hero_statuses.apply_status("stun", 2.0)), "the stun lands on the player")
+		_check(absf(hero_statuses.time_left("stun") - 1.6) < 0.0001,
+			"0.2 resistance shortens a 2.0 s stun to 1.6 s (got %.4f)" % hero_statuses.time_left("stun"))
+		hero_statuses.clear_all()
+
+	# An enemy has no attributes, so it answers zero explicitly rather than
+	# leaving StatusComponent to its "owner has no hook" fallback.
+	var wolf := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	_check(wolf != null and wolf.has_method("get_status_resistance"), "Enemy exposes get_status_resistance()")
+	var enemy_resistance_is_zero := wolf != null
+	if wolf != null:
+		for control_status: String in ["burn", "chill", "shock", "root", "blight", "stun"]:
+			if absf(float(wolf.call("get_status_resistance", control_status))) > 0.0001:
+				enemy_resistance_is_zero = false
+	_check(enemy_resistance_is_zero, "an enemy reports 0.0 resistance for every status")
+	if wolf != null:
+		wolf.free()
+
+	# --- the magic multiplier really reaches a cast -----------------------------
+	# fire_burst is an aoe, so its damage goes through Player._magic_damage() and
+	# out through DamageResolver onto a target with get_defense() == 0 and no crit
+	# path (an aoe payload carries no "critical" key). The only slop left is the
+	# integer rounding of the final damage, hence the 1-point tolerance.
+	DamageResolver.reset()
+	gs.mana = gs.max_mana
+	gs.learn_skill("fire_burst")
+	gs.select_skill("fire_burst")
+	var cds: Dictionary = hero.get("_skill_cooldowns")
+	var burst := SkillDB.get_skill("fire_burst")
+	var aim := InputSource.aim_direction(hero.global_position)
+	var burst_dir: Vector2 = aim if aim.length() > 0.01 else (hero.get("facing") as Vector2)
+	var dummy := AoeTarget.new()
+	arena.add_child(dummy)
+	dummy.add_to_group("enemy")
+	dummy.global_position = hero.global_position + burst_dir * float(burst.get("range", 0.0))
+	cds["fire_burst"] = 0.0
+	_check(bool(hero.try_ability()), "fire_burst casts at intelligence 5")
+	var damage_at_int5: int = dummy.last_damage
+	_check(damage_at_int5 == 18, "fire_burst lands its raw 18 at intelligence 5 (got %d)" % damage_at_int5)
+	gs.attributes["intelligence"] = 20
+	gs.recompute_derived()
+	gs.mana = gs.max_mana
+	cds["fire_burst"] = 0.0
+	_check(bool(hero.try_ability()), "fire_burst casts again at intelligence 20")
+	var damage_at_int20: int = dummy.last_damage
+	_check(absf(float(damage_at_int20) - float(damage_at_int5) * 1.9) <= 1.0,
+			"intelligence 20 lands the same cast at 1.9x (got %d vs %d)" % [damage_at_int20, damage_at_int5])
+	_check(damage_at_int20 > damage_at_int5,
+		"the smarter caster hits harder (%d > %d)" % [damage_at_int20, damage_at_int5])
+
+	dummy.queue_free()
+	arena.queue_free()
+	await process_frame
+	_check(get_first_node_in_group("player") == null, "the attributes rig left no player behind")
+	_check(get_nodes_in_group("enemy").is_empty(), "the attributes rig left no enemy behind")
+	DamageResolver.reset()
+	gs.reset()
+	completed["attributes"] = true
+
+
+## Every number `recompute_derived()` owns, so the idempotency check can compare
+## one dictionary instead of nine separate assertions.
+func _derived_snapshot() -> Dictionary:
+	return {
+		"max_hp": gs.max_hp,
+		"max_mana": gs.max_mana,
+		"base_attack": gs.base_attack,
+		"hp": gs.hp,
+		"mana": gs.mana,
+		"total_attack": gs.total_attack(),
+		"crit": gs.crit_chance(),
+		"speed": gs.move_speed_multiplier(),
+		"magic": gs.magic_multiplier(),
+		"resist": gs.control_resistance(),
+	}
 
 func _test_save_load_roundtrip() -> void:
 	gs.reset()

@@ -1,13 +1,46 @@
 extends Node
 ## Authoritative player + run state. Everything that must survive a save lives here.
 
-const XP_PER_LEVEL := 40
-const MAX_LEVEL := 20
 const QUICK_SLOT_COUNT := 4
+
+# --- attributes (spec §7.1) ---------------------------------------------------
+## The four attributes and their starting value. Every derived number the game
+## reads (HP, mana, attack, crit, speed, magic power, control resistance) is a
+## function of these plus the level, and `recompute_derived()` is the only place
+## that turns them into numbers.
+const ATTRIBUTE_NAMES := ["strength", "agility", "intelligence", "endurance"]
+const BASE_ATTRIBUTE := 5
+
+## Hard ceiling of a single attribute (30). Without it one stat could be stacked
+## until its derived number left the playable range; the per-level point pool is
+## the real limit, this is the guard against a hand-edited or bugged save.
+const MAX_ATTRIBUTE := 30
+
+## Growth terms of the recomputation. The attribute terms come from
+## data/progression.json; these are the flat base values and the per-level growth
+## that exist before any point is spent.
+const HP_BASE := 100
+const HP_PER_LEVEL := 12
+const MANA_BASE := 60
+const MANA_PER_LEVEL := 6
+const ATTACK_BASE := 5
+const ATTACK_PER_STRENGTH := 1
+
+## Safety ceilings and floors of the cached multipliers. The speed and resistance
+## ceilings sit above what the attribute cap alone can produce (agility 30 gives
+## 1.2 speed, endurance 30 gives 0.5 resistance), so they only ever bind on
+## out-of-range data or a temporary effect. The magic ceiling is the design value
+## itself: intelligence 30 lands exactly on 2.5, so it is the end of the curve,
+## and the floor keeps a below-base intelligence from ever weakening a spell.
+const SPEED_MULTIPLIER_CAP := 1.3
+const CONTROL_RESIST_CAP := 0.6
+const MAGIC_MULTIPLIER_CAP := 2.5
+
+const PROGRESSION_PATH := "res://data/progression.json"
 
 var level: int = 1
 var xp: int = 0
-var xp_to_next: int = XP_PER_LEVEL
+var xp_to_next: int = 100
 
 var hp: int = 100
 var max_hp: int = 100
@@ -16,6 +49,20 @@ var max_mana: int = 60
 var base_attack: int = 5
 var base_defense: int = 0
 var gold: int = 0
+
+## Сила / Ловкость / Интеллект / Выносливость and the points still unspent.
+var attributes: Dictionary = {"strength": 5, "agility": 5, "intelligence": 5, "endurance": 5}
+var attribute_points: int = 0
+
+## Cached results of `recompute_derived()`. Read them through the getters; they
+## are only ever written by the recompute, so they cannot drift apart.
+var _crit_chance: float = 0.05
+var _move_speed_multiplier: float = 1.0
+var _magic_multiplier: float = 1.0
+var _control_resistance: float = 0.0
+
+var _progression_data: Dictionary = {}
+var _progression_loaded: bool = false
 
 var inventory: Array[Dictionary] = []
 var equipment: Dictionary = {"weapon": "", "armor": ""}
@@ -53,12 +100,9 @@ func _process(_delta: float) -> void:
 func reset() -> void:
 	level = 1
 	xp = 0
-	xp_to_next = XP_PER_LEVEL
-	max_hp = 100
-	hp = max_hp
-	max_mana = 60
-	mana = max_mana
-	base_attack = 5
+	attributes = _default_attributes()
+	attribute_points = 0
+	xp_to_next = xp_needed_for(level)
 	base_defense = 0
 	gold = 0
 	inventory = []
@@ -69,6 +113,9 @@ func reset() -> void:
 	flags = {}
 	kills = {}
 	play_time_ms = 0
+	recompute_derived()
+	hp = max_hp
+	mana = max_mana
 	_emit_all()
 
 
@@ -127,21 +174,227 @@ func revive_full() -> void:
 	EventBus.player_mana_changed.emit(mana, max_mana)
 
 
-# --- progression --------------------------------------------------------------
+# --- attributes (spec §7.1) ---------------------------------------------------
+
+## Value of one attribute. An unknown name or a hand-edited non-number reads as
+## the starting value rather than 0, so a corrupt save cannot zero out a stat.
+func attribute(attr_name: String) -> int:
+	var raw: Variant = attributes.get(attr_name, BASE_ATTRIBUTE)
+	return int(raw) if (raw is int or raw is float) else BASE_ATTRIBUTE
+
+
+## Ceiling of a single attribute. See MAX_ATTRIBUTE for why the cap exists.
+func max_attribute() -> int:
+	return MAX_ATTRIBUTE
+
+
+## Spends one point from the pool into one attribute and recomputes everything
+## derived from it. Rejects an unknown attribute, an empty pool and an attribute
+## already at the cap, so a rejected call changes nothing at all.
+func spend_attribute_point(attr_name: String) -> bool:
+	if not ATTRIBUTE_NAMES.has(attr_name):
+		return false
+	if attribute_points <= 0:
+		return false
+	if attribute(attr_name) >= max_attribute():
+		return false
+	attributes[attr_name] = attribute(attr_name) + 1
+	attribute_points -= 1
+	recompute_derived()
+	EventBus.player_health_changed.emit(hp, max_hp)
+	EventBus.player_mana_changed.emit(mana, max_mana)
+	return true
+
+
+## The ONE place that turns level + attributes into numbers. It only ever
+## assigns from those inputs (never accumulates), so calling it twice is the same
+## as calling it once, and no other system can add to a derived value twice.
+## Equipment and temporary effects stay outside on purpose: they are read where
+## they are used (`total_attack()`, `Player._move_multiplier()`), so taking them
+## off can never leave a residue here.
+func recompute_derived() -> void:
+	var strength_points := attribute("strength") - BASE_ATTRIBUTE
+	var agility_points := attribute("agility") - BASE_ATTRIBUTE
+	var intelligence_points := attribute("intelligence") - BASE_ATTRIBUTE
+	var endurance_points := attribute("endurance") - BASE_ATTRIBUTE
+	var levels := maxi(0, level - 1)
+
+	max_hp = HP_BASE + levels * HP_PER_LEVEL \
+			+ endurance_points * _int_setting("hp_per_endurance", 5)
+	max_mana = MANA_BASE + levels * MANA_PER_LEVEL \
+			+ intelligence_points * _int_setting("mana_per_intelligence", 4)
+	base_attack = ATTACK_BASE + strength_points * ATTACK_PER_STRENGTH
+
+	_crit_chance = clampf(
+		_float_setting("crit_base", 0.05) \
+		+ float(agility_points) * _float_setting("crit_per_agility", 0.005), 0.0, 1.0)
+	_move_speed_multiplier = clampf(
+		1.0 + float(agility_points) * _float_setting("speed_per_agility", 0.8) / 100.0,
+		1.0, SPEED_MULTIPLIER_CAP)
+	_magic_multiplier = clampf(
+		1.0 + float(intelligence_points) * _float_setting("magic_per_intelligence", 0.06),
+		1.0, MAGIC_MULTIPLIER_CAP)
+	_control_resistance = clampf(
+		float(endurance_points) * _float_setting("control_resist_per_endurance", 0.02),
+		0.0, CONTROL_RESIST_CAP)
+
+	# Current pools only get clamped into the new maxima: raising a maximum never
+	# refills anything, and a maximum that shrank must not leave the player above
+	# its own ceiling.
+	hp = clampi(hp, 0, max_hp)
+	mana = clampi(mana, 0, max_mana)
+
+
+## Шанс крита (Ловкость). Read by `Player._apply_attack_hits()`.
+func crit_chance() -> float:
+	return _crit_chance
+
+
+## Множитель скорости бега (Ловкость). Stacks multiplicatively with the status
+## movement multiplier in `Player._move_multiplier()`.
+func move_speed_multiplier() -> float:
+	return _move_speed_multiplier
+
+
+## Множитель магического урона (Интеллект). Applied at cast time in `Player`.
+## `1.0 + (intelligence - 5) * magic_per_intelligence`, held inside 1.0..2.5, so
+## the curve ends at the attribute cap instead of running away with it.
+func magic_multiplier() -> float:
+	return _magic_multiplier
+
+
+## Сопротивление контролю (Выносливость), 0..CONTROL_RESIST_CAP.
+func control_resistance() -> float:
+	return _control_resistance
+
+
+func _default_attributes() -> Dictionary:
+	return {"strength": BASE_ATTRIBUTE, "agility": BASE_ATTRIBUTE,
+			"intelligence": BASE_ATTRIBUTE, "endurance": BASE_ATTRIBUTE}
+
+
+# --- progression (spec §7.2) --------------------------------------------------
+
+## The curve lives in data/progression.json so tuning it is a data edit. Anything
+## unusable falls back to the built-in curve rather than leaving the player with
+## no progression at all.
+func _progression() -> Dictionary:
+	if not _progression_loaded:
+		_progression_loaded = true
+		_progression_data = _default_progression()
+		if FileAccess.file_exists(PROGRESSION_PATH):
+			var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(PROGRESSION_PATH))
+			if parsed is Dictionary:
+				_progression_data = _sanitize_progression(parsed as Dictionary)
+			else:
+				push_error("GameState: cannot parse %s" % PROGRESSION_PATH)
+	return _progression_data
+
+
+func _default_progression() -> Dictionary:
+	return {
+		"max_level": 20,
+		"points_per_level": 2,
+		"xp_curve": [0, 100, 240, 420, 640, 900, 1200, 1540, 1920, 2340, 2800,
+				3300, 3840, 4420, 5040, 5700, 6400, 7140, 7920, 8740, 9600],
+		"crit_base": 0.05,
+		"crit_per_agility": 0.005,
+		"speed_per_agility": 0.8,
+		"hp_per_endurance": 5,
+		"mana_per_intelligence": 4,
+		"magic_per_intelligence": 0.06,
+		"control_resist_per_endurance": 0.02,
+	}
+
+
+## Keeps only the values that can actually be used: a curve that is not a
+## monotonic number list, a negative point grant, a non-positive level cap and a
+## non-numeric coefficient each fall back to the default for that one key, so one
+## typo in the data cannot take progression down with it.
+func _sanitize_progression(raw: Dictionary) -> Dictionary:
+	var clean := _default_progression()
+	var max_level_raw: Variant = raw.get("max_level", null)
+	if (max_level_raw is int or max_level_raw is float) and int(max_level_raw) >= 2:
+		clean["max_level"] = int(max_level_raw)
+	var points_raw: Variant = raw.get("points_per_level", null)
+	if (points_raw is int or points_raw is float) and int(points_raw) >= 0:
+		clean["points_per_level"] = int(points_raw)
+	var curve_raw: Variant = raw.get("xp_curve", null)
+	if curve_raw is Array:
+		var curve: Array = curve_raw as Array
+		var candidate: Array[int] = []
+		var previous := -1
+		var usable := curve.size() >= 2
+		for value: Variant in curve:
+			if not (value is int or value is float) or int(value) <= previous:
+				usable = false
+				break
+			previous = int(value)
+			candidate.append(previous)
+		if usable and candidate[0] == 0:
+			clean["xp_curve"] = candidate
+	for key: String in ["crit_base", "crit_per_agility", "speed_per_agility",
+			"hp_per_endurance", "mana_per_intelligence", "magic_per_intelligence",
+			"control_resist_per_endurance"]:
+		var value: Variant = raw.get(key, null)
+		if (value is int or value is float) and float(value) >= 0.0:
+			clean[key] = float(value)
+	return clean
+
+
+func _int_setting(key: String, fallback: int) -> int:
+	var raw: Variant = _progression().get(key, fallback)
+	return int(raw) if (raw is int or raw is float) else fallback
+
+
+func _float_setting(key: String, fallback: float) -> float:
+	var raw: Variant = _progression().get(key, fallback)
+	return float(raw) if (raw is int or raw is float) else fallback
+
+
+func max_level() -> int:
+	return _int_setting("max_level", 20)
+
+
+func points_per_level() -> int:
+	return _int_setting("points_per_level", 2)
+
+
+func xp_curve() -> Array:
+	return _progression().get("xp_curve", []) as Array
+
+
+## XP still needed at `level_at`. The curve stores TOTAL xp per level, so the
+## requirement of a level is the difference of two neighbouring entries.
+func xp_needed_for(level_at: int) -> int:
+	var curve := xp_curve()
+	if curve.size() < 2:
+		return 100
+	var index := clampi(level_at, 1, curve.size() - 1)
+	return maxi(1, int(curve[index]) - int(curve[index - 1]))
+
 
 func add_xp(amount: int) -> void:
 	if amount <= 0:
 		return
+	var level_cap := max_level()
 	xp += amount
-	while xp >= xp_to_next and level < MAX_LEVEL:
+	var leveled := false
+	while xp >= xp_to_next and level < level_cap:
 		xp -= xp_to_next
 		level += 1
-		xp_to_next = XP_PER_LEVEL + (level - 1) * 25
-		max_hp += 12
-		hp = max_hp
-		max_mana += 6
-		mana = max_mana
+		attribute_points += points_per_level()
+		xp_to_next = xp_needed_for(level)
+		leveled = true
 		EventBus.toast.emit("Уровень %d" % level)
+	# At the cap the bar stays full and nothing more is banked: there is no
+	# level, and therefore no point grant, past it.
+	if level >= level_cap:
+		xp = mini(xp, xp_to_next)
+	recompute_derived()
+	if leveled:
+		hp = max_hp
+		mana = max_mana
 	EventBus.player_xp_changed.emit(xp, xp_to_next, level)
 	EventBus.player_health_changed.emit(hp, max_hp)
 	EventBus.player_mana_changed.emit(mana, max_mana)
@@ -160,6 +413,9 @@ func spend_gold(amount: int) -> bool:
 	return true
 
 
+## Attack as the game sees it: the recomputed base (which already contains the
+## strength bonus) plus the equipped weapon. The weapon is the only term added
+## here, so equipping, unequipping and re-equipping cannot double anything.
 func total_attack() -> int:
 	var bonus := 0
 	var weapon: String = equipment.get("weapon", "")
@@ -332,6 +588,8 @@ func to_dict() -> Dictionary:
 		"max_mana": max_mana,
 		"base_attack": base_attack,
 		"base_defense": base_defense,
+		"attributes": attributes.duplicate(true),
+		"attribute_points": attribute_points,
 		"gold": gold,
 		"inventory": inventory.duplicate(true),
 		"equipment": equipment.duplicate(true),
@@ -345,14 +603,19 @@ func to_dict() -> Dictionary:
 
 
 func from_dict(d: Dictionary) -> void:
-	level = int(d.get("level", 1))
-	xp = int(d.get("xp", 0))
-	xp_to_next = int(d.get("xp_to_next", XP_PER_LEVEL))
-	max_hp = int(d.get("max_hp", 100))
+	level = clampi(int(d.get("level", 1)), 1, max_level())
+	xp_to_next = xp_needed_for(level)
+	xp = clampi(int(d.get("xp", 0)), 0, xp_to_next)
+	attributes = _restore_attributes(d.get("attributes", null))
+	attribute_points = _restore_attribute_points(d.get("attribute_points", null))
+	# The saved maxima are read only as the ceiling the saved pools were written
+	# against. recompute_derived() at the end replaces them with the authoritative
+	# ones and pulls the pools back under them, so a save whose hp sits above the
+	# recomputed maximum cannot load a player with more HP than he owns.
+	max_hp = int(d.get("max_hp", HP_BASE))
 	hp = clampi(int(d.get("hp", max_hp)), 1, max_hp)
-	max_mana = int(d.get("max_mana", 60))
+	max_mana = int(d.get("max_mana", MANA_BASE))
 	mana = clampi(int(d.get("mana", max_mana)), 0, max_mana)
-	base_attack = int(d.get("base_attack", 5))
 	base_defense = int(d.get("base_defense", 0))
 	gold = int(d.get("gold", 0))
 	inventory.clear()
@@ -368,7 +631,36 @@ func from_dict(d: Dictionary) -> void:
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
+	recompute_derived()
 	_emit_all()
+
+
+## A save written before the attributes existed has no such key, and a
+## hand-edited one may hold anything, so every key is restored on its own: a bad
+## value falls back to the starting 5 rather than dropping the whole block (and a
+## good value in the same block survives).
+func _restore_attributes(raw: Variant) -> Dictionary:
+	var restored := _default_attributes()
+	if not (raw is Dictionary):
+		return restored
+	var block: Dictionary = raw as Dictionary
+	for attr_name: String in ATTRIBUTE_NAMES:
+		var value: Variant = block.get(attr_name, BASE_ATTRIBUTE)
+		if not (value is int or value is float):
+			continue
+		var points := int(value)
+		if points < 1 or points > MAX_ATTRIBUTE:
+			continue
+		restored[attr_name] = points
+	return restored
+
+
+## The point pool is a plain counter, but a save could carry a negative or an
+## absurd number, both of which would let a player spend points he never earned.
+func _restore_attribute_points(raw: Variant) -> int:
+	if not (raw is int or raw is float):
+		return 0
+	return clampi(int(raw), 0, MAX_ATTRIBUTE * ATTRIBUTE_NAMES.size())
 
 
 ## Saves written before quick slots existed have no such key, and a hand-edited

@@ -93,9 +93,14 @@ func _status() -> StatusComponent:
 	return _status_component
 
 
+## Movement multiplier the player actually moves at: the agility bonus from
+## GameState (spec §7.1) stacked with whatever the statuses do to him. Both are
+## plain factors, so a chilled agile player is still faster than a chilled
+## untrained one, and a root (0.0) still stops everybody.
 func _move_multiplier() -> float:
 	var sc := _status()
-	return sc.move_multiplier() if sc != null else 1.0
+	var from_status := sc.move_multiplier() if sc != null else 1.0
+	return from_status * GameState.move_speed_multiplier()
 
 
 func _blocks_actions() -> bool:
@@ -117,6 +122,18 @@ func get_defense() -> int:
 
 func is_invulnerable() -> bool:
 	return _iframe_left > 0.0 or state == State.DASH or state == State.DEAD
+
+
+## Resistance answer for StatusComponent, which asks its owner instead of
+## knowing where the number lives. Only the control statuses (spec §8.2 root,
+## stun, shock) are shortened by Выносливость; a burn or a chill lands at full
+## duration no matter how tough the player is.
+func get_status_resistance(status: String) -> float:
+	match status:
+		"root", "stun", "shock":
+			return GameState.control_resistance()
+		_:
+			return 0.0
 
 
 ## Dead answer for StatusComponent / DamageResolver. The player has no
@@ -325,7 +342,7 @@ func _apply_attack_hits() -> void:
 			"damage": damage,
 			"hit_id": _current_hit_id,
 			"damage_type": "physical",
-			"critical": randf() < 0.15,
+			"critical": randf() < GameState.crit_chance(),
 		})
 		_hit_stop(0.045)
 
@@ -335,6 +352,17 @@ func _apply_attack_hits() -> void:
 func _step_damage() -> int:
 	var mult := float(_current_step.get("damage_mult", 1.0))
 	return maxi(1, int(round(float(GameState.total_attack()) * mult)))
+
+
+## Magic damage of a skill (spec §7.1 Интеллект). The skill keeps its raw number
+## in the data and the intelligence bonus is applied here, at cast time, so one
+## skill definition serves every player and no skill data has to know about the
+## attributes. A skill with no damage (heal, barrier) stays at 0.
+func _magic_damage(skill: Dictionary) -> int:
+	var raw := int(skill.get("damage", 0))
+	if raw <= 0:
+		return 0
+	return maxi(1, int(round(float(raw) * GameState.magic_multiplier())))
 
 
 ## Hit-stop is delegated to the process-wide HitStop autoload so the slow-motion
@@ -426,7 +454,7 @@ func _cast_projectile(skill: Dictionary, dir: Vector2, hit_id: String) -> void:
 	proj.global_position = global_position
 	proj.setup({
 		"direction": dir,
-		"damage": int(skill.get("damage", 0)),
+		"damage": _magic_damage(skill),
 		"status": String(skill.get("status", "")),
 		"status_duration": float(skill.get("status_duration", 0.0)),
 		"hit_id": hit_id,
@@ -454,7 +482,7 @@ func _cast_self(skill: Dictionary) -> void:
 func _cast_aoe(skill: Dictionary, dir: Vector2, hit_id: String) -> void:
 	var aim_point := global_position + dir * float(skill.get("range", 0.0))
 	var radius := float(skill.get("radius", 0.0))
-	var damage := int(skill.get("damage", 0))
+	var damage := _magic_damage(skill)
 	var status := String(skill.get("status", ""))
 	var status_duration := float(skill.get("status_duration", 0.0))
 	var damage_type := _school_damage_type(String(skill.get("school", "")))
