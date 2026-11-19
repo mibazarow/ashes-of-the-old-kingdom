@@ -24,6 +24,7 @@ GameState="*res://scripts/core/game_state.gd"
 QuestManager="*res://scripts/quests/quest_manager.gd"
 SaveManager="*res://scripts/save/save_manager.gd"
 InputBindings="*res://scripts/core/input_bindings.gd"
+HitStop="*res://scripts/core/hit_stop.gd"
 
 [display]
 

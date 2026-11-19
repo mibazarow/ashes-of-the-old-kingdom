@@ -27,8 +27,9 @@ HUD, кроме сцены `main.tscn`.
 | `QuestManager` | `scripts/quests/quest_manager.gd` | Состояния квестов, выдача награды |
 | `SaveManager` | `scripts/save/save_manager.gd` | Слоты, атомарная запись, миграции |
 | `InputBindings` | `scripts/core/input_bindings.gd` | Переназначение клавиш, `user://settings/controls.json` |
+| `HitStop` | `scripts/core/hit_stop.gd` | Общее замедление времени после удара, всегда возвращает `time_scale` к 1.0 |
 
-Autoload'ов ровно шесть: всё остальное — сцены и компоненты.
+Autoload'ов ровно семь: всё остальное — сцены и компоненты.
 
 ## Ввод
 

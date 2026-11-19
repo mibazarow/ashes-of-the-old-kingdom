@@ -337,10 +337,31 @@ func _step_damage() -> int:
 	return maxi(1, int(round(float(GameState.total_attack()) * mult)))
 
 
+## Hit-stop is delegated to the process-wide HitStop autoload so the slow-motion
+## clock outlives the player: a player freed mid-stop (death + respawn, scene
+## change, quit) can no longer strand Engine.time_scale below 1.0, and overlapping
+## swings in one fan merge into a single window instead of racing. The autoload is
+## resolved at runtime through the main loop, like the other systems do, so this
+## also works under `godot --script` where autoload identifiers are not registered.
+func _hit_stop_autoload() -> Node:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return null
+	return loop.root.get_node_or_null("HitStop")
+
+
 func _hit_stop(duration: float) -> void:
-	Engine.time_scale = 0.12
-	await get_tree().create_timer(duration, true, false, true).timeout
-	Engine.time_scale = 1.0
+	var hit_stop := _hit_stop_autoload()
+	if hit_stop != null:
+		hit_stop.call("request", duration)
+
+
+## Wipe any running hit-stop. Called on death and respawn so a stop cannot carry
+## into the death screen or onto the respawned player.
+func _cancel_hit_stop() -> void:
+	var hit_stop := _hit_stop_autoload()
+	if hit_stop != null:
+		hit_stop.call("cancel")
 
 
 func _start_dash(dir: Vector2) -> void:
@@ -558,6 +579,11 @@ func _on_health_changed(current: int, _maximum: int) -> void:
 
 
 func _on_player_died() -> void:
+	# A hit-stop in progress must not survive into the death screen: the player is
+	# about to be freed and respawned, and a stop owned by the autoload would
+	# otherwise keep the whole game in slow motion. Cancel before the DEAD guard so
+	# it runs even on a re-entrant death signal.
+	_cancel_hit_stop()
 	# Death wipes every status: a burn must not keep ticking a corpse, and a stun
 	# must not survive into the respawn.
 	var dead_sc := _status()
@@ -579,6 +605,9 @@ func _on_player_died() -> void:
 
 
 func _respawn() -> void:
+	# Belt-and-braces: a stop started a moment before death (or a fresh one during
+	# the death animation) must not carry onto the respawned player.
+	_cancel_hit_stop()
 	var spawn_sc := _status()
 	if spawn_sc != null:
 		spawn_sc.clear_all()

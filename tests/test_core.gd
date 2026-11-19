@@ -224,6 +224,9 @@ func _run() -> void:
 	print("== weapon combos ==")
 	await _test_weapon_combos()
 
+	print("== hit-stop ==")
+	await _test_hit_stop()
+
 	print("== inventory equip ==")
 	await _test_inventory_equip()
 
@@ -235,7 +238,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 31, "every test group ran to completion (got %d/31)" % completed.size())
+	_check(completed.size() == 32, "every test group ran to completion (got %d/32)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2513,6 +2516,95 @@ func _test_weapon_combos() -> void:
 	DamageResolver.reset()
 	gs.reset()
 	completed["weapon_combos"] = true
+
+
+## Process-wide hit-stop (the HitStop autoload): the slow-motion clock is owned by
+## a node that is never freed mid-stop, merges overlapping requests to the longest
+## remaining duration, and always restores Engine.time_scale = 1.0 — even when the
+## player dies or respawns while a stop is running. The clock is driven
+## deterministically by calling _process directly with scaled deltas, so no real
+## frames advance the stop inside this group (the only awaits are for the player
+## death/respawn rig, by which point the scale is already back to 1.0).
+func _test_hit_stop() -> void:
+	var hit_stop := root.get_node_or_null("HitStop")
+	_check(hit_stop != null, "HitStop autoload present")
+	if hit_stop == null:
+		Engine.time_scale = 1.0
+		completed["hit_stop"] = true
+		return
+	var scale: float = float(hit_stop.get("SCALE"))
+	Engine.time_scale = 1.0
+
+	# --- a single request slows time, then restores after the real duration ----
+	hit_stop.call("request", 0.1)
+	_check(absf(Engine.time_scale - scale) < 0.0001, "request sets Engine.time_scale to the stop scale")
+	_advance_hit_stop(hit_stop, 0.05)
+	_check(absf(Engine.time_scale - scale) < 0.0001, "still slowed halfway through the requested time")
+	_advance_hit_stop(hit_stop, 0.06)
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "restored to 1.0 after the requested real time")
+
+	# --- overlapping requests keep the scale down until the LONGER one ends ----
+	hit_stop.call("request", 0.05)
+	hit_stop.call("request", 0.15)
+	_check(absf(Engine.time_scale - scale) < 0.0001, "overlapping requests keep the stop scale")
+	_advance_hit_stop(hit_stop, 0.10)
+	_check(absf(Engine.time_scale - scale) < 0.0001,
+		"still slowed past the shorter request while the longer one runs")
+	_advance_hit_stop(hit_stop, 0.06)
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "restored once the longer request's time is spent")
+
+	# --- cancel restores immediately and clears the active flag ----------------
+	hit_stop.call("request", 0.5)
+	_check(absf(Engine.time_scale - scale) < 0.0001, "request before cancel slows time")
+	hit_stop.call("cancel")
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "cancel restores 1.0 immediately")
+	_check(not bool(hit_stop.get("_active")), "cancel clears the active flag")
+
+	# --- zero / negative durations are ignored ---------------------------------
+	hit_stop.call("request", 0.0)
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "zero duration does not change the scale")
+	_check(not bool(hit_stop.get("_active")), "zero duration does not activate the stop")
+	hit_stop.call("request", -0.5)
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "negative duration does not change the scale")
+	_check(not bool(hit_stop.get("_active")), "negative duration does not activate the stop")
+
+	# --- death and respawn during a stop cannot strand the scale ---------------
+	gs.reset()
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(player)
+	await process_frame
+	player.call("_hit_stop", 0.5)
+	_check(absf(Engine.time_scale - scale) < 0.0001, "player hit-stop delegates to the autoload")
+	gs.take_damage(999)
+	_check(gs.hp == 0, "the killing blow kills the player")
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "player death cancels the running hit-stop")
+	player.call("_respawn")
+	_check(gs.hp > 0, "respawn restores hp")
+	_check(absf(Engine.time_scale - 1.0) < 0.0001, "respawn leaves full speed")
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+
+	# --- finally-style guard: never poison a later group with a reduced scale --
+	var ended_clean := absf(Engine.time_scale - 1.0) < 0.0001
+	Engine.time_scale = 1.0
+	_check(ended_clean, "hit-stop group ends with Engine.time_scale == 1.0")
+	completed["hit_stop"] = true
+
+
+## Advance the HitStop clock by `seconds` of real time in fixed real steps. The
+## autoload converts the scaled delta it receives back to real seconds (it divides
+## by Engine.time_scale), so handing it `step * Engine.time_scale` advances exactly
+## `step` real seconds per call. Once the stop has restored the scale to 1.0 the
+## autoload ignores further calls, so the loop simply runs out harmlessly.
+func _advance_hit_stop(hit_stop: Node, seconds: float, step: float = 0.01) -> void:
+	var remaining := seconds
+	while remaining > 0.000001:
+		var s := minf(step, remaining)
+		hit_stop.call("_process", s * Engine.time_scale)
+		remaining -= s
 
 
 ## P1 regression: GameState.equip() existed but nothing ever called it, so the
