@@ -236,6 +236,9 @@ func _run() -> void:
 	print("== equipment slots ==")
 	_test_equipment_slots()
 
+	print("== item rarity ==")
+	_test_item_rarity()
+
 	print("== character panel ==")
 	await _test_character_panel()
 
@@ -247,7 +250,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 35, "every test group ran to completion (got %d/35)" % completed.size())
+	_check(completed.size() == 36, "every test group ran to completion (got %d/36)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3212,6 +3215,9 @@ func _test_equipment_slots() -> void:
 		expected_defense += int(def.get("defense", 0))
 	_check(gs.inventory.size() == 6, "six equipment stacks in the inventory (got %d)" % gs.inventory.size())
 	_check(expected_defense == 8, "the six items carry 8 defense between them (got %d)" % expected_defense)
+	# The shield, ring and amulet gate behind endurance 6 / agility 8 / intelligence
+	# 7 (spec §7.3), so invest before wearing them.
+	_spend_to_meet_loadout()
 	_check(_equip_all(per_slot), "each of the six items equips into its own slot")
 	_check(_slots_match(per_slot), "all six slots hold the item that was put in them")
 	_check(gs.equipped_count() == 6, "all six slots report as worn")
@@ -3237,6 +3243,8 @@ func _test_equipment_slots() -> void:
 	gs.reset()
 	gs.add_item("swift_ring", 1)
 	gs.add_item("echo_amulet", 1)
+	# The ring needs agility 8 and the amulet intelligence 7 before either equips.
+	_spend_to_meet_loadout()
 	_check(gs.equip("swift_ring"), "the first accessory equips")
 	_check(String(gs.equipment.get("accessory_1", "")) == "swift_ring",
 		"the first accessory takes accessory_1")
@@ -3299,6 +3307,7 @@ func _test_equipment_slots() -> void:
 	gs.reset()
 	for item_id: String in per_slot.values():
 		gs.add_item(item_id, 1)
+	_spend_to_meet_loadout()
 	_check(_equip_all(per_slot), "rebuilt the full six-slot loadout")
 	_check(gs.total_attack() == expected_attack and gs.total_defense() == expected_defense,
 		"the rebuilt loadout reads the same totals (%d/%d)" % [gs.total_attack(), gs.total_defense()])
@@ -3350,7 +3359,15 @@ func _test_equipment_slots() -> void:
 	gs.equip("leather_boots")
 	_check(absf(gs.move_speed_multiplier() - 1.05) < 0.0001,
 		"the boots' 5 percent is additive on the 1.0 base (got %.4f)" % gs.move_speed_multiplier())
+	# The ring now gates behind agility 8. Lift agility just long enough to wear
+	# it, then drop straight back to 5 so the equipment-stacking arithmetic below
+	# still measures at the agility-5 baseline — the ring stays worn, because
+	# nothing unequips an item when a requirement is no longer met.
+	gs.attributes["agility"] = 8
+	gs.recompute_derived()
 	gs.equip("swift_ring")
+	gs.attributes["agility"] = 5
+	gs.recompute_derived()
 	_check(String(gs.equipment.get("accessory_1", "")) == "swift_ring", "the ring went into accessory_1")
 	_check(absf(gs.move_speed_multiplier() - 1.13) < 0.0001,
 		"boots and ring add their 13 percent together (got %.4f)" % gs.move_speed_multiplier())
@@ -3375,6 +3392,11 @@ func _test_equipment_slots() -> void:
 	gs.reset()
 	gs.add_item("echo_amulet", 1)
 	_check(absf(gs.control_resistance()) < 0.0001, "no control resistance with nothing worn")
+	# The amulet gates behind intelligence 7; control resistance is endurance-based,
+	# so investing in intelligence meets the gate without moving the number below.
+	gs.attribute_points = 2
+	gs.spend_attribute_point("intelligence")
+	gs.spend_attribute_point("intelligence")
 	_check(gs.equip("echo_amulet"), "the amulet equips")
 	_check(absf(gs.control_resistance() - 0.1) < 0.0001,
 		"the amulet's 10 percent is additive on the endurance base (got %.4f)" % gs.control_resistance())
@@ -3400,7 +3422,20 @@ func _test_equipment_slots() -> void:
 	gs.reset()
 	for item_id: String in per_slot.values():
 		gs.add_item(item_id, 1)
+	# Wear the gated loadout, then drop the attributes back to the starting
+	# 5/5/5/5 before saving: a save may legitimately hold a loadout the starting
+	# attributes could not re-wear (the gate is only at equip time), and the
+	# restored player must then still measure at the agility-5 / endurance-5
+	# baseline the checks below assert.
+	gs.attributes["endurance"] = 6
+	gs.attributes["agility"] = 8
+	gs.attributes["intelligence"] = 7
+	gs.recompute_derived()
 	_check(_equip_all(per_slot), "equipped the loadout for the round-trip")
+	gs.attributes["endurance"] = 5
+	gs.attributes["agility"] = 5
+	gs.attributes["intelligence"] = 5
+	gs.recompute_derived()
 	var saved: Dictionary = gs.to_dict()
 	_check(saved.get("equipment") is Dictionary, "to_dict writes an equipment block")
 	var saved_equipment: Dictionary = saved.get("equipment", {})
@@ -3432,6 +3467,10 @@ func _test_equipment_slots() -> void:
 		"the restored old weapon still attacks (got %d)" % gs.total_attack())
 	_check(gs.total_defense() == gs.base_defense + 3,
 		"the restored old armor still defends (got %d)" % gs.total_defense())
+	# The shield gates behind endurance 6, so invest the one point it needs before
+	# wearing it (spending endurance never moves attack or the base defense).
+	gs.attribute_points = 1
+	gs.spend_attribute_point("endurance")
 	gs.add_item("wooden_shield", 1)
 	_check(gs.equip("wooden_shield"), "a save restored from the old format gains the new slots")
 	_check(String(gs.equipment.get("secondary", "")) == "wooden_shield",
@@ -3459,6 +3498,136 @@ func _test_equipment_slots() -> void:
 	completed["equipment_slots"] = true
 
 
+## Rarity, icons, sources and attribute requirements (spec §7.3 / §14.1): every
+## item carries a valid rarity plus a non-empty icon and source; the five tiers
+## map to five distinct colours with a sane fallback that is not one of them; and
+## the equip gate refuses an item whose attribute requirement is unmet, naming the
+## exact required value through `equip_blocker()` while leaving all six slots and
+## the inventory untouched. Meeting the requirement (spending to strength 7) lets
+## the spear on; a non-equipment item is still refused for the existing reason.
+## GameState is reset at both ends so no later group inherits raised attributes.
+func _test_item_rarity() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- every item is fully described (spec §14.1) ---------------------------
+	var valid_rarities := ["common", "uncommon", "rare", "epic", "legendary"]
+	var all := ItemDB.all_items()
+	var described_ok := true
+	var bad_ids: PackedStringArray = []
+	for item_id: String in all.keys():
+		var def: Dictionary = all[item_id]
+		var tier := String(def.get("rarity", ""))
+		var icon := String(def.get("icon", ""))
+		var source := String(def.get("source", ""))
+		if tier == "" or not valid_rarities.has(tier) or icon == "" or source == "":
+			described_ok = false
+			bad_ids.append(item_id)
+	_check(not all.is_empty(), "the item table is not empty")
+	_check(described_ok, "every item has a non-empty valid rarity, icon and source (bad: %s)" % ", ".join(bad_ids))
+
+	# --- the assigned rarities match the spec ---------------------------------
+	_check(ItemDB.rarity("iron_sword") == "uncommon", "iron_sword is uncommon")
+	_check(ItemDB.rarity("iron_spear") == "uncommon", "iron_spear is uncommon")
+	_check(ItemDB.rarity("leather_armor") == "common", "leather_armor is common")
+	_check(ItemDB.rarity("wooden_shield") == "common", "wooden_shield is common")
+	_check(ItemDB.rarity("leather_boots") == "common", "leather_boots is common")
+	_check(ItemDB.rarity("swift_ring") == "rare", "swift_ring is rare")
+	_check(ItemDB.rarity("echo_amulet") == "rare", "echo_amulet is rare")
+	_check(ItemDB.rarity("health_potion") == "common", "health_potion is common")
+	_check(ItemDB.rarity("mana_potion") == "common", "mana_potion is common")
+	_check(ItemDB.rarity("wolf_fang") == "common", "wolf_fang is common")
+
+	# --- rarity colour: five distinct tiers + a sane fallback -----------------
+	var seen_colors: Array[Color] = []
+	var distinct := true
+	for tier: String in valid_rarities:
+		var c := ItemDB.rarity_color(tier)
+		for prior in seen_colors:
+			if prior == c:
+				distinct = false
+		seen_colors.append(c)
+	_check(distinct, "the five rarities map to five distinct colours")
+	_check(ItemDB.rarity_color("common") != ItemDB.rarity_color("legendary"),
+		"common and legendary are clearly different colours")
+	var fallback := ItemDB.rarity_color("not_a_rarity")
+	var collides := false
+	for c in seen_colors:
+		if fallback == c:
+			collides = true
+	_check(not collides, "an unknown rarity falls back to a colour distinct from every tier")
+	_check(ItemDB.rarity("no_such_item") == "common", "an unknown item reads as common rarity")
+
+	# --- icon / source / requirement accessors --------------------------------
+	_check(ItemDB.icon("iron_sword") != "" and ItemDB.icon("iron_sword") != "?",
+		"iron_sword has a real icon glyph")
+	_check(ItemDB.icon("no_such_item") == "?", "an unknown item falls back to the ? icon")
+	_check(ItemDB.source("iron_spear") != "", "iron_spear names a source")
+	_check(ItemDB.requirements("health_potion").is_empty(), "a consumable has no requirements")
+
+	# --- equip_blocker at the starting attributes -----------------------------
+	gs.add_item("iron_sword", 1)
+	_check(gs.equip_blocker("iron_sword") == "",
+		"iron_sword has no blocker at the starting strength 5")
+	gs.add_item("iron_spear", 1)
+	var spear_blocker: String = String(gs.equip_blocker("iron_spear"))
+	_check(spear_blocker != "", "iron_spear is blocked at strength 5")
+	_check(spear_blocker.contains("7"), "the spear blocker names the required value 7 (%s)" % spear_blocker)
+
+	# --- the refused spear equip changes nothing ------------------------------
+	var inv_before: Array = gs.inventory.duplicate(true)
+	_check(not gs.equip("iron_spear"), "the spear is refused by equip at strength 5")
+	_check(_slots_all_empty(), "the refused spear equip left all six slots empty")
+	_check(gs.equipment.size() == 6, "the refused spear equip added no slot")
+	_check(gs.inventory == inv_before, "the refused spear equip left the inventory untouched")
+	_check(String(gs.equipment.get("weapon", "")) != "iron_spear", "the spear never entered the weapon slot")
+
+	# --- spending to strength 7 lets the spear on -----------------------------
+	gs.attribute_points = 2
+	gs.spend_attribute_point("strength")
+	gs.spend_attribute_point("strength")
+	_check(gs.attribute("strength") == 7, "strength is 7 after two points")
+	_check(gs.equip_blocker("iron_spear") == "", "the spear blocker clears at strength 7")
+	_check(gs.equip("iron_spear"), "the spear equips once strength reaches 7")
+	_check(String(gs.equipment.get("weapon", "")) == "iron_spear", "the spear is now worn in weapon")
+
+	# --- the amulet gates behind intelligence 7 -------------------------------
+	gs.reset()
+	gs.add_item("echo_amulet", 1)
+	_check(gs.equip_blocker("echo_amulet").contains("7"),
+		"the amulet blocker names the required intelligence 7 at the start")
+	_check(not gs.equip("echo_amulet"), "the amulet is refused at intelligence 5")
+	_check(_slots_all_empty(), "the refused amulet equip left every slot empty")
+
+	# --- a non-equipment item is refused for the existing reason --------------
+	gs.reset()
+	gs.add_item("health_potion", 1)
+	_check(not gs.equip("health_potion"), "a consumable is still refused by equip")
+	_check(gs.equip_blocker("health_potion") != "",
+		"equip_blocker still returns a reason for a non-equipment item")
+	_check(_slots_all_empty(), "a consumable never enters a slot")
+
+	# --- lookups are stable and a save round-trip never moves equipment -------
+	# icon/rarity live in the data, not in a save, so they cannot drift; assert the
+	# lookups are stable and that a round-trip leaves the worn set identical.
+	var icon_a := ItemDB.icon("iron_sword")
+	var rarity_a := ItemDB.rarity("iron_sword")
+	_check(ItemDB.icon("iron_sword") == icon_a and ItemDB.rarity("iron_sword") == rarity_a,
+		"ItemDB icon/rarity lookups are stable across calls")
+	gs.reset()
+	gs.add_item("iron_sword", 1)
+	_check(gs.equip("iron_sword"), "sword equipped for the round-trip")
+	var worn_before: Dictionary = gs.equipment.duplicate(true)
+	gs.from_dict(gs.to_dict())
+	_check(gs.equipment == worn_before, "a save round-trip does not change the worn equipment")
+	_check(ItemDB.icon("iron_sword") == icon_a and ItemDB.rarity("iron_sword") == rarity_a,
+		"a save round-trip does not change the item's icon or rarity")
+
+	gs.reset()
+	qm.reset()
+	completed["item_rarity"] = true
+
+
 ## True when every declared slot exists in the dictionary and holds an empty
 ## string — the shape a fresh or freshly restored GameState must always have.
 func _slots_all_empty() -> bool:
@@ -3475,6 +3644,21 @@ func _equip_all(items_by_slot: Dictionary) -> bool:
 		if not gs.equip(String(items_by_slot[slot])):
 			ok = false
 	return ok
+
+
+## Spend points to reach the values the gated equipment asks for (endurance 6,
+## agility 8, intelligence 7), leaving strength at 5. The shield, ring and amulet
+## now gate behind those (spec §7.3), so the sections that equip the full loadout
+## through the real equip() gate must invest first — the requirement stays in the
+## data, the test meets it rather than removing it. Strength is left at 5 so the
+## attack/defense arithmetic the surrounding checks assert is unchanged.
+func _spend_to_meet_loadout() -> void:
+	gs.attribute_points = 6
+	gs.spend_attribute_point("endurance")
+	for _i in range(3):
+		gs.spend_attribute_point("agility")
+	for _i in range(2):
+		gs.spend_attribute_point("intelligence")
 
 
 ## True when each declared slot holds exactly the item the caller expects.
@@ -3617,12 +3801,22 @@ func _test_character_panel() -> void:
 
 
 ## Put a weapon into the equipment slot (or clear it with ""). Goes through the
-## real equip() path, which needs the item in the inventory first.
+## real equip() path, which needs the item in the inventory first. A weapon may
+## now carry attribute requirements (spec §7.3), and this helper exists to study
+## weapon behaviour rather than the gate, so it lifts the attributes to whatever
+## the weapon asks for before equipping — the spear needs strength 7.
 func _equip_weapon(item_id: String) -> void:
 	gs.equipment["weapon"] = ""
 	if item_id == "":
 		return
 	gs.add_item(item_id, 1)
+	var requirements := ItemDB.requirements(item_id)
+	for attr_name: String in requirements:
+		var raw: Variant = requirements[attr_name]
+		var required := int(raw) if (raw is int or raw is float) else 0
+		if gs.attribute(attr_name) < required:
+			gs.attributes[attr_name] = required
+			gs.recompute_derived()
 	gs.equip(item_id)
 
 

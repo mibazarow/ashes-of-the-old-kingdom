@@ -3,6 +3,9 @@
     "health_potion": {
       "name": "Настой здоровья",
       "type": "consumable",
+      "rarity": "common",
+      "icon": "♥",
+      "source": "подножка на земле",
       "heal": 40,
       "price": 25,
       "description": "Восстанавливает 40 единиц здоровья."
@@ -10,6 +13,9 @@
     "mana_potion": {
       "name": "Настой маны",
       "type": "consumable",
+      "rarity": "common",
+      "icon": "♦",
+      "source": "подножка на земле",
       "mana": 30,
       "price": 20,
       "description": "Восстанавливает 30 единиц маны."
@@ -17,7 +23,13 @@
     "iron_sword": {
       "name": "Железный меч",
       "type": "equipment",
+      "rarity": "uncommon",
+      "icon": "†",
+      "source": "сундук у опушки",
       "slot": "weapon",
+      "requires": {
+        "strength": 5
+      },
       "attack": 6,
       "price": 80,
       "description": "Простой, но честный клинок. +6 к атаке.",
@@ -52,7 +64,13 @@
     "iron_spear": {
       "name": "Железное копьё",
       "type": "equipment",
+      "rarity": "uncommon",
+      "icon": "‡",
+      "source": "сундук в юго-западной чаще",
       "slot": "weapon",
+      "requires": {
+        "strength": 7
+      },
       "attack": 7,
       "price": 90,
       "description": "Бьёт с расстояния, но разворачивается тяжело. +7 к атаке.",
@@ -79,7 +97,13 @@
     "leather_armor": {
       "name": "Кожаный доспех",
       "type": "equipment",
+      "rarity": "common",
+      "icon": "■",
+      "source": "торговец",
       "slot": "armor",
+      "requires": {
+        "endurance": 5
+      },
       "defense": 3,
       "price": 60,
       "description": "Дублёная кожа. +3 к защите."
@@ -87,7 +111,13 @@
     "wooden_shield": {
       "name": "Деревянный щит",
       "type": "equipment",
+      "rarity": "common",
+      "icon": "●",
+      "source": "торговец",
       "slot": "secondary",
+      "requires": {
+        "endurance": 6
+      },
       "defense": 3,
       "price": 45,
       "description": "Дубовая доска с железной нашлёпкой. +3 к защите."
@@ -95,7 +125,13 @@
     "leather_boots": {
       "name": "Кожаные сапоги",
       "type": "equipment",
+      "rarity": "common",
+      "icon": "≡",
+      "source": "торговец",
       "slot": "boots",
+      "requires": {
+        "agility": 5
+      },
       "defense": 1,
       "speed_bonus": 5,
       "price": 30,
@@ -104,7 +140,13 @@
     "swift_ring": {
       "name": "Кольцо тихого шага",
       "type": "equipment",
+      "rarity": "rare",
+      "icon": "○",
+      "source": "ремесло",
       "slot": "accessory",
+      "requires": {
+        "agility": 8
+      },
       "defense": 0,
       "speed_bonus": 8,
       "price": 120,
@@ -113,7 +155,13 @@
     "echo_amulet": {
       "name": "Амулет колокольного эха",
       "type": "equipment",
+      "rarity": "rare",
+      "icon": "◆",
+      "source": "ремесло",
       "slot": "accessory",
+      "requires": {
+        "intelligence": 7
+      },
       "defense": 1,
       "resist_bonus": 10,
       "price": 140,
@@ -122,12 +170,18 @@
     "wolf_fang": {
       "name": "Клык пепельного волка",
       "type": "material",
+      "rarity": "common",
+      "icon": "▼",
+      "source": "пепельный волк",
       "price": 8,
       "description": "Материал для ремесла."
     },
     "rusted_seal": {
       "name": "Ржавая печать",
       "type": "quest",
+      "rarity": "common",
+      "icon": "★",
+      "source": "награда за задание",
       "price": 0,
       "description": "Обломок королевской печати. Не продаётся."
     }

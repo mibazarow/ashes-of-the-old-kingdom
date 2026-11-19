@@ -22,6 +22,16 @@ const ACCESSORY_SLOTS := ["accessory_1", "accessory_2"]
 const ATTRIBUTE_NAMES := ["strength", "agility", "intelligence", "endurance"]
 const BASE_ATTRIBUTE := 5
 
+## Gendered Russian lead-in for an unmet requirement, so `equip_blocker` reads as
+## natural text ("Нужна сила 7 (у вас 5)") rather than a machine string. The
+## adjective agrees with the noun's grammatical gender (интеллект is masculine).
+const ATTRIBUTE_REQUIRE_PHRASES := {
+	"strength": "Нужна сила",
+	"agility": "Нужна ловкость",
+	"intelligence": "Нужен интеллект",
+	"endurance": "Нужна выносливость",
+}
+
 ## Hard ceiling of a single attribute (30). Without it one stat could be stacked
 ## until its derived number left the playable range; the per-level point pool is
 ## the real limit, this is the guard against a hand-edited or bugged save.
@@ -521,23 +531,55 @@ func count_item(item_id: String) -> int:
 ##   that nothing aggregates;
 ## - wearing an item that is already worn changes nothing and still succeeds,
 ##   which is what keeps one ring from landing in both accessory slots and being
-##   counted twice.
+##   counted twice;
+## - an item whose data names attribute `requires` is refused until the matching
+##   attribute reaches the required value (spec §7.3), so a spear or a ring is
+##   gated behind investment rather than picked up at the starting 5/5/5/5.
+##   `equip_blocker()` returns the human-readable reason for the refusal.
 func equip(item_id: String) -> bool:
-	var def := ItemDB.get_item(item_id)
-	if def.is_empty() or not ItemDB.is_equipment(item_id):
-		return false
-	if count_item(item_id) <= 0:
+	# `equip_blocker()` is the single gate: an empty blocker already proved the
+	# item is equipment, is carried, fits one of the six slots and meets every
+	# attribute requirement (or is already worn), so the only work left is the
+	# already-worn no-op check and the write. Routing both through one function is
+	# what keeps the HUD's reason and the actual refusal from ever disagreeing.
+	if equip_blocker(item_id) != "":
 		return false
 	if equipped_slot_of(item_id) != "":
 		return true
 	var target := _equipment_slot_for(item_id)
-	if target == "":
-		return false
 	equipment[target] = item_id
 	recompute_derived()
 	EventBus.equipment_changed.emit()
-	EventBus.toast.emit("Надето: %s" % String(def.get("name", item_id)))
+	EventBus.toast.emit("Надето: %s" % ItemDB.display_name(item_id))
 	return true
+
+
+## Why `equip(item_id)` would refuse right now, or "" when it would succeed
+## (spec §7.3 attribute requirements). The HUD reads this to toast the exact
+## reason ("Нужна сила 7 (у вас 5)") instead of a generic failure, and it is the
+## one source of truth the equip gate itself consults, so the two cannot drift
+## apart about what is equippable. The checks run in the same order equip() does:
+## unknown item, not equipment, not carried, already worn (a success), a slot the
+## game does not have, then the attribute requirements.
+func equip_blocker(item_id: String) -> String:
+	if ItemDB.get_item(item_id).is_empty():
+		return "Предмет не найден"
+	if not ItemDB.is_equipment(item_id):
+		return "Нельзя надеть"
+	if count_item(item_id) <= 0:
+		return "Сначала подберите предмет"
+	if equipped_slot_of(item_id) != "":
+		return ""
+	if _equipment_slot_for(item_id) == "":
+		return "Нет подходящего слота"
+	var requirements := ItemDB.requirements(item_id)
+	for attr_name: String in requirements:
+		var raw: Variant = requirements[attr_name]
+		var required := int(raw) if (raw is int or raw is float) else 0
+		if attribute(attr_name) < required:
+			var phrase := String(ATTRIBUTE_REQUIRE_PHRASES.get(attr_name, attr_name))
+			return "%s %d (у вас %d)" % [phrase, required, attribute(attr_name)]
+	return ""
 
 
 ## Clears an equipment slot (any of `EQUIPMENT_SLOTS`). Returns true only when

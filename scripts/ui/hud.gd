@@ -9,7 +9,26 @@ const QUICK_SLOT_ACTIONS := [&"quick_slot_1", &"quick_slot_2", &"quick_slot_3", 
 ## grow past the 480x270 viewport; the cursor scrolls a window over the rest.
 const MAX_VISIBLE_ROWS := 8
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
-const COLOR_ROW_SELECTED := Color(1.0, 0.97, 0.62)
+const COLOR_WARNING := Color(0.98, 0.66, 0.36)
+
+## Russian display names for the rarity tiers, shown in the selected-row detail
+## line (spec §14.1). The colour reinforces the tier; this text is what actually
+## names it, so colour never stands in for a clear description.
+const RARITY_LABELS_RU := {
+	"common": "обычное",
+	"uncommon": "необычное",
+	"rare": "редкое",
+	"epic": "эпическое",
+	"legendary": "легендарное",
+}
+
+## Lowercase attribute names for the "Требуется: сила 7" detail line.
+const ATTRIBUTE_LABELS_RU := {
+	"strength": "сила",
+	"agility": "ловкость",
+	"intelligence": "интеллект",
+	"endurance": "выносливость",
+}
 
 var _root: Control
 var _hp_bar: ProgressBar
@@ -29,6 +48,8 @@ var _dialogue_text: Label
 var _inventory_panel: PanelContainer
 var _inventory_list: VBoxContainer
 var _inventory_stats: Label
+var _inventory_detail: Label
+var _inventory_requirement: Label
 var _inventory_selection: int = 0
 var _inventory_scroll: int = 0
 var _enter_held: bool = false
@@ -275,6 +296,23 @@ func _build_inventory_panel() -> void:
 	_inventory_list.add_theme_constant_override("separation", 1)
 	box.add_child(_inventory_list)
 
+	# Selected-row detail (spec §14.1): the rarity and the source of whatever the
+	# cursor is on, plus a warning line that only appears when a requirement is
+	# unmet. Both wrap to at most two lines so the full text stays readable, and
+	# both live OUTSIDE _inventory_list so the row count stays capped at
+	# MAX_VISIBLE_ROWS and the panel stays inside 480x270 — the requirement line is
+	# hidden (zero height) when there is nothing to warn about.
+	_inventory_detail = _make_text("", COLOR_ROW)
+	_inventory_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_inventory_detail.max_lines_visible = 2
+	box.add_child(_inventory_detail)
+
+	_inventory_requirement = _make_text("", COLOR_WARNING)
+	_inventory_requirement.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_inventory_requirement.max_lines_visible = 2
+	_inventory_requirement.visible = false
+	box.add_child(_inventory_requirement)
+
 	# Quick slots live here instead of a static hint so a re-assigned slot shows
 	# up without a rebuild. Four short lines keep the panel inside 480x270.
 	_quick_slot_list = VBoxContainer.new()
@@ -448,6 +486,7 @@ func _refresh_inventory() -> void:
 		_inventory_selection = 0
 		_inventory_scroll = 0
 		_inventory_list.add_child(_make_text("пусто", Color(0.6, 0.6, 0.58)))
+		_set_inventory_detail("")
 		return
 	# Clamp the cursor when the list shrank below it (an item was consumed).
 	_inventory_selection = clampi(_inventory_selection, 0, size - 1)
@@ -463,7 +502,8 @@ func _refresh_inventory() -> void:
 		var slot: Dictionary = GameState.inventory[i]
 		var id := String(slot["id"])
 		var amount := int(slot["amount"])
-		var label := "%s x%d" % [ItemDB.display_name(id), amount]
+		# Icon first, then name, then count, then the worn marker (spec §14.1).
+		var label := "%s %s x%d" % [ItemDB.icon(id), ItemDB.display_name(id), amount]
 		# One lookup against all six slots rather than a hardcoded pair, so an
 		# accessory or a shield is tagged the moment it is worn.
 		var equipped: bool = GameState.equipped_slot_of(id) != ""
@@ -472,7 +512,47 @@ func _refresh_inventory() -> void:
 		var selected: bool = i == _inventory_selection
 		if selected:
 			label = "> " + label
-		_inventory_list.add_child(_make_text(label, COLOR_ROW_SELECTED if selected else COLOR_ROW))
+		# Row colour is the item's rarity colour; the selected row is lightened so
+		# the "> " cursor stays visible against every tier, from pale common-grey
+		# to bright legendary-gold.
+		var row_color := ItemDB.rarity_color(ItemDB.rarity(id))
+		if selected:
+			row_color = row_color.lightened(0.35)
+		_inventory_list.add_child(_make_text(label, row_color))
+	# The detail line always describes the row the cursor is on, whatever rarity.
+	_set_inventory_detail(String(GameState.inventory[_inventory_selection]["id"]))
+
+
+## Fills the selected-row detail line (rarity + source) and the requirement
+## warning. An empty id (empty inventory) clears both. The requirement line shows
+## only when the item names a requirement the player has not yet met, so it adds
+## height only when there is something to warn about — the panel stays bounded.
+func _set_inventory_detail(item_id: String) -> void:
+	if _inventory_detail == null:
+		return
+	if item_id == "":
+		_inventory_detail.text = ""
+		_inventory_requirement.visible = false
+		return
+	var tier := ItemDB.rarity(item_id)
+	var detail := "Редкость: %s" % String(RARITY_LABELS_RU.get(tier, tier))
+	var source := ItemDB.source(item_id)
+	if source != "":
+		detail += " · Источник: %s" % source
+	_inventory_detail.text = detail
+	_inventory_detail.add_theme_color_override("font_color", ItemDB.rarity_color(tier))
+	var unmet: PackedStringArray = []
+	var requirements := ItemDB.requirements(item_id)
+	for attr_name: String in requirements:
+		var raw: Variant = requirements[attr_name]
+		var required := int(raw) if (raw is int or raw is float) else 0
+		if GameState.attribute(attr_name) < required:
+			unmet.append("%s %d" % [String(ATTRIBUTE_LABELS_RU.get(attr_name, attr_name)), required])
+	if unmet.is_empty():
+		_inventory_requirement.visible = false
+	else:
+		_inventory_requirement.text = "Требуется: %s" % ", ".join(unmet)
+		_inventory_requirement.visible = true
 
 
 ## One compact line with the player's current combat stats, so the effect of an
@@ -517,7 +597,14 @@ func _activate_inventory_selection() -> void:
 	if worn_slot != "":
 		GameState.unequip(worn_slot)
 	else:
-		GameState.equip(id)
+		# Ask the state why it would refuse before trying, so an unmet attribute
+		# requirement toasts the exact reason ("Нужна сила 7 (у вас 5)") rather
+		# than a generic failure. An empty blocker means equip() will succeed.
+		var blocker := GameState.equip_blocker(id)
+		if blocker != "":
+			EventBus.toast.emit(blocker)
+		else:
+			GameState.equip(id)
 	_refresh_inventory()
 
 

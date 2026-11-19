@@ -8,6 +8,26 @@ const PATH := "res://data/items.json"
 ## hand-written or legacy item still gets a playable chain window.
 const DEFAULT_COMBO_WINDOW := 0.4
 
+## The five rarity tiers of spec §14.1, in ascending order. The order is the
+## scale `rarity_color` and any future sort walk, so a rarity that is not one of
+## these five is a data typo, not a hidden sixth tier.
+const RARITIES := ["common", "uncommon", "rare", "epic", "legendary"]
+
+## Colour per rarity (spec §14.1: colour must never replace the description, it
+## only reinforces it). common is a neutral grey-white so an unremarkable item
+## does not shout; the tiers then climb green → blue → purple → gold.
+const RARITY_COLORS := {
+	"common": Color(0.82, 0.84, 0.8),
+	"uncommon": Color(0.46, 0.86, 0.42),
+	"rare": Color(0.42, 0.66, 0.98),
+	"epic": Color(0.74, 0.5, 0.95),
+	"legendary": Color(0.98, 0.82, 0.32),
+}
+
+## Fallback colour for an unknown rarity string, kept distinct from every tier
+## so a data typo is visible rather than silently reading as common-white.
+const RARITY_COLOR_FALLBACK := Color(0.9, 0.62, 0.86)
+
 static var _items: Dictionary = {}
 static var _loaded := false
 
@@ -61,6 +81,43 @@ static func is_equipment(item_id: String) -> bool:
 ## not the data's.
 static func equipment_slot(item_id: String) -> String:
 	return String(get_item(item_id).get("slot", ""))
+
+
+## Rarity tier of an item (spec §14.1). Anything missing or not one of the five
+## tiers reads as "common", so a legacy or hand-edited item still has a valid
+## rarity rather than an empty string that would break the colour lookup.
+static func rarity(item_id: String) -> String:
+	var value := String(get_item(item_id).get("rarity", "common"))
+	return value if RARITIES.has(value) else "common"
+
+
+## Display colour for a rarity tier. An unknown tier returns the distinct
+## fallback colour rather than common-white, so a data typo is visible.
+static func rarity_color(tier: String) -> Color:
+	var color: Variant = RARITY_COLORS.get(tier, null)
+	return color as Color if color is Color else RARITY_COLOR_FALLBACK
+
+
+## The single-glyph icon shown at the head of an inventory row. A missing glyph
+## reads as "?" so a row is never blank at the head.
+static func icon(item_id: String) -> String:
+	var value := String(get_item(item_id).get("icon", ""))
+	return value if value != "" else "?"
+
+
+## Attribute requirements to wear an item (spec §7.3): a Dictionary of
+## attribute name -> required value. Empty when the item names none (and for any
+## non-equipment item, which never has requirements). A non-Dictionary value is
+## treated as no requirement rather than throwing.
+static func requirements(item_id: String) -> Dictionary:
+	var raw: Variant = get_item(item_id).get("requires", {})
+	return raw if raw is Dictionary else {}
+
+
+## Short human-readable origin of an item (chest id, enemy, vendor, craft).
+## Empty when the data names none.
+static func source(item_id: String) -> String:
+	return String(get_item(item_id).get("source", ""))
 
 
 ## Attack chain of a weapon (spec §6 "Комбо зависят от оружия"): an ordered list
