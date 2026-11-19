@@ -43,6 +43,13 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_settings_for_shot")
+	elif ui_probe == "character":
+		# A few unspent points so the screenshot shows a realistic screen state
+		# (the points line and a spendable cursor), not an empty pool.
+		GameState.attribute_points = 4
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_character_for_shot")
 	elif ui_probe == "map":
 		# Walk the player east along the road so the explored area grows past the
 		# spawn clearing and the trap landmark falls inside the visited radius.

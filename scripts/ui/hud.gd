@@ -39,6 +39,7 @@ var _pause_panel: PanelContainer
 var _hint_label: Label
 var _map_panel: MapPanel
 var _settings_panel: SettingsPanel
+var _character_panel: CharacterPanel
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
@@ -47,6 +48,7 @@ var _map_open := false
 var _paused := false
 var _settings_open := false
 var _settings_just_closed := false
+var _character_open := false
 
 
 func _ready() -> void:
@@ -166,7 +168,7 @@ func _build_ui() -> void:
 	column.add_child(_skill_label)
 
 	_hint_label = _make_text(
-		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · F5/F9",
+		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · F5/F9",
 		Color(0.72, 0.74, 0.7)
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -179,6 +181,16 @@ func _build_ui() -> void:
 	_build_pause_panel()
 	_build_settings_panel()
 	_build_map_panel()
+	_build_character_panel()
+
+
+## The character screen lives in its own script (like SettingsPanel): it owns
+## its layout and centring, and hud.gd only opens, closes and gates it.
+func _build_character_panel() -> void:
+	_character_panel = CharacterPanel.new()
+	_character_panel.name = "CharacterPanel"
+	_character_panel.visible = false
+	_root.add_child(_character_panel)
 
 
 ## Rebinding lives in its own script (like MapPanel): it has its own raw-event
@@ -312,6 +324,7 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("F5 — сохранить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("F9 — загрузить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("E — Настройки управления", Color(0.9, 0.9, 0.86)))
+	box.add_child(_make_text("C — Персонаж", Color(0.9, 0.9, 0.86)))
 
 
 func _make_theme() -> Theme:
@@ -549,6 +562,76 @@ func inventory_row_texts() -> PackedStringArray:
 	return out
 
 
+## C opens the character screen over everything else: the modal panels it could
+## visually collide with are closed first, the same way the map open does it.
+func _toggle_character() -> void:
+	if _character_open:
+		_close_character()
+	else:
+		if _dialogue_open:
+			close_dialogue()
+		if _inventory_open:
+			_toggle_inventory()
+		if _journal_open:
+			_toggle_journal()
+		if _map_open:
+			_close_map()
+		if _settings_open:
+			_close_settings()
+		# The pause menu advertises "C — Персонаж", so C can arrive while it is
+		# on screen. Hide it, otherwise the two centred panels overlap.
+		if _paused:
+			_close_pause()
+		_character_open = true
+		_enter_held = false
+		if _character_panel != null:
+			_character_panel.visible = true
+			_character_panel.open()
+	GameState.ui_blocking = _character_open or _inventory_open or _dialogue_open \
+			or _journal_open or _paused or _map_open or _settings_open
+
+
+## One close path for the character screen, so every sibling modal (inventory,
+## journal, map, Esc) leaves both the flag and the node in the same state.
+func _close_character() -> void:
+	if not _character_open:
+		return
+	_character_open = false
+	_enter_held = false
+	if _character_panel != null:
+		_character_panel.visible = false
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
+			or _paused or _map_open or _settings_open
+
+
+## The character screen owns the input while it is open: the cursor walks the
+## four attributes with the movement actions, and E / Enter spends a point on
+## the selected one. Enter has no InputMap action (a human-only alias for E), so
+## it is edge-detected by hand, exactly like in the inventory.
+func _process_character_navigation() -> void:
+	var delta := 0
+	if InputSource.is_action_just_pressed(&"move_up"):
+		delta -= 1
+	if InputSource.is_action_just_pressed(&"move_down"):
+		delta += 1
+	if delta != 0 and _character_panel != null:
+		_character_panel.move_selection(delta)
+	var enter_now := Input.is_key_pressed(KEY_ENTER)
+	var enter_edge := enter_now and not _enter_held
+	_enter_held = enter_now
+	if (InputSource.is_action_just_pressed(&"interact") or enter_edge) and _character_panel != null:
+		_character_panel.spend_selected_point()
+
+
+func is_character_open() -> bool:
+	return _character_open
+
+
+func open_character_for_shot() -> void:
+	if not _character_open:
+		_toggle_character()
+
+
 ## One line per quick slot: "1: Настой здоровья", empty slots show "—".
 func _refresh_quick_slots() -> void:
 	if _quick_slot_list == null:
@@ -627,7 +710,7 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
-	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open
+	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open
 	EventBus.dialogue_closed.emit()
 
 
@@ -636,6 +719,11 @@ func _toggle_inventory() -> void:
 	if _inventory_open:
 		_journal_open = false
 		_journal_panel.visible = false
+		# The character screen is a sibling modal: it must not stay open under
+		# the inventory (only while unpaused, so the pause-menu E can still reach
+		# the settings screen).
+		if not _paused:
+			_close_character()
 		_inventory_selection = 0
 		_inventory_scroll = 0
 		_enter_held = false
@@ -643,7 +731,7 @@ func _toggle_inventory() -> void:
 	else:
 		_enter_held = false
 	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open
 
 
 func _toggle_journal() -> void:
@@ -651,9 +739,11 @@ func _toggle_journal() -> void:
 	if _journal_open:
 		_inventory_open = false
 		_inventory_panel.visible = false
+		if not _paused:
+			_close_character()
 		_refresh_journal()
 	_journal_panel.visible = _journal_open
-	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open
+	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open
 
 
 func _refresh_journal() -> void:
@@ -686,8 +776,19 @@ func _toggle_pause() -> void:
 	_paused = not _paused
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open
 	EventBus.game_paused.emit(_paused)
+
+
+## Leaving the pause menu without opening it again: used when another modal takes
+## over the screen (the pause menu itself offers "C — Персонаж").
+func _close_pause() -> void:
+	if not _paused:
+		return
+	_paused = false
+	_pause_panel.visible = false
+	get_tree().paused = false
+	EventBus.game_paused.emit(false)
 
 
 ## UI polls the same InputSource the player uses, so a human and the debug bot
@@ -711,6 +812,12 @@ func _process(_delta: float) -> void:
 		if _map_panel != null:
 			_map_panel.refresh()
 		return
+	# Esc belongs to the character screen while it is open: it closes the panel
+	# instead of pausing the game underneath.
+	if _character_open:
+		if InputSource.is_action_just_pressed(&"pause"):
+			_toggle_character()
+			return
 	if InputSource.is_action_just_pressed(&"map"):
 		_open_map()
 		return
@@ -721,6 +828,9 @@ func _process(_delta: float) -> void:
 			_toggle_journal()
 		else:
 			_toggle_pause()
+		return
+	if InputSource.is_action_just_pressed(&"character"):
+		_toggle_character()
 		return
 	if _paused:
 		if InputSource.is_action_just_pressed(&"interact"):
@@ -734,6 +844,9 @@ func _process(_delta: float) -> void:
 		return
 	if _inventory_open:
 		_process_inventory_navigation()
+		return
+	if _character_open:
+		_process_character_navigation()
 		return
 	if InputSource.is_action_just_pressed(&"interact") and _dialogue_open:
 		close_dialogue()
@@ -781,6 +894,7 @@ func _open_map() -> void:
 		_toggle_inventory()
 	if _journal_open:
 		_toggle_journal()
+	_close_character()
 	_map_open = true
 	if _map_panel != null:
 		_map_panel.visible = true
@@ -792,7 +906,7 @@ func _close_map() -> void:
 	_map_open = false
 	if _map_panel != null:
 		_map_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open
 
 
 func is_map_open() -> bool:
@@ -819,7 +933,7 @@ func _close_settings() -> void:
 	_settings_just_closed = true
 	_settings_panel.visible = false
 	_pause_panel.visible = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open
 
 
 func is_settings_open() -> bool:

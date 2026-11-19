@@ -233,6 +233,9 @@ func _run() -> void:
 	print("== inventory equip ==")
 	await _test_inventory_equip()
 
+	print("== character panel ==")
+	await _test_character_panel()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -241,7 +244,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 33, "every test group ran to completion (got %d/33)" % completed.size())
+	_check(completed.size() == 34, "every test group ran to completion (got %d/34)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3155,6 +3158,124 @@ func _row_with_marker(hud: Node) -> String:
 		if row.contains("[надето]"):
 			return row
 	return "" if rows.is_empty() else rows[0]
+
+
+## Character screen (spec §7.1 UI): C opens and closes it, the modal gate keeps
+## the player still while it is open, E spends a point on the selected attribute
+## through the real GameState path, the refusals (empty pool, per-attribute cap)
+## toast and change nothing, the panel and the inventory are never open at the
+## same time, and Esc closes the panel instead of pausing. Driven through real
+## key events like every UI group. GameState, the pause tree, ui_blocking and
+## the scene are reset at both ends so no later group inherits an open panel.
+func _test_character_panel() -> void:
+	gs.reset()
+	qm.reset()
+	paused = false
+
+	_check(InputMap.has_action(&"character"), "character action exists")
+	_check(_action_has_key("character", KEY_C), "character action is bound to key C")
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var hud := scene.get_node_or_null("HUD")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and player != null, "hud and player present for character panel test")
+	if hud == null or player == null:
+		gs.ui_blocking = false
+		paused = false
+		gs.reset()
+		completed["character_panel"] = true
+		return
+
+	# --- C opens the panel and the modal gate holds --------------------------
+	await _tap_key(KEY_C)
+	_check(bool(hud.call("is_character_open")), "key C opens the character panel")
+	_check(gs.ui_blocking, "ui_blocking is true while the character panel is open")
+	var before := player.global_position
+	var d_down := InputEventKey.new()
+	d_down.physical_keycode = KEY_D
+	d_down.keycode = KEY_D
+	d_down.pressed = true
+	Input.parse_input_event(d_down)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) < 2.0, "character panel open blocks movement")
+	var d_up := InputEventKey.new()
+	d_up.physical_keycode = KEY_D
+	d_up.keycode = KEY_D
+	d_up.pressed = false
+	Input.parse_input_event(d_up)
+	await physics_frame
+
+	# --- C again closes it -----------------------------------------------------
+	await _tap_key(KEY_C)
+	_check(not bool(hud.call("is_character_open")), "key C again closes the character panel")
+	_check(not gs.ui_blocking, "ui_blocking cleared after closing the character panel")
+
+	# --- move_down then E spends one point on agility --------------------------
+	gs.attribute_points = 2
+	var crit_before: float = gs.crit_chance()
+	await _tap_key(KEY_C)
+	await _tap_key(KEY_S)
+	await _tap_key(KEY_E)
+	_check(gs.attribute_points == 1, "E spends exactly one point (points=%d)" % gs.attribute_points)
+	_check(gs.attribute("agility") == 6, "the point landed in agility (got %d)" % gs.attribute("agility"))
+	_check(gs.attribute("strength") == 5, "the cursor moved: strength kept its 5")
+	_check(gs.crit_chance() > crit_before, "agility raised the crit chance through the panel (%.4f)" % gs.crit_chance())
+
+	# --- E with an empty pool spends nothing and toasts ------------------------
+	gs.attribute_points = 0
+	var toasts: Array[String] = []
+	var listener := func(message: String) -> void: toasts.append(message)
+	bus.toast.connect(listener)
+	await _tap_key(KEY_E)
+	_check(gs.attribute_points == 0, "E with no points spends nothing")
+	_check(gs.attribute("agility") == 6, "a refused spend leaves the attribute untouched")
+	_check(toasts.has("Нет очков"), "E with no points toasts Нет очков")
+
+	# --- E at the attribute cap spends nothing ---------------------------------
+	gs.attribute_points = 3
+	gs.attributes["agility"] = 30
+	gs.recompute_derived()
+	toasts.clear()
+	await _tap_key(KEY_E)
+	_check(gs.attribute_points == 3, "E at the cap spends no point (points=%d)" % gs.attribute_points)
+	_check(gs.attribute("agility") == 30, "a spend at the cap leaves the attribute at 30")
+	_check(toasts.has("Предел характеристики"), "E at the cap toasts Предел характеристики")
+	bus.toast.disconnect(listener)
+
+	# --- the panel and the inventory are never both open -----------------------
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "I opens the inventory while the panel is open")
+	_check(not bool(hud.call("is_character_open")), "opening the inventory closed the character panel")
+	await _tap_key(KEY_C)
+	_check(bool(hud.call("is_character_open")), "C opens the character panel again")
+	_check(not bool(hud.call("is_inventory_open")), "opening the character panel closed the inventory")
+	_check(bool(hud.call("is_character_open")) and not bool(hud.call("is_inventory_open")),
+		"the panel and the inventory are never open at once")
+
+	# --- Esc closes the panel and does not pause -------------------------------
+	await _tap_key(KEY_ESCAPE)
+	_check(not bool(hud.call("is_character_open")), "Esc closes the character panel")
+	_check(not gs.ui_blocking, "ui_blocking cleared after Esc closed the panel")
+	_check(not paused, "Esc closing the panel does not pause the game")
+
+	# --- leave no residue for later groups -------------------------------------
+	if bool(hud.call("is_inventory_open")):
+		await _tap_key(KEY_I)
+	if bool(hud.call("is_character_open")):
+		await _tap_key(KEY_C)
+	gs.ui_blocking = false
+	paused = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	qm.reset()
+	completed["character_panel"] = true
 
 
 ## Put a weapon into the equipment slot (or clear it with ""). Goes through the

@@ -46,6 +46,11 @@ Autoload'ов ровно семь: всё остальное — сцены и �
 `InputBindings` в `user://settings/controls.json` — отдельно от слотов
 сохранения (ТЗ §18).
 
+Экран «Персонаж» (`scripts/ui/character_panel.gd`, открывается на C) — панель
+характеристик, производных чисел и невложенных очков; опрашивает `InputSource`
+через HUD, как остальные панели, и тратит очки только через
+`GameState.spend_attribute_point()`.
+
 ## Бой
 
 `DamageResolver.resolve_hit(attacker, target, payload)`:
