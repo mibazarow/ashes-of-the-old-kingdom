@@ -4,7 +4,9 @@ extends RefCounted
 ##
 ## Every attacker goes through resolve_hit(). A hit_id makes the same swing
 ## unable to damage the same target twice, which is the classic source of
-## double-damage bugs when several hurtboxes overlap.
+## double-damage bugs when several hurtboxes overlap. Elemental combinations
+## (spec §9.2) are resolved here as well, through Combinations, so no attacker
+## and no status implements a rule of its own.
 
 const MAX_TRACKED_HITS := 4096
 
@@ -45,6 +47,17 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 		"defense": defense,
 	}
 
+	# Elemental combinations that react to the hit itself (spec §9.2) resolve here
+	# and only here, so no attacker implements a rule of its own. They resolve
+	# before receive_damage on purpose: the target has to be able to act on the
+	# block (an enemy deepens its stagger from "combination"), and a Dictionary is
+	# read at the moment it is handed over, not later. The rules never change
+	# damage, and the pass after the damage keeps the dead-target rule: a hit that
+	# turned out to be the killing blow carries no combination.
+	var combination := Combinations.on_hit(attacker, target, payload, result)
+	if not combination.is_empty():
+		result["combination"] = combination
+
 	if target.has_method("receive_damage"):
 		target.call("receive_damage", final_damage, result)
 	else:
@@ -66,6 +79,16 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 			if bool(comp.call("apply_status", status_name, status_duration, attacker)):
 				result["status_applied"] = true
 				result["status"] = status_name
+				# Elemental combinations that react to a status landing (spec §9.2):
+				# fire burning roots away, a shock arcing off a wet target. The
+				# payload travels so the chain rule can see its `no_chain` guard.
+				Combinations.on_status_applied(target, status_name, attacker, payload)
+
+	# A rule must not outlive the death it was resolved against: the target was
+	# still alive when the rule fired, so a hit that turned out to be the killing
+	# blow ends up reporting no combination at all.
+	if result.has("combination") and _target_is_dead(target):
+		result.erase("combination")
 
 	var bus := _autoload("EventBus")
 	if bus != null:

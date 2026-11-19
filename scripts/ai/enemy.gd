@@ -55,6 +55,10 @@ var _wander_timer := 0.0
 var _flash_timer := 0.0
 var _fired_this_swing := false
 var _status_component: StatusComponent = null
+## Combo bonus carried by the hit that caused the current stagger, and the
+## stagger time left for this hit (spec §9.2 ice + physical).
+var _stagger_bonus := 0.0
+var _stagger_left := 0.0
 
 
 func _ready() -> void:
@@ -107,7 +111,20 @@ func receive_damage(amount: int, info: Dictionary = {}) -> void:
 	health.take_damage(amount, info)
 	_spawn_damage_number(amount)
 	if state != State.DEAD:
+		# An ice + physical combination (spec §9.2) asks for a deeper stagger. The
+		# bonus is written per hit and consumed by _enter(), so a later hit without
+		# a combination cannot inherit it, and a DoT tick never re-applies it.
+		_stagger_bonus = _combination_stagger_bonus(info)
 		_enter(State.STAGGER)
+
+
+## Extra stagger seconds carried by a hit's "combination" block (see
+## Combinations.on_hit). Anything malformed reads as no bonus.
+func _combination_stagger_bonus(info: Dictionary) -> float:
+	var combination: Variant = info.get("combination", {})
+	if not (combination is Dictionary):
+		return 0.0
+	return maxf(0.0, float((combination as Dictionary).get("extra_stagger", 0.0)))
 
 
 func _on_damaged(_amount: int, _info: Dictionary) -> void:
@@ -150,6 +167,12 @@ func _physics_process(delta: float) -> void:
 			return
 		State.STAGGER:
 			velocity = velocity.move_toward(Vector2.ZERO, 400.0 * delta)
+			# The stagger clock runs down, so a combination hit holds the target
+			# down longer than a plain one. The FSM has no STAGGER -> next
+			# transition yet: that gap predates the combinations (STAGGER_TIME was
+			# dead code before this) and is recorded as a known defect, so nothing
+			# leaves the state here and the enemy AI behaves exactly as before.
+			_stagger_left = maxf(0.0, _stagger_left - delta)
 		State.IDLE:
 			_process_idle(delta)
 		State.PATROL:
@@ -186,6 +209,11 @@ func _enter(next: State) -> void:
 		State.STAGGER:
 			telegraph.visible = false
 			attack_shape.disabled = true
+			# The stagger clock for this hit: the base time plus whatever the
+			# combination on the incoming hit asked for, then the bonus is dropped so
+			# the next hit starts from its own value.
+			_stagger_left = STAGGER_TIME + _stagger_bonus
+			_stagger_bonus = 0.0
 
 
 func _player_ref() -> Node2D:

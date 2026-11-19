@@ -81,6 +81,34 @@ class AoeTarget:
 		last_damage = amount
 
 
+## Combatant for the combination tests (spec §9.2): a Node2D in the "enemy" group
+## with a real HealthComponent and StatusComponent, so every rule resolves
+## end-to-end through DamageResolver exactly as it would against a live Enemy.
+## The status component does not self-process, so nothing ticks on its own.
+class ComboTarget:
+	extends Node2D
+
+	var health: HealthComponent
+	var statuses: StatusComponent
+
+	func _ready() -> void:
+		add_to_group("enemy")
+		health = HealthComponent.new()
+		health.name = "HealthComponent"
+		health.max_health = 100
+		add_child(health)
+		statuses = StatusComponent.new()
+		statuses.name = "StatusComponent"
+		add_child(statuses)
+		statuses.set_process(false)
+
+	func get_defense() -> int:
+		return 0
+
+	func receive_damage(amount: int, info: Dictionary = {}) -> void:
+		health.take_damage(amount, info)
+
+
 func _init() -> void:
 	_run.call_deferred()
 
@@ -166,6 +194,9 @@ func _run() -> void:
 	print("== status lifecycle ==")
 	await _test_status_lifecycle()
 
+	print("== combinations ==")
+	await _test_combinations()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -174,7 +205,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 26, "every test group ran to completion (got %d/26)" % completed.size())
+	_check(completed.size() == 27, "every test group ran to completion (got %d/27)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1793,6 +1824,258 @@ func _test_status_lifecycle() -> void:
 	gs.reset()
 
 	completed["status_lifecycle"] = true
+
+
+## Spec §9.2 elemental combinations. Every rule is driven through the real
+## DamageResolver so the wiring is pinned and not just the rule table, plus one
+## direct call per rule to prove the rule alone is enough. Fully deterministic:
+## status components do not self-process, the arena owns every node the rules can
+## spawn, and the smoke-marker group is emptied at both ends so a marker can never
+## leak into another group or into a bot run.
+func _test_combinations() -> void:
+	DamageResolver.reset()
+	Combinations.reset()
+	gs.reset()
+	_free_smoke_zones()
+	await process_frame
+
+	var arena := Node2D.new()
+	root.add_child(arena)
+
+	# --- ice + physical: deeper stagger, never more damage ----------------------
+	var clean := ComboTarget.new()
+	arena.add_child(clean)
+	var chilled := ComboTarget.new()
+	arena.add_child(chilled)
+	chilled.statuses.apply_status("chill", 5.0)
+	_check(chilled.statuses.has_status("chill"), "chill is live on the chilled target")
+	var clean_res := DamageResolver.resolve_hit(null, clean, {
+		"damage": 10, "hit_id": "combo-plain-1", "damage_type": "physical",
+	})
+	var chilled_res := DamageResolver.resolve_hit(null, chilled, {
+		"damage": 10, "hit_id": "combo-chill-1", "damage_type": "physical",
+	})
+	var clean_loss := 100 - _hp_of(clean)
+	var chilled_loss := 100 - _hp_of(chilled)
+	_check(clean_loss == 10, "plain physical hit costs 10 hp (got %d)" % clean_loss)
+	_check(chilled_loss == clean_loss,
+		"ice+physical adds no damage (%d vs %d hp)" % [chilled_loss, clean_loss])
+	var ice_combo: Variant = chilled_res.get("combination", {})
+	_check(ice_combo is Dictionary and not (ice_combo as Dictionary).is_empty(),
+		"ice+physical reports a combination")
+	_check(String((ice_combo as Dictionary).get("triggered", "")) == "ice_physical",
+		"combination names the ice+physical rule")
+	_check(float((ice_combo as Dictionary).get("extra_stagger", 0.0)) > 0.0,
+		"ice+physical carries a positive stagger bonus")
+	var plain_has_combo := clean_res.has("combination") \
+			and not (clean_res.get("combination") as Dictionary).is_empty()
+	_check(not plain_has_combo, "no rule fires on a plain hit against a clean target")
+	_check(String(clean_res.get("damage_type", "")) == "physical" \
+			and int(clean_res.get("final_damage", 0)) == 10 \
+			and bool(clean_res.get("applied", false)),
+		"the combination hook left the existing result keys alone")
+
+	# --- the bonus reaches the enemy stagger clock -------------------------------
+	var wolf := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(wolf)
+	await process_frame
+	var wolf_sc := wolf.get_node_or_null("StatusComponent") as StatusComponent
+	_check(wolf_sc != null, "wolf owns a StatusComponent")
+	if wolf_sc != null:
+		wolf_sc.set_process(false)
+		DamageResolver.resolve_hit(null, wolf, {
+			"damage": 3, "hit_id": "combo-stagger-1", "damage_type": "physical",
+		})
+		var plain_clock := float(wolf.get("_stagger_left"))
+		wolf_sc.apply_status("chill", 5.0)
+		DamageResolver.resolve_hit(null, wolf, {
+			"damage": 3, "hit_id": "combo-stagger-2", "damage_type": "physical",
+		})
+		var chilled_clock := float(wolf.get("_stagger_left"))
+		_check(plain_clock > 0.0, "a physical hit starts the stagger clock (%.2f s)" % plain_clock)
+		_check(chilled_clock > plain_clock,
+			"ice+physical extends the stagger clock (%.2f > %.2f s)" % [chilled_clock, plain_clock])
+		# 5 == Enemy.State.STAGGER, spelled as a number on purpose: naming the Enemy
+		# class here would make the suite a compile dependency of enemy.gd, whose
+		# autoload identifiers do not exist under `godot --script`.
+		_check(int(wolf.get("state")) == 5,
+			"the combo hit leaves the wolf staggered (state=%s)" % str(wolf.get("state")))
+		_check(float(wolf.get("_stagger_bonus")) == 0.0,
+			"the stagger bonus is consumed by the stagger entry")
+
+	# --- fire + roots: the roots burn away, the marker deals nothing -------------
+	var rooted := ComboTarget.new()
+	arena.add_child(rooted)
+	rooted.global_position = Vector2(200, 0)
+	rooted.statuses.apply_status("root", 5.0)
+	rooted.statuses.apply_status("burn", 3.0)
+	var hp_before_burn := _hp_of(rooted)
+	Combinations.on_status_applied(rooted, "burn", null)
+	_check(not rooted.statuses.has_status("root"),
+		"fire on a rooted target burns the roots away")
+	_check(rooted.statuses.has_status("burn"), "the burn itself is not consumed")
+	_check(_count_smoke_zones() == 1, "exactly one smoke marker (got %d)" % _count_smoke_zones())
+	_check(_hp_of(rooted) == hp_before_burn,
+		"the smoke marker deals no damage (hp %d -> %d)" % [hp_before_burn, _hp_of(rooted)])
+	var marker := _first_smoke_zone()
+	_check(marker != null and String(marker.name) == "SmokeZone", "the marker is named SmokeZone")
+	_check(marker != null and marker.get_child_count() > 0 and marker.get_child(0) is ColorRect,
+		"the marker is a ColorRect under a Node2D")
+	_check(marker != null and not marker.has_method("receive_damage") \
+			and marker.get_node_or_null("CollisionShape2D") == null \
+			and marker.get_node_or_null("Area2D") == null,
+		"the marker has no hitbox and cannot damage anything")
+	_check(marker != null and marker.global_position.distance_to(rooted.global_position) < 0.01,
+		"the marker sits on the target that burned")
+
+	# The same rule through the real resolver: the only HP the target loses is the
+	# hit it was actually dealt, so the combination cannot smuggle in mass damage.
+	rooted.statuses.apply_status("root", 5.0)
+	var hp_before_burst := _hp_of(rooted)
+	var burst_res := DamageResolver.resolve_hit(null, rooted, {
+		"damage": 8, "hit_id": "combo-burn-1", "damage_type": "fire",
+		"status": "burn", "status_duration": 3.0,
+	})
+	_check(bool(burst_res.get("status_applied", false)), "the resolver applied the burn")
+	_check(not rooted.statuses.has_status("root"), "the resolver's burn burned the roots away too")
+	_check(_count_smoke_zones() == 2, "the second burn left a second marker (got %d)" % _count_smoke_zones())
+	_check(hp_before_burst - _hp_of(rooted) == int(burst_res.get("final_damage", 0)),
+		"the fire+roots hit costs exactly its own damage (got %d)" % (hp_before_burst - _hp_of(rooted)))
+
+	# --- lightning + wet: a capped arc, never a cascade -------------------------
+	var wet := ComboTarget.new()
+	arena.add_child(wet)
+	wet.global_position = Vector2(400, 0)
+	wet.statuses.apply_status("chill", 5.0)
+	var near: Array = []
+	for i in range(5):
+		var neighbour := ComboTarget.new()
+		arena.add_child(neighbour)
+		neighbour.global_position = Vector2(400.0 + float(i + 1) * 10.0, 0)
+		near.append(neighbour)
+	var far := ComboTarget.new()
+	arena.add_child(far)
+	far.global_position = Vector2(400.0 + Combinations.CHAIN_RADIUS + 40.0, 0)
+	var shock_res := DamageResolver.resolve_hit(null, wet, {
+		"damage": 11, "hit_id": "combo-shock-1", "damage_type": "lightning",
+		"status": "shock", "status_duration": 0.6,
+	})
+	_check(bool(shock_res.get("status_applied", false)), "the shock landed on the wet target")
+	var arc_count := 0
+	for node in near:
+		if _hp_of(node) < 100:
+			arc_count += 1
+	_check(arc_count == Combinations.MAX_CHAIN_TARGETS,
+		"the arc hits at most MAX_CHAIN_TARGETS nearby enemies (got %d)" % arc_count)
+	_check(_hp_of(near[0]) == 95 and _hp_of(near[1]) == 95 and _hp_of(near[2]) == 95,
+		"each arc target takes half the shock damage (11 -> 5)")
+	_check(_hp_of(near[3]) == 100 and _hp_of(near[4]) == 100,
+		"the farthest neighbours are dropped by the cap")
+	_check(_hp_of(far) == 100, "nothing outside the arc radius is touched")
+	_check(100 - _hp_of(wet) == 11, "the wet target itself takes only the shock hit")
+	_check(not (near[0] as ComboTarget).statuses.has_status("shock"),
+		"arc targets never receive the shock itself, so nothing can cascade")
+
+	# A payload flagged no_chain must not arc again: that flag is the recursion
+	# guard, so the second level has to stay at exactly zero damage.
+	var second := ComboTarget.new()
+	arena.add_child(second)
+	second.global_position = Vector2(700, 0)
+	second.statuses.apply_status("chill", 5.0)
+	var guard_near := ComboTarget.new()
+	arena.add_child(guard_near)
+	guard_near.global_position = Vector2(720, 0)
+	DamageResolver.resolve_hit(null, second, {
+		"damage": 10, "hit_id": "combo-shock-2", "damage_type": "lightning",
+		"status": "shock", "status_duration": 0.6, "no_chain": true,
+	})
+	_check(_hp_of(guard_near) == 100, "a no_chain payload does not arc (no second-level damage)")
+	_check(second.statuses.has_status("shock"), "the flagged hit still applies its own status")
+
+	# --- healing + blight: half the heal, one stack burned off ------------------
+	var blighted := ComboTarget.new()
+	arena.add_child(blighted)
+	blighted.statuses.apply_status("blight", 5.0, null, 2)
+	_check(blighted.statuses.stacks("blight") == 2, "blight starts at two stacks")
+	_check(Combinations.on_heal(blighted, 20) == 10, "a heal under blight lands at half")
+	_check(blighted.statuses.stacks("blight") == 1, "the heal burned off one blight stack")
+	_check(Combinations.on_heal(blighted, 20) == 10, "the second heal is still halved")
+	_check(not blighted.statuses.has_status("blight"), "the last stack is removed by the heal")
+	_check(Combinations.on_heal(blighted, 20) == 20, "with blight gone the heal is full")
+
+	# The player's heal routes through the same rule, so a potion and a nature heal
+	# both obey it without either caller knowing anything about statuses.
+	var healer := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(healer)
+	await process_frame
+	var hsc := healer.get_node_or_null("StatusComponent") as StatusComponent
+	_check(hsc != null, "the player owns a StatusComponent")
+	if hsc != null:
+		gs.reset()
+		gs.hp = gs.max_hp - 60
+		_check(int(healer.call("heal_with_status", 20)) == 20, "a clean heal reports the full amount")
+		_check(gs.hp == gs.max_hp - 40, "a clean heal raised hp by 20 (hp=%d)" % gs.hp)
+		hsc.apply_status("blight", 5.0, null, 2)
+		_check(int(healer.call("heal_with_status", 20)) == 10, "a heal under blight reports half")
+		_check(gs.hp == gs.max_hp - 30, "the halved heal raised hp by 10 (hp=%d)" % gs.hp)
+		_check(hsc.stacks("blight") == 1, "the player heal burned off one blight stack")
+		hsc.clear_all()
+	gs.reset()
+
+	# --- a corpse triggers nothing ----------------------------------------------
+	var corpse := ComboTarget.new()
+	arena.add_child(corpse)
+	corpse.global_position = Vector2(900, 0)
+	corpse.statuses.apply_status("chill", 30.0)
+	corpse.statuses.apply_status("root", 30.0)
+	var corpse_near := ComboTarget.new()
+	arena.add_child(corpse_near)
+	corpse_near.global_position = Vector2(920, 0)
+	var kill_res := DamageResolver.resolve_hit(null, corpse, {
+		"damage": 999, "hit_id": "combo-kill-1", "damage_type": "physical",
+	})
+	_check(bool(kill_res.get("applied", false)) and corpse.health.is_dead,
+		"the killing hit lands and kills the target")
+	_check(not kill_res.has("combination"), "a killing hit reports no combination")
+	var smoke_before_corpse := _count_smoke_zones()
+	Combinations.on_status_applied(corpse, "burn", null)
+	Combinations.on_status_applied(corpse, "shock", null, {"damage": 10, "hit_id": "combo-dead-1"})
+	_check(_count_smoke_zones() == smoke_before_corpse, "a dead target grows no smoke marker")
+	_check(_hp_of(corpse_near) == 100, "a dead target arcs nothing")
+	_check(corpse.statuses.has_status("root") and corpse.statuses.has_status("chill"),
+		"a dead target keeps its statuses untouched")
+
+	arena.queue_free()
+	await process_frame
+	_free_smoke_zones()
+	await process_frame
+	_check(_count_smoke_zones() == 0, "the group left no smoke marker behind")
+	DamageResolver.reset()
+	Combinations.reset()
+	gs.reset()
+	completed["combinations"] = true
+
+
+## Current HP of a ComboTarget-shaped fixture, read through the HealthComponent
+## node name so the test never depends on the fixture's own field names.
+func _hp_of(node: Node) -> int:
+	var hc := node.get_node_or_null("HealthComponent")
+	return int(hc.get("current_health")) if hc != null else -1
+
+
+## Live smoke markers, counted through the group they join rather than by name:
+## Godot renames a second sibling called "SmokeZone" to "SmokeZone2".
+func _count_smoke_zones() -> int:
+	return get_nodes_in_group("smoke_zone").size()
+
+
+func _first_smoke_zone() -> Node2D:
+	return get_first_node_in_group("smoke_zone") as Node2D
+
+
+func _free_smoke_zones() -> void:
+	for node in get_nodes_in_group("smoke_zone"):
+		node.queue_free()
 
 
 ## The suite must produce the same result no matter what user://settings/

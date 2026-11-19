@@ -91,13 +91,12 @@ func _blocks_actions() -> bool:
 	return sc != null and sc.blocks_actions()
 
 
-## Healing entry point that honours the BLIGHT healing penalty. HUD item use
-## routes through here so a status can halve a potion without the HUD knowing
-## anything about statuses.
+## Healing entry point. The ash blight combination (spec §9.2) is resolved in
+## Combinations.on_heal: while blight is active a heal lands at the blight
+## healing multiplier and burns off one stack. HUD item use and the nature heal
+## both route through here, so no caller has to know anything about statuses.
 func heal_with_status(amount: int) -> int:
-	var sc := _status()
-	var mult := sc.healing_multiplier() if sc != null else 1.0
-	return GameState.heal(int(round(float(amount) * mult)))
+	return GameState.heal(Combinations.on_heal(self, amount))
 
 
 func get_defense() -> int:
