@@ -5,6 +5,11 @@ extends CanvasLayer
 const BAR_W := 92.0
 const BAR_H := 7.0
 const QUICK_SLOT_ACTIONS := [&"quick_slot_1", &"quick_slot_2", &"quick_slot_3", &"quick_slot_4"]
+## At most this many inventory rows are rendered at once, so the panel can never
+## grow past the 480x270 viewport; the cursor scrolls a window over the rest.
+const MAX_VISIBLE_ROWS := 8
+const COLOR_ROW := Color(0.9, 0.92, 0.86)
+const COLOR_ROW_SELECTED := Color(1.0, 0.97, 0.62)
 
 var _root: Control
 var _hp_bar: ProgressBar
@@ -23,6 +28,10 @@ var _dialogue_speaker: Label
 var _dialogue_text: Label
 var _inventory_panel: PanelContainer
 var _inventory_list: VBoxContainer
+var _inventory_stats: Label
+var _inventory_selection: int = 0
+var _inventory_scroll: int = 0
+var _enter_held: bool = false
 var _quick_slot_list: VBoxContainer
 var _journal_panel: PanelContainer
 var _journal_list: VBoxContainer
@@ -245,6 +254,11 @@ func _build_inventory_panel() -> void:
 
 	box.add_child(_make_text("Инвентарь  [I] закрыть", Color(0.96, 0.86, 0.5)))
 
+	# Live stats line: recomputed on every refresh so equipping/unequipping is
+	# visible the instant it happens, without the player doing the math.
+	_inventory_stats = _make_text("Атака 0 · Защита 0", Color(0.78, 0.86, 0.66))
+	box.add_child(_inventory_stats)
+
 	_inventory_list = VBoxContainer.new()
 	_inventory_list.add_theme_constant_override("separation", 1)
 	box.add_child(_inventory_list)
@@ -413,22 +427,126 @@ func _refresh_inventory() -> void:
 	if _inventory_list == null:
 		return
 	_refresh_quick_slots()
+	_refresh_stats()
 	for child in _inventory_list.get_children():
 		child.queue_free()
-	if GameState.inventory.is_empty():
+	var size := GameState.inventory.size()
+	if size == 0:
+		_inventory_selection = 0
+		_inventory_scroll = 0
 		_inventory_list.add_child(_make_text("пусто", Color(0.6, 0.6, 0.58)))
 		return
-	for slot in GameState.inventory:
+	# Clamp the cursor when the list shrank below it (an item was consumed).
+	_inventory_selection = clampi(_inventory_selection, 0, size - 1)
+	# Keep the cursor inside the visible window so the panel never overflows.
+	if _inventory_selection < _inventory_scroll:
+		_inventory_scroll = _inventory_selection
+	elif _inventory_selection >= _inventory_scroll + MAX_VISIBLE_ROWS:
+		_inventory_scroll = _inventory_selection - (MAX_VISIBLE_ROWS - 1)
+	_inventory_scroll = clampi(_inventory_scroll, 0, maxi(0, size - MAX_VISIBLE_ROWS))
+	var first := _inventory_scroll
+	var last := mini(size, first + MAX_VISIBLE_ROWS)
+	var weapon_id: String = String(GameState.equipment.get("weapon", ""))
+	var armor_id: String = String(GameState.equipment.get("armor", ""))
+	for i in range(first, last):
+		var slot: Dictionary = GameState.inventory[i]
 		var id := String(slot["id"])
 		var amount := int(slot["amount"])
 		var label := "%s x%d" % [ItemDB.display_name(id), amount]
-		var weapon_id: String = String(GameState.equipment.get("weapon", ""))
-		var armor_id: String = String(GameState.equipment.get("armor", ""))
 		var equipped: bool = weapon_id == id or armor_id == id
 		if equipped:
 			label += "  [надето]"
-		var row := _make_text(label, Color(0.9, 0.92, 0.86))
-		_inventory_list.add_child(row)
+		var selected: bool = i == _inventory_selection
+		if selected:
+			label = "> " + label
+		_inventory_list.add_child(_make_text(label, COLOR_ROW_SELECTED if selected else COLOR_ROW))
+
+
+## One compact line with the player's current combat stats, so the effect of an
+## equip/unequip is visible without leaving the panel.
+func _refresh_stats() -> void:
+	if _inventory_stats == null:
+		return
+	_inventory_stats.text = "Атака %d · Защита %d" % [GameState.total_attack(), GameState.total_defense()]
+
+
+## Move the selection cursor by `delta` rows, clamped to the inventory bounds.
+func _move_inventory_selection(delta: int) -> void:
+	var size := GameState.inventory.size()
+	if size == 0:
+		_inventory_selection = 0
+		return
+	_inventory_selection = clampi(_inventory_selection + delta, 0, size - 1)
+	_refresh_inventory()
+
+
+## E / Enter on the selected row: equip it if it is equipment and not yet worn,
+## unequip it if it is the item currently in that slot. Anything that is not
+## equipment only toasts and leaves the equipment untouched.
+func _activate_inventory_selection() -> void:
+	var size := GameState.inventory.size()
+	if size == 0:
+		return
+	_inventory_selection = clampi(_inventory_selection, 0, size - 1)
+	var id := String(GameState.inventory[_inventory_selection]["id"])
+	var def := ItemDB.get_item(id)
+	var slot: String = String(def.get("slot", ""))
+	if slot == "":
+		EventBus.toast.emit("Нельзя надеть")
+		return
+	var equipped_now: bool = String(GameState.equipment.get(slot, "")) == id
+	if equipped_now:
+		GameState.unequip(slot)
+	else:
+		GameState.equip(id)
+	_refresh_inventory()
+
+
+## Inventory owns the input while it is open: navigation rows and the equip key
+## are handled here, and the player stays blocked by GameState.ui_blocking, so
+## the same arrows never move the character.
+func _process_inventory_navigation() -> void:
+	var delta := 0
+	if InputSource.is_action_just_pressed(&"move_up"):
+		delta -= 1
+	if InputSource.is_action_just_pressed(&"move_down"):
+		delta += 1
+	if delta != 0:
+		_move_inventory_selection(delta)
+	# Enter has no InputMap action (it is a human-only alias for E), so it is
+	# edge-detected by hand; the bot drives equipping through `interact`.
+	var enter_now := Input.is_key_pressed(KEY_ENTER)
+	var enter_edge := enter_now and not _enter_held
+	_enter_held = enter_now
+	if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+		_activate_inventory_selection()
+
+
+func is_inventory_open() -> bool:
+	return _inventory_open
+
+
+func inventory_selection() -> int:
+	return _inventory_selection
+
+
+func visible_inventory_row_count() -> int:
+	if _inventory_list == null:
+		return 0
+	return _inventory_list.get_child_count()
+
+
+## Text of the currently visible inventory rows, in order, so a test (or a
+## screenshot probe) can read the cursor marker and the [надето] tag without
+## reaching into the panel's private node tree.
+func inventory_row_texts() -> PackedStringArray:
+	var out: PackedStringArray = []
+	if _inventory_list == null:
+		return out
+	for child in _inventory_list.get_children():
+		if child is Label:
+			out.append((child as Label).text)
+	return out
 
 
 ## One line per quick slot: "1: Настой здоровья", empty slots show "—".
@@ -518,7 +636,12 @@ func _toggle_inventory() -> void:
 	if _inventory_open:
 		_journal_open = false
 		_journal_panel.visible = false
+		_inventory_selection = 0
+		_inventory_scroll = 0
+		_enter_held = false
 		_refresh_inventory()
+	else:
+		_enter_held = false
 	_inventory_panel.visible = _inventory_open
 	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open
 
@@ -609,6 +732,9 @@ func _process(_delta: float) -> void:
 	if InputSource.is_action_just_pressed(&"inventory"):
 		_toggle_inventory()
 		return
+	if _inventory_open:
+		_process_inventory_navigation()
+		return
 	if InputSource.is_action_just_pressed(&"interact") and _dialogue_open:
 		close_dialogue()
 		return
@@ -631,6 +757,9 @@ func _process(_delta: float) -> void:
 
 func open_inventory_for_shot() -> void:
 	_inventory_open = true
+	_inventory_selection = 0
+	_inventory_scroll = 0
+	_enter_held = false
 	_inventory_panel.visible = true
 	_refresh_inventory()
 

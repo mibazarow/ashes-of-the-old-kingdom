@@ -221,6 +221,9 @@ func _run() -> void:
 	print("== weapon combos ==")
 	await _test_weapon_combos()
 
+	print("== inventory equip ==")
+	await _test_inventory_equip()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -229,7 +232,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 29, "every test group ran to completion (got %d/29)" % completed.size())
+	_check(completed.size() == 30, "every test group ran to completion (got %d/30)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2375,6 +2378,150 @@ func _test_weapon_combos() -> void:
 	DamageResolver.reset()
 	gs.reset()
 	completed["weapon_combos"] = true
+
+
+## P1 regression: GameState.equip() existed but nothing ever called it, so the
+## player could pick up a weapon and stay unarmed forever. This group pins the
+## whole reachability chain end-to-end — the equip/unequip round-trip on
+## GameState, then the real HUD panel driven through real key events: the cursor
+## opens at 0, walks with the existing movement actions, clamps at both ends, E
+## equips an equipment row (and the row shows [надето]), E again unequips, E on a
+## consumable leaves equipment untouched, movement stays blocked while the panel
+## is open, and a 10-stack inventory never renders more than 8 rows. GameState
+## and the scene are reset at both ends and ui_blocking is forced clear, so the
+## panel is never left open for a later group.
+func _test_inventory_equip() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- GameState equip/unequip round-trip (pure logic, no scene) -----------
+	gs.add_item("iron_sword", 1)
+	var atk_base: int = gs.total_attack()
+	var sword_atk := int(ItemDB.get_item("iron_sword").get("attack", 0))
+	_check(sword_atk == 6, "iron_sword carries attack 6")
+	_check(gs.equip("iron_sword"), "equip iron_sword succeeds")
+	_check(gs.total_attack() == atk_base + sword_atk,
+		"equip raises attack by exactly the weapon value (%d -> %d)" % [atk_base, gs.total_attack()])
+	_check(gs.unequip("weapon"), "unequip weapon succeeds")
+	_check(gs.total_attack() == atk_base,
+		"unequip restores attack to the base value (%d)" % gs.total_attack())
+	_check(not gs.unequip("weapon"), "unequip on an already-empty slot returns false")
+	_check(not gs.unequip("armor"), "unequip on an empty armor slot returns false")
+	_check(not gs.unequip("not_a_slot"), "unequip on an unknown slot returns false")
+
+	# --- UI: drive the real HUD through real key events ----------------------
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var hud := scene.get_node_or_null("HUD")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and player != null, "hud and player present for inventory-equip test")
+	if hud == null or player == null:
+		gs.ui_blocking = false
+		gs.reset()
+		completed["inventory_equip"] = true
+		return
+
+	# Navigation reuses the existing movement actions; no new actions were added.
+	_check(InputMap.has_action(&"move_up") and InputMap.has_action(&"move_down"),
+		"move_up and move_down actions exist for inventory navigation")
+
+	# --- open the panel: cursor at 0, clamps at the top ----------------------
+	gs.reset()
+	gs.add_item("iron_sword", 1)
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "key I opens the inventory")
+	_check(gs.ui_blocking, "ui_blocking is set while the inventory is open")
+	_check(int(hud.call("inventory_selection")) == 0, "opening the inventory puts the cursor at 0")
+	await _tap_key(KEY_W)
+	_check(int(hud.call("inventory_selection")) == 0, "move_up at the top stays clamped at 0")
+
+	# --- E equips the selected equipment row, E again unequips ---------------
+	await _tap_key(KEY_E)
+	_check(String(gs.equipment.get("weapon", "")) == "iron_sword", "E equips the selected weapon")
+	var equipped_row := _row_with_marker(hud)
+	_check(equipped_row.contains("[надето]"), "the equipped row shows [надето]")
+	_check(equipped_row.begins_with("> "), "the selected row carries the > cursor")
+	_check(gs.total_attack() == 11, "equipping the sword raises total attack to 11 (got %d)" % gs.total_attack())
+	await _tap_key(KEY_E)
+	_check(String(gs.equipment.get("weapon", "")) == "", "E again unequips the weapon")
+	_check(gs.total_attack() == 5, "unequipping restores total attack to 5 (got %d)" % gs.total_attack())
+
+	# --- movement stays blocked while the panel is open ----------------------
+	var before := player.global_position
+	var d_down := InputEventKey.new()
+	d_down.physical_keycode = KEY_D
+	d_down.keycode = KEY_D
+	d_down.pressed = true
+	Input.parse_input_event(d_down)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) < 2.0, "inventory open blocks movement")
+	var d_up := InputEventKey.new()
+	d_up.physical_keycode = KEY_D
+	d_up.keycode = KEY_D
+	d_up.pressed = false
+	Input.parse_input_event(d_up)
+	await physics_frame
+
+	# --- E on a consumable leaves equipment untouched ------------------------
+	gs.add_item("health_potion", 1)   # inventory now [iron_sword, health_potion]
+	await _tap_key(KEY_S)
+	_check(int(hud.call("inventory_selection")) == 1, "move_down moves the cursor to row 1")
+	var eq_before: Dictionary = gs.equipment.duplicate(true)
+	await _tap_key(KEY_E)
+	_check(gs.equipment == eq_before, "E on a consumable leaves equipment untouched")
+	_check(String(gs.equipment.get("weapon", "")) == "", "a consumable never equips into the weapon slot")
+
+	# --- scroll window keeps the panel inside 480x270 ------------------------
+	await _tap_key(KEY_I)   # close
+	gs.reset()
+	gs.add_item("iron_sword", 1)
+	gs.add_item("iron_spear", 1)
+	gs.add_item("leather_armor", 1)
+	gs.add_item("health_potion", 1)
+	gs.add_item("mana_potion", 1)
+	gs.add_item("wolf_fang", 1)
+	gs.add_item("rusted_seal", 1)
+	for i in range(3):
+		gs.inventory.append({"id": "test_stack_%d" % i, "amount": 1})
+	bus.inventory_changed.emit()
+	_check(gs.inventory.size() == 10, "built a 10-stack inventory for the overflow test")
+	await _tap_key(KEY_I)   # reopen
+	_check(int(hud.call("inventory_selection")) == 0, "reopening resets the cursor to 0")
+	_check(int(hud.call("visible_inventory_row_count")) == 8,
+		"only 8 rows render with 10 stacks (got %d)" % int(hud.call("visible_inventory_row_count")))
+	for i in range(9):
+		await _tap_key(KEY_S)
+	_check(int(hud.call("inventory_selection")) == 9, "cursor walks to the last of 10 rows")
+	_check(int(hud.call("visible_inventory_row_count")) == 8,
+		"the window stays capped at 8 rows after scrolling (got %d)" % int(hud.call("visible_inventory_row_count")))
+	var rows: PackedStringArray = hud.call("inventory_row_texts")
+	_check(rows.size() == 8 and rows[rows.size() - 1].begins_with("> "),
+		"the scrolled window keeps the selected last row visible")
+	await _tap_key(KEY_S)
+	_check(int(hud.call("inventory_selection")) == 9, "move_down at the bottom stays clamped at the last row")
+
+	# --- leave no residue for later groups -----------------------------------
+	await _tap_key(KEY_I)   # close
+	gs.ui_blocking = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	qm.reset()
+	completed["inventory_equip"] = true
+
+
+## The visible row that carries the [надето] tag, or the first row when nothing
+## is equipped (so the caller can still read the cursor marker off it).
+func _row_with_marker(hud: Node) -> String:
+	var rows: PackedStringArray = hud.call("inventory_row_texts")
+	for row in rows:
+		if row.contains("[надето]"):
+			return row
+	return "" if rows.is_empty() else rows[0]
 
 
 ## Put a weapon into the equipment slot (or clear it with ""). Goes through the

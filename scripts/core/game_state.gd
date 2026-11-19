@@ -229,6 +229,20 @@ func equip(item_id: String) -> bool:
 	return true
 
 
+## Clears an equipment slot ("weapon" / "armor"). Returns true only when
+## something was actually equipped there; an empty or unknown slot is a no-op.
+## The item stays in the inventory (equip never consumes it), so unequipping is
+## always reversible.
+func unequip(slot: String) -> bool:
+	var current: String = String(equipment.get(slot, ""))
+	if current == "":
+		return false
+	equipment[slot] = ""
+	EventBus.equipment_changed.emit()
+	EventBus.toast.emit("Снято: %s" % ItemDB.display_name(current))
+	return true
+
+
 # --- quick slots --------------------------------------------------------------
 
 func _default_quick_slots() -> Array[String]:
