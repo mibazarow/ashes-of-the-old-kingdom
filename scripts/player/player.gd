@@ -48,6 +48,7 @@ var _hit_this_swing: Dictionary = {}
 var _interactable: Node = null
 var _dead_timer := 0.0
 var _flash_timer := 0.0
+var _status_component: StatusComponent = null
 
 
 func _ready() -> void:
@@ -57,6 +58,39 @@ func _ready() -> void:
 	EventBus.player_died.connect(_on_player_died)
 	EventBus.player_health_changed.connect(_on_health_changed)
 	EventBus.save_loaded.connect(_on_save_loaded)
+	if get_node_or_null("StatusComponent") == null:
+		var sc := StatusComponent.new()
+		sc.name = "StatusComponent"
+		add_child(sc)
+		_status_component = sc
+
+
+## Lazily resolved status component, created in _ready() (never edited into the
+## .tscn). Feeds the movement multiplier, the action gate and the healing gate.
+func _status() -> StatusComponent:
+	if _status_component != null and is_instance_valid(_status_component):
+		return _status_component
+	_status_component = get_node_or_null("StatusComponent") as StatusComponent
+	return _status_component
+
+
+func _move_multiplier() -> float:
+	var sc := _status()
+	return sc.move_multiplier() if sc != null else 1.0
+
+
+func _blocks_actions() -> bool:
+	var sc := _status()
+	return sc != null and sc.blocks_actions()
+
+
+## Healing entry point that honours the BLIGHT healing penalty. HUD item use
+## routes through here so a status can halve a potion without the HUD knowing
+## anything about statuses.
+func heal_with_status(amount: int) -> int:
+	var sc := _status()
+	var mult := sc.healing_multiplier() if sc != null else 1.0
+	return GameState.heal(int(round(float(amount) * mult)))
 
 
 func get_defense() -> int:
@@ -65,6 +99,13 @@ func get_defense() -> int:
 
 func is_invulnerable() -> bool:
 	return _iframe_left > 0.0 or state == State.DASH or state == State.DEAD
+
+
+## Dead answer for StatusComponent / DamageResolver. The player has no
+## HealthComponent child (HP lives in GameState), so without this hook the
+## status dead guard would be a no-op for the player.
+func is_status_owner_dead() -> bool:
+	return state == State.DEAD or GameState.hp <= 0
 
 
 func _physics_process(delta: float) -> void:
@@ -110,7 +151,7 @@ func _process_free(delta: float) -> void:
 
 	var input_dir := InputSource.get_vector(&"move_left", &"move_right", &"move_up", &"move_down")
 	if input_dir.length() > 0.01:
-		velocity = input_dir.normalized() * SPEED
+		velocity = input_dir.normalized() * SPEED * _move_multiplier()
 		state = State.MOVE
 		_update_facing(input_dir)
 	else:
@@ -119,11 +160,15 @@ func _process_free(delta: float) -> void:
 
 	_update_sprite()
 
-	if InputSource.is_action_just_pressed(&"ability"):
+	# Stun/shock/root freeze combat actions. Movement is only slowed (chill) or
+	# stopped (root/stun) through the multiplier above, so a chilled player can
+	# still attack, dash and use the ability.
+	var blocked := _blocks_actions()
+	if not blocked and InputSource.is_action_just_pressed(&"ability"):
 		try_ability()
-	elif InputSource.is_action_just_pressed(&"attack") and _attack_cooldown_left <= 0.0:
+	elif not blocked and InputSource.is_action_just_pressed(&"attack") and _attack_cooldown_left <= 0.0:
 		_start_attack()
-	elif InputSource.is_action_just_pressed(&"dash") and _dash_cooldown_left <= 0.0:
+	elif not blocked and InputSource.is_action_just_pressed(&"dash") and _dash_cooldown_left <= 0.0:
 		_start_dash(input_dir)
 	else:
 		_scan_interactable()
@@ -148,6 +193,15 @@ func _start_attack() -> void:
 
 
 func _process_attack(delta: float) -> void:
+	# A shock/stun landing mid-swing cuts the attack short instead of letting the
+	# hitbox open on the next frame ("Разряд: короткое прерывание").
+	var sc := _status()
+	if sc != null and sc.attack_multiplier() == 0.0:
+		attack_shape.disabled = true
+		state = State.IDLE
+		_attack_cooldown_left = ATTACK_COOLDOWN
+		return
+
 	_state_time += delta
 	velocity = Vector2.ZERO
 	_update_sprite()
@@ -299,6 +353,11 @@ func _on_health_changed(current: int, _maximum: int) -> void:
 
 
 func _on_player_died() -> void:
+	# Death wipes every status: a burn must not keep ticking a corpse, and a stun
+	# must not survive into the respawn.
+	var dead_sc := _status()
+	if dead_sc != null:
+		dead_sc.clear_all()
 	if state == State.DEAD:
 		return
 	state = State.DEAD
@@ -309,6 +368,9 @@ func _on_player_died() -> void:
 
 
 func _respawn() -> void:
+	var spawn_sc := _status()
+	if spawn_sc != null:
+		spawn_sc.clear_all()
 	global_position = spawn_point
 	GameState.revive_full()
 	state = State.IDLE

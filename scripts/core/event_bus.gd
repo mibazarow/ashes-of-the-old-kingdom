@@ -11,6 +11,9 @@ signal player_respawned()
 signal enemy_died(enemy_id: StringName, enemy_type: StringName, world_position: Vector2)
 signal damage_dealt(payload: Dictionary)
 
+signal status_applied(status_name: String, duration: float)
+signal status_expired(status_name: String)
+
 signal quest_started(quest_id: StringName)
 signal quest_progress(quest_id: StringName, current: int, target: int)
 signal quest_completed(quest_id: StringName)

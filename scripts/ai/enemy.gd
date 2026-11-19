@@ -54,6 +54,7 @@ var _player: Node2D = null
 var _wander_timer := 0.0
 var _flash_timer := 0.0
 var _fired_this_swing := false
+var _status_component: StatusComponent = null
 
 
 func _ready() -> void:
@@ -68,10 +69,36 @@ func _ready() -> void:
 	telegraph.visible = false
 	_attack_cooldown_left = randf_range(0.2, 0.9)
 	_wander_timer = randf_range(1.0, 3.0)
+	if get_node_or_null("StatusComponent") == null:
+		var sc := StatusComponent.new()
+		sc.name = "StatusComponent"
+		add_child(sc)
+		_status_component = sc
+
+
+## Lazily resolved status component. Attached in code (never edited into the
+## .tscn), so it is created in _ready() and cached here for the movement and
+## attack gates.
+func _status() -> StatusComponent:
+	if _status_component != null and is_instance_valid(_status_component):
+		return _status_component
+	_status_component = get_node_or_null("StatusComponent") as StatusComponent
+	return _status_component
+
+
+func _blocks_actions() -> bool:
+	var sc := _status()
+	return sc != null and sc.blocks_actions()
 
 
 func get_defense() -> int:
 	return 0
+
+
+## Dead answer for StatusComponent / DamageResolver, which probe the owner
+## instead of assuming where HP lives.
+func is_status_owner_dead() -> bool:
+	return state == State.DEAD or (health != null and health.is_dead)
 
 
 func receive_damage(amount: int, info: Dictionary = {}) -> void:
@@ -90,6 +117,11 @@ func _on_damaged(_amount: int, _info: Dictionary) -> void:
 
 func _on_died(_info: Dictionary) -> void:
 	_enter(State.DEAD)
+	# A corpse must not keep burning: the DoT would reach a dead target, and the
+	# fading corpse would still hold live effects.
+	var dead_sc := _status()
+	if dead_sc != null:
+		dead_sc.clear_all()
 	attack_shape.disabled = true
 	telegraph.visible = false
 	collision_layer = 0
@@ -128,6 +160,11 @@ func _physics_process(delta: float) -> void:
 			_process_chase(delta)
 		State.ATTACK:
 			_process_attack(delta)
+	var sc := _status()
+	if sc != null:
+		var mult := sc.move_multiplier()
+		if mult != 1.0:
+			velocity *= mult
 	move_and_slide()
 
 
@@ -226,7 +263,8 @@ func _process_chase(delta: float) -> void:
 	var dir := global_position.direction_to(p.global_position)
 	_face(dir)
 
-	if _attack_cooldown_left <= 0.0:
+	# Turning stays allowed while rooted/stunned; only the attack itself is gated.
+	if not _blocks_actions() and _attack_cooldown_left <= 0.0:
 		if kind == Kind.MELEE and dist <= ATTACK_RANGE_MELEE:
 			_start_attack()
 			return
@@ -256,6 +294,15 @@ func _start_attack() -> void:
 
 
 func _process_attack(delta: float) -> void:
+	# A shock/stun landing mid-swing cuts the telegraph short and drops the enemy
+	# back to the chase ("Разряд: короткое прерывание").
+	var swing_sc := _status()
+	if swing_sc != null and swing_sc.attack_multiplier() == 0.0:
+		attack_shape.disabled = true
+		telegraph.visible = false
+		_enter(State.CHASE)
+		return
+
 	_state_time += delta
 	velocity = Vector2.ZERO
 	if _state_time < WINDUP:

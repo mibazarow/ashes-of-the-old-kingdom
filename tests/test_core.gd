@@ -33,6 +33,37 @@ class DummyTarget:
 		last_damage = amount
 
 
+## Minimal combatant for status tests: a real HealthComponent child (named
+## "HealthComponent", which StatusComponent looks for on the dead check) plus a
+## receive_damage that routes into it, so DoT ticks land as real HP loss.
+class StatusTarget:
+	extends Node
+
+	var health: HealthComponent
+
+	func _ready() -> void:
+		health = HealthComponent.new()
+		health.name = "HealthComponent"
+		health.max_health = 30
+		add_child(health)
+
+	func get_defense() -> int:
+		return 0
+
+	func receive_damage(amount: int, info: Dictionary = {}) -> void:
+		health.take_damage(amount, info)
+
+
+## Target whose resistance is a fixed knob, to exercise the resistance path.
+class ResistTarget:
+	extends Node
+
+	var resistance := 0.5
+
+	func get_status_resistance(_status: String) -> float:
+		return resistance
+
+
 func _init() -> void:
 	_run.call_deferred()
 
@@ -109,6 +140,12 @@ func _run() -> void:
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
+	print("== statuses ==")
+	_test_statuses()
+
+	print("== status lifecycle ==")
+	await _test_status_lifecycle()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -117,7 +154,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 23, "every test group ran to completion (got %d/23)" % completed.size())
+	_check(completed.size() == 25, "every test group ran to completion (got %d/25)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1207,6 +1244,346 @@ func _test_projectile_wall_collision() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["projectile_wall"] = true
+
+
+## Spec §8.2 statuses: durations, stacking, resistance, DoT through
+## DamageResolver, dead-target safety, the query multipliers, and the resolver's
+## optional status payload. Fully deterministic — StatusComponent.set_process is
+## turned off so only explicit tick() calls advance time; no real frames pass
+## inside this group.
+func _test_statuses() -> void:
+	DamageResolver.reset()
+
+	# --- rejection + basics ----------------------------------------------------
+	var owner := Node.new()
+	root.add_child(owner)
+	var sc := StatusComponent.new()
+	sc.name = "StatusComponent"
+	owner.add_child(sc)
+	sc.set_process(false)
+
+	_check(not sc.apply_status("not_a_status", 5.0), "unknown status name is rejected")
+	_check(not sc.apply_status("burn", 0.0), "zero duration is rejected")
+	_check(not sc.apply_status("burn", -1.0), "negative duration is rejected")
+	_check(not sc.has_status("burn"), "rejected applies left no burn")
+
+	_check(sc.apply_status("burn", 2.0), "burn applies")
+	_check(sc.has_status("burn"), "has_status true after apply")
+	_check(absf(sc.time_left("burn") - 2.0) < 0.001, "time_left ~ duration")
+	sc.tick(1.0)
+	_check(absf(sc.time_left("burn") - 1.0) < 0.001, "tick decrements time_left")
+	_check(sc.has_status("burn"), "burn still active at 1.0 left")
+	sc.tick(1.0)
+	_check(not sc.has_status("burn"), "burn expires exactly at zero")
+	_check(absf(sc.time_left("burn")) < 0.001, "time_left is zero after expiry")
+
+	sc.apply_status("burn", 1.0, null, 1)
+	sc.apply_status("burn", 1.0, null, 10)
+	_check(sc.stacks("burn") == 5, "burn stacks cap at 5")
+	sc.clear_all()
+	sc.apply_status("burn", 1.0)
+	sc.tick(0.5)
+	sc.apply_status("burn", 3.0)
+	_check(absf(sc.time_left("burn") - 3.0) < 0.001, "refresh to the longer duration")
+	sc.apply_status("burn", 1.0)
+	_check(absf(sc.time_left("burn") - 3.0) < 0.001, "shorter reapply keeps the longer time")
+
+	sc.clear_all()
+	sc.apply_status("stun", 1.0, null, 3)
+	_check(sc.stacks("stun") == 1, "stun does not stack")
+	sc.apply_status("stun", 2.0, null, 3)
+	_check(sc.stacks("stun") == 1, "stun stacks stay 1 after reapply")
+	_check(absf(sc.time_left("stun") - 2.0) < 0.001, "stun refreshes duration")
+	owner.queue_free()
+
+	# --- resistance ------------------------------------------------------------
+	var rt := ResistTarget.new()
+	root.add_child(rt)
+	var rsc := StatusComponent.new()
+	rsc.name = "StatusComponent"
+	rt.add_child(rsc)
+	rsc.set_process(false)
+	_check(rsc.apply_status("burn", 4.0), "resisted status still applies")
+	_check(absf(rsc.time_left("burn") - 2.0) < 0.001, "resistance 0.5 halves the duration")
+	rt.queue_free()
+
+	var full := ResistTarget.new()
+	full.resistance = 1.0
+	root.add_child(full)
+	var fsc := StatusComponent.new()
+	fsc.name = "StatusComponent"
+	full.add_child(fsc)
+	fsc.set_process(false)
+	_check(not fsc.apply_status("burn", 4.0), "resistance 1.0 rejects the status")
+	_check(not fsc.has_status("burn"), "resistance 1.0 leaves no effect")
+	full.queue_free()
+
+	# --- DoT through DamageResolver -------------------------------------------
+	var t1 := StatusTarget.new()
+	root.add_child(t1)
+	var sc1 := StatusComponent.new()
+	sc1.name = "StatusComponent"
+	t1.add_child(sc1)
+	sc1.set_process(false)
+	sc1.apply_status("burn", 3.0, null, 1)
+	_check(t1.health.current_health == 30, "status target starts at full hp")
+	sc1.tick(1.0)
+	_check(t1.health.current_health == 27, "burn tick deals 3 damage (1 stack)")
+
+	var t2 := StatusTarget.new()
+	root.add_child(t2)
+	var sc2 := StatusComponent.new()
+	sc2.name = "StatusComponent"
+	t2.add_child(sc2)
+	sc2.set_process(false)
+	sc2.apply_status("burn", 3.0, null, 2)
+	sc2.tick(1.0)
+	_check(t2.health.current_health == 24, "burn tick scales with stacks (2 stacks -> 6)")
+	t1.queue_free()
+	t2.queue_free()
+
+	var dead := StatusTarget.new()
+	root.add_child(dead)
+	var dsc := StatusComponent.new()
+	dsc.name = "StatusComponent"
+	dead.add_child(dsc)
+	dsc.set_process(false)
+	dead.health.take_damage(999)
+	_check(dead.health.is_dead and dead.health.current_health == 0, "fixture target is dead")
+	dsc.apply_status("burn", 3.0, null, 1)
+	dsc.tick(1.0)
+	_check(dead.health.current_health == 0, "DoT does not damage a dead target")
+	dead.queue_free()
+
+	# --- query helpers ---------------------------------------------------------
+	var q := Node.new()
+	root.add_child(q)
+	var qsc := StatusComponent.new()
+	qsc.name = "StatusComponent"
+	q.add_child(qsc)
+	qsc.set_process(false)
+	qsc.apply_status("chill", 2.0)
+	_check(absf(qsc.move_multiplier() - 0.6) < 0.001, "chill move_multiplier 0.6")
+	qsc.clear_all()
+	qsc.apply_status("root", 2.0)
+	_check(qsc.move_multiplier() == 0.0, "root move_multiplier 0.0")
+	qsc.clear_all()
+	qsc.apply_status("stun", 2.0)
+	_check(qsc.move_multiplier() == 0.0, "stun move_multiplier 0.0")
+	qsc.clear_all()
+	_check(qsc.move_multiplier() == 1.0, "clean move_multiplier 1.0")
+	qsc.apply_status("blight", 2.0)
+	_check(absf(qsc.healing_multiplier() - 0.5) < 0.001, "blight healing_multiplier 0.5")
+	qsc.clear_all()
+	_check(qsc.healing_multiplier() == 1.0, "clean healing_multiplier 1.0")
+	qsc.apply_status("stun", 2.0)
+	_check(qsc.blocks_actions(), "stun blocks actions")
+	qsc.clear_all()
+	qsc.apply_status("root", 2.0)
+	_check(qsc.blocks_actions(), "root blocks actions")
+	qsc.clear_all()
+	qsc.apply_status("shock", 2.0)
+	_check(qsc.blocks_actions(), "shock blocks actions")
+	qsc.clear_all()
+	qsc.apply_status("burn", 2.0)
+	_check(not qsc.blocks_actions(), "burn does not block actions")
+	qsc.clear_all()
+	qsc.apply_status("chill", 2.0)
+	_check(not qsc.blocks_actions(), "chill does not block actions")
+	qsc.clear_all()
+	qsc.apply_status("blight", 2.0)
+	_check(not qsc.blocks_actions(), "blight does not block actions")
+	q.queue_free()
+
+	# --- resolve_hit applies a status -----------------------------------------
+	var rt3 := StatusTarget.new()
+	root.add_child(rt3)
+	var scc := StatusComponent.new()
+	scc.name = "StatusComponent"
+	rt3.add_child(scc)
+	scc.set_process(false)
+	var res := DamageResolver.resolve_hit(null, rt3, {
+		"damage": 5, "hit_id": "status-hit-1",
+		"status": "burn", "status_duration": 2.0,
+	})
+	_check(bool(res.get("status_applied", false)), "resolve_hit reports status_applied true")
+	_check(scc.has_status("burn"), "resolve_hit left burn applied")
+	_check(absf(scc.time_left("burn") - 2.0) < 0.001, "burn duration came from status_duration")
+	rt3.queue_free()
+
+	var rt4 := StatusTarget.new()
+	root.add_child(rt4)
+	var res2 := DamageResolver.resolve_hit(null, rt4, {"damage": 5, "hit_id": "status-hit-2"})
+	_check(not bool(res2.get("status_applied", true)), "payload without status reports status_applied false")
+	rt4.queue_free()
+
+	completed["statuses"] = true
+
+
+## Follow-up group for the six status defects: death and respawn clearing, the
+## dead guard on the player side (HP lives in GameState, not in a
+## HealthComponent), DoT tick accounting and the per-tick cap, the resolver
+## refusing to attach a status to a hit that did not land or that just killed
+## its target, and a stun interrupting an in-progress swing.
+func _test_status_lifecycle() -> void:
+	DamageResolver.reset()
+	gs.reset()
+
+	# --- the player: death and respawn wipe every status -----------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(player)
+	await process_frame
+	var psc := player.get_node_or_null("StatusComponent") as StatusComponent
+	_check(psc != null, "player owns a StatusComponent")
+	if psc != null:
+		psc.set_process(false)
+		psc.apply_status("burn", 3.0, null, 1)
+		psc.apply_status("chill", 3.0)
+		_check(psc.has_status("burn"), "burn is live on the player before death")
+		gs.take_damage(999)
+		_check(gs.hp == 0, "the real damage path kills the player")
+		_check(not psc.has_status("burn"), "player death clears statuses")
+		_check(psc.effects.is_empty(), "player death clears every status, not just burn")
+		player.call("_respawn")
+		_check(gs.hp > 0, "respawn restores hp")
+		_check(not psc.has_status("burn"), "respawn does not resurrect statuses")
+		_check(psc.effects.is_empty(), "respawn leaves the player with no effects")
+
+		# --- the dead guard covers the player ----------------------------------
+		gs.reset()
+		psc.apply_status("burn", 3.0, null, 1)
+		gs.hp = 0
+		var resolved := [0]
+		var on_dealt := func(_result: Dictionary) -> void: resolved[0] += 1
+		bus.damage_dealt.connect(on_dealt)
+		psc.tick(1.0)
+		bus.damage_dealt.disconnect(on_dealt)
+		_check(gs.hp == 0, "DoT does not damage a player already at 0 hp")
+		_check(resolved[0] == 0, "no damage is resolved against a dead player")
+		psc.clear_all()
+		gs.reset()
+	arena.queue_free()
+	await process_frame
+
+	# --- the enemy: death wipes every status -----------------------------------
+	DamageResolver.reset()
+	var corpse := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	root.add_child(corpse)
+	await process_frame
+	var csc := corpse.get_node_or_null("StatusComponent") as StatusComponent
+	_check(csc != null, "enemy owns a StatusComponent")
+	if csc != null:
+		csc.set_process(false)
+		csc.apply_status("burn", 3.0, null, 2)
+		csc.apply_status("chill", 3.0)
+		_check(csc.has_status("burn"), "burn is live on the wolf before the killing hit")
+		var kill := DamageResolver.resolve_hit(null, corpse, {
+			"damage": 999, "hit_id": "lifecycle-kill-1",
+			"status": "burn", "status_duration": 3.0,
+		})
+		_check(bool(kill.get("applied", false)), "the killing hit lands")
+		_check(not bool(kill.get("status_applied", true)), "a killing hit reports status_applied false")
+		var corpse_clean := not is_instance_valid(corpse)
+		if is_instance_valid(csc):
+			corpse_clean = csc.effects.is_empty()
+		_check(corpse_clean, "a killing hit leaves no status on the corpse")
+	gs.reset()
+
+	# --- a hit that does not land never applies a status -----------------------
+	var stump := Node.new()
+	root.add_child(stump)
+	var scc := StatusComponent.new()
+	scc.name = "StatusComponent"
+	stump.add_child(scc)
+	scc.set_process(false)
+	var miss := DamageResolver.resolve_hit(null, stump, {
+		"damage": 5, "hit_id": "lifecycle-miss-1",
+		"status": "burn", "status_duration": 2.0,
+	})
+	_check(not bool(miss.get("applied", true)), "target without receive_damage does not take the hit")
+	_check(not bool(miss.get("status_applied", true)), "a hit that does not land reports status_applied false")
+	_check(not scc.has_status("burn"), "a hit that does not land leaves no status behind")
+	stump.queue_free()
+
+	# --- DoT accounting: the tick count matches the duration -------------------
+	var meter := StatusTarget.new()
+	root.add_child(meter)
+	var msc := StatusComponent.new()
+	msc.name = "StatusComponent"
+	meter.add_child(msc)
+	msc.set_process(false)
+	var fired := [0]
+	var dealt := [0]
+	var on_tick := func(_status_name: String, amount: int) -> void:
+		fired[0] += 1
+		dealt[0] += amount
+	msc.ticked.connect(on_tick)
+	msc.apply_status("burn", 3.0, null, 1)
+	msc.tick(1.0)
+	msc.tick(1.0)
+	msc.tick(1.0)
+	msc.ticked.disconnect(on_tick)
+	_check(fired[0] == 3, "3.0 s burn at 1.0 s interval fires 3 ticks (got %d)" % fired[0])
+	_check(dealt[0] == 9, "3 burn ticks total 9 damage (got %d)" % dealt[0])
+	_check(meter.health.current_health == 21, "burn accounting lands as 9 hp of damage (hp=%d)" % meter.health.current_health)
+	_check(not msc.has_status("burn"), "burn is gone once its duration is paid out")
+	meter.queue_free()
+
+	# --- DoT per-tick cap -------------------------------------------------------
+	var capped := StatusTarget.new()
+	root.add_child(capped)
+	var xsc := StatusComponent.new()
+	xsc.name = "StatusComponent"
+	capped.add_child(xsc)
+	xsc.set_process(false)
+	xsc.apply_status("burn", 5.0, null, 5)
+	_check(xsc.stacks("burn") == 5, "burn reached the stack cap of 5")
+	_check(xsc._dot_damage("burn") == 15, "per-tick burn is capped at 15 (got %d)" % xsc._dot_damage("burn"))
+	xsc.tick(1.0)
+	_check(capped.health.current_health == 15, "a capped tick lands exactly 15 damage (hp=%d)" % capped.health.current_health)
+	xsc.clear_all()
+	xsc.apply_status("blight", 5.0, null, 5)
+	_check(xsc._dot_damage("blight") == 10, "blight stays below the cap (got %d)" % xsc._dot_damage("blight"))
+	capped.queue_free()
+
+	# --- a stun interrupts an in-progress swing --------------------------------
+	DamageResolver.reset()
+	gs.reset()
+	var ring := Node2D.new()
+	root.add_child(ring)
+	var wolf := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	wolf.position = Vector2(12, 0)
+	ring.add_child(wolf)
+	var victim := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	victim.position = Vector2(0, 0)
+	ring.add_child(victim)
+
+	var attacking := false
+	for i in range(180):
+		await physics_frame
+		if int(wolf.get("state")) == 4:
+			attacking = true
+			break
+	_check(attacking, "wolf entered ATTACK before the stun (state=%d)" % int(wolf.get("state")))
+	if attacking:
+		var wsc := wolf.get_node_or_null("StatusComponent") as StatusComponent
+		var shape := wolf.get_node_or_null("AttackHitbox/CollisionShape2D") as CollisionShape2D
+		var telegraph := wolf.get_node_or_null("Telegraph") as ColorRect
+		_check(wsc != null and shape != null and telegraph != null,
+			"attacker exposes status component, hitbox and telegraph")
+		if wsc != null and shape != null and telegraph != null:
+			wsc.apply_status("stun", 1.0)
+			await physics_frame
+			_check(int(wolf.get("state")) != 4, "stun aborts the enemy swing (state=%d)" % int(wolf.get("state")))
+			_check(shape.disabled, "aborted swing leaves the hitbox disabled")
+			_check(not telegraph.visible, "aborted swing hides the telegraph")
+	ring.queue_free()
+	await process_frame
+	gs.reset()
+
+	completed["status_lifecycle"] = true
 
 
 ## The suite must produce the same result no matter what user://settings/

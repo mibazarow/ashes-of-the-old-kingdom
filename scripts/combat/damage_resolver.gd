@@ -51,6 +51,22 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 		result["applied"] = false
 		result["reason"] = "target_has_no_receive_damage"
 
+	# Optional status payload: any spell that wants to inflict a status only has
+	# to add `status` + `status_duration` here. The target's StatusComponent (if
+	# it has one) decides resistance, stacking and expiry. The damage formula,
+	# dedupe and the keys above are untouched. A status only rides a hit that
+	# actually landed: a target without receive_damage took nothing, and a target
+	# this very hit killed must not end up burning as a corpse.
+	var status_name: String = String(payload.get("status", ""))
+	result["status_applied"] = false
+	if status_name != "" and bool(result["applied"]) and not _target_is_dead(target):
+		var comp := target.get_node_or_null("StatusComponent")
+		if comp != null and comp.has_method("apply_status"):
+			var status_duration := float(payload.get("status_duration", 0.0))
+			if bool(comp.call("apply_status", status_name, status_duration, attacker)):
+				result["status_applied"] = true
+				result["status"] = status_name
+
 	var bus := _autoload("EventBus")
 	if bus != null:
 		bus.damage_dealt.emit(result)
@@ -58,6 +74,15 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 	if telemetry != null:
 		telemetry.combat(result)
 	return result
+
+
+## Mirrors StatusComponent._owner_is_dead(): the owner may answer for itself
+## because not every combatant keeps HP in a HealthComponent child.
+static func _target_is_dead(target: Node) -> bool:
+	if target.has_method("is_status_owner_dead"):
+		return bool(target.call("is_status_owner_dead"))
+	var hc := target.get_node_or_null("HealthComponent")
+	return hc != null and bool(hc.get("is_dead"))
 
 
 ## Autoloads are resolved at runtime so this class also compiles under

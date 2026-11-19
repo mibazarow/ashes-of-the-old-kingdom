@@ -689,8 +689,19 @@ func _use_item(item_id: String) -> void:
 	var def := ItemDB.get_item(item_id)
 	if GameState.remove_item(item_id, 1):
 		if def.has("heal"):
-			GameState.heal(int(def["heal"]))
+			_heal_player(int(def["heal"]))
 		if def.has("mana"):
 			GameState.restore_mana(int(def["mana"]))
 		EventBus.toast.emit("Использовано: %s" % String(def.get("name", item_id)))
 		_refresh_inventory()
+
+
+## Healing goes through the player so a BLIGHT status can halve the amount
+## without the HUD knowing about statuses. Falls back to GameState when no
+## player is in the tree (e.g. a menu-only scene).
+func _heal_player(amount: int) -> void:
+	var player := get_tree().get_first_node_in_group("player")
+	if player != null and player.has_method("heal_with_status"):
+		player.call("heal_with_status", amount)
+	else:
+		GameState.heal(amount)
