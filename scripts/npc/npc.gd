@@ -5,6 +5,11 @@ extends Area2D
 const QUEST_ID := "q01_ash_wolves"
 
 @export var display_name: String = "Эдрик"
+## Slug that names this character's dialogues in data/dialogue.json: the runner id
+## is `"<speaker_id>_<context>"` (spec §12.2). It is a stable ASCII key, kept
+## separate from the Cyrillic `display_name` so renaming the label never orphans
+## the conversation data.
+@export var speaker_id: String = "edrik"
 @export var sprite_texture: Texture2D
 
 @onready var sprite: Sprite2D = $Sprite2D
@@ -32,8 +37,26 @@ func prompt_text() -> String:
 
 
 func interact(_player: Node) -> void:
-	var quest: Dictionary = QuestManager.get_quest(QUEST_ID)
+	# Data-driven conversation first (spec §12.2). The context picks the dialogue:
+	# the after-hunt line once the hunt is over, the intro otherwise. The runner is
+	# built with the live state injected rather than reading the autoloads inside,
+	# so the same object the test constructs is the one the game uses.
 	var state: String = QuestManager.state_of(QUEST_ID)
+	var context := "intro"
+	if state == QuestManager.STATE_READY or state == QuestManager.STATE_DONE:
+		context = "after_hunt"
+	var runner := DialogueRunner.new(GameState, QuestManager)
+	if runner.start("%s_%s" % [speaker_id, context]):
+		var hud := get_tree().get_first_node_in_group("hud")
+		if hud != null and hud.has_method("open_dialogue_runner"):
+			hud.open_dialogue_runner(runner)
+			return
+
+	# Fallback: the runner refused (unknown dialogue, an unmet condition, or no HUD
+	# to show it). The quest turn-in lives here on purpose — edrik_after_hunt is
+	# gated on `quest_done`, so while the quest is only `ready` the runner refuses
+	# and this path turns it in. This is the path the quest bot relies on.
+	var quest: Dictionary = QuestManager.get_quest(QUEST_ID)
 	var lines: Array = []
 
 	if state == QuestManager.STATE_AVAILABLE:

@@ -55,6 +55,8 @@ var _toast_label: Label
 var _dialogue_panel: PanelContainer
 var _dialogue_speaker: Label
 var _dialogue_text: Label
+var _dialogue_options: Label
+var _dialogue_hint: Label
 var _inventory_panel: PanelContainer
 var _inventory_list: VBoxContainer
 var _inventory_stats: Label
@@ -89,6 +91,18 @@ var _craft_open := false
 var _tab_held: bool = false
 var _day_clock: Node = null
 var _clock_refresh_left := 0.0
+
+## Branching-dialogue state (spec §12.2). The runner is non-null only while a
+## data-driven conversation owns the panel; the legacy one-line quest dialogue
+## (EventBus.dialogue_requested) leaves it null and keeps its old close-on-E
+## behaviour. `_dialogue_lock_input` swallows the single input frame that opened
+## the conversation, so the E press that opened it never also advances a node.
+var _dialogue_runner: DialogueRunner = null
+var _dialogue_option_index := 0
+var _dialogue_auto_advance := true
+var _dialogue_tab_held := false
+var _dialogue_space_held := false
+var _dialogue_lock_input := false
 
 
 func _ready() -> void:
@@ -317,9 +331,21 @@ func _build_dialogue_panel() -> void:
 	_dialogue_text.custom_minimum_size = Vector2(286, 0)
 	box.add_child(_dialogue_text)
 
-	var hint := _make_text("[E] продолжить", Color(0.6, 0.62, 0.6))
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	box.add_child(hint)
+	# Option list for branching nodes (spec §12.2). Hidden on plain lines so it
+	# adds no height there; the "> " cursor marks the row the movement actions are
+	# on. It lives inside the same box, so a conversation with choices simply
+	# grows the bottom-anchored panel upward instead of overlapping the world.
+	_dialogue_options = _make_text("", Color(0.86, 0.9, 0.78))
+	_dialogue_options.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_dialogue_options.custom_minimum_size = Vector2(286, 0)
+	_dialogue_options.visible = false
+	box.add_child(_dialogue_options)
+
+	# Controls line. Kept as a field so the auto-advance toggle (Tab) can rewrite
+	# it live; the runner refreshes it on every node.
+	_dialogue_hint = _make_text("[E] продолжить", Color(0.6, 0.62, 0.6))
+	_dialogue_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	box.add_child(_dialogue_hint)
 
 
 func _build_inventory_panel() -> void:
@@ -976,9 +1002,17 @@ func _on_toast(message: String) -> void:
 func _on_dialogue(lines: Array) -> void:
 	if lines.is_empty():
 		return
+	# Legacy single-line dialogue (the quest fallback): it owns no runner, so the
+	# navigation branch stays inert and E/Esc simply close it, as before.
+	_dialogue_runner = null
 	var first: Dictionary = lines[0]
 	_dialogue_speaker.text = String(first.get("speaker", ""))
 	_dialogue_text.text = String(first.get("text", ""))
+	if _dialogue_options != null:
+		_dialogue_options.visible = false
+		_dialogue_options.text = ""
+	if _dialogue_hint != null:
+		_dialogue_hint.text = "[E] продолжить"
 	_dialogue_panel.visible = true
 	_dialogue_open = true
 	GameState.ui_blocking = true
@@ -990,8 +1024,166 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
+	_dialogue_runner = null
+	_dialogue_option_index = 0
+	_dialogue_lock_input = false
+	_dialogue_tab_held = false
+	_dialogue_space_held = false
 	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open or _shop_open or _craft_open
 	EventBus.dialogue_closed.emit()
+
+
+## Opens a data-driven conversation handed over by an NPC (spec §12.2). Mirrors
+## open_shop's contract: the caller owns the runner, the HUD only renders and
+## drives it, and every modal it could visually overlap is closed first. The
+## opening E press is locked out for one frame so it cannot also advance a node.
+func open_dialogue_runner(runner: DialogueRunner) -> void:
+	if runner == null:
+		return
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	if _shop_open:
+		close_shop()
+	if _craft_open:
+		close_craft()
+	_close_character()
+	if _paused:
+		_close_pause()
+	_dialogue_runner = runner
+	_dialogue_option_index = 0
+	_dialogue_auto_advance = true
+	_dialogue_tab_held = false
+	_dialogue_space_held = false
+	_dialogue_lock_input = true
+	_dialogue_open = true
+	_dialogue_panel.visible = true
+	GameState.ui_blocking = true
+	EventBus.interact_prompt.emit("")
+	_present_dialogue_node()
+
+
+## Renders the node the runner is on, fast-skipping plain lines the player has
+## already seen while auto-advance is on (spec §12.2). A conversation can chain
+## several already-read lines in a row, so this walks them without waiting for
+## input; the loop is bounded so a malformed cycle of read nodes can never hang a
+## frame — on overflow it simply closes rather than spinning.
+func _present_dialogue_node() -> void:
+	for _guard in range(64):
+		if _dialogue_runner == null or _dialogue_runner.is_finished():
+			close_dialogue()
+			return
+		var node_id := _dialogue_runner.current_node_id()
+		var was_read := _dialogue_runner.is_read(node_id)
+		_dialogue_runner.mark_read(node_id)
+		var node: Dictionary = _dialogue_runner.current_node()
+		var options: Array = node.get("options", [])
+		if options.is_empty() and _dialogue_auto_advance and was_read:
+			_dialogue_runner.skip_remaining()
+			if _dialogue_runner.advance() == "":
+				close_dialogue()
+				return
+			continue
+		_dialogue_option_index = 0
+		_render_dialogue_node()
+		return
+	close_dialogue()
+
+
+## Paints the current node: speaker, body, and — when the node offers choices —
+## the numbered option list with a cursor on the selected row.
+func _render_dialogue_node() -> void:
+	if _dialogue_runner == null:
+		return
+	var node: Dictionary = _dialogue_runner.current_node()
+	_dialogue_speaker.text = _dialogue_runner.current_speaker()
+	_dialogue_text.text = String(node.get("text", ""))
+	var options: Array = node.get("options", [])
+	if options.is_empty():
+		_dialogue_options.visible = false
+		_dialogue_options.text = ""
+	else:
+		var rows: PackedStringArray = []
+		for i in range(options.size()):
+			var option: Variant = options[i]
+			var label := String((option as Dictionary).get("text", "")) if option is Dictionary else String(option)
+			rows.append("> %d. %s" % [i + 1, label] if i == _dialogue_option_index else "  %d. %s" % [i + 1, label])
+		_dialogue_options.text = "\n".join(rows)
+		_dialogue_options.visible = true
+	_refresh_dialogue_hint(not options.is_empty())
+
+
+## One compact controls line that reflects the live auto-advance state, so the
+## Tab toggle is visible without a toast. Kept short and clipped so a 480-wide
+## viewport never overflows.
+func _refresh_dialogue_hint(has_options: bool) -> void:
+	if _dialogue_hint == null:
+		return
+	var auto := "вкл" if _dialogue_auto_advance else "выкл"
+	if has_options:
+		_dialogue_hint.text = "[E] выбрать · ↑↓ выбор · Tab авто:%s · Space пропуск" % auto
+	else:
+		_dialogue_hint.text = "[E] далее · Tab авто:%s · Space пропуск" % auto
+
+
+## The conversation owns the input while it is open, exactly like the shop and
+## the craft bench: Esc closes it (never pausing underneath), the movement actions
+## walk the option list, E confirms the choice or advances the line, Space
+## fast-forwards, and Tab toggles auto-advance of already-read lines. Every other
+## key is swallowed, so a conversation cannot be overlaid by another modal.
+## Tab and Space have no InputMap action, so both are edge-detected by hand the
+## way Enter is in the inventory; the bot drives the conversation through E alone.
+func _process_dialogue_navigation() -> void:
+	if _dialogue_lock_input:
+		_dialogue_lock_input = false
+		return
+	if InputSource.is_action_just_pressed(&"pause"):
+		close_dialogue()
+		return
+	var tab_now := Input.is_key_pressed(KEY_TAB)
+	if tab_now and not _dialogue_tab_held:
+		_dialogue_auto_advance = not _dialogue_auto_advance
+		_refresh_dialogue_hint(not _dialogue_runner.current_options().is_empty())
+	_dialogue_tab_held = tab_now
+	var options := _dialogue_runner.current_options()
+	var delta := 0
+	if InputSource.is_action_just_pressed(&"move_up"):
+		delta -= 1
+	if InputSource.is_action_just_pressed(&"move_down"):
+		delta += 1
+	if delta != 0 and not options.is_empty():
+		_dialogue_option_index = clampi(_dialogue_option_index + delta, 0, options.size() - 1)
+		_render_dialogue_node()
+	var space_now := Input.is_key_pressed(KEY_SPACE)
+	var space_edge := space_now and not _dialogue_space_held
+	_dialogue_space_held = space_now
+	if InputSource.is_action_just_pressed(&"interact") or space_edge:
+		_advance_dialogue()
+
+
+## E / Space on the current node: pick the highlighted option when the node offers
+## choices, otherwise advance the plain line. When the runner reports the end of
+## the conversation the panel closes and input is handed back to the world.
+func _advance_dialogue() -> void:
+	if _dialogue_runner == null:
+		return
+	var options := _dialogue_runner.current_options()
+	if options.is_empty():
+		if _dialogue_runner.advance() == "":
+			close_dialogue()
+			return
+		_present_dialogue_node()
+		return
+	var result: Dictionary = _dialogue_runner.choose(_dialogue_option_index)
+	if not bool(result.get("ok", false)):
+		return
+	if _dialogue_runner.is_finished():
+		close_dialogue()
+		return
+	_present_dialogue_node()
 
 
 func _toggle_inventory() -> void:
@@ -1138,6 +1330,13 @@ func _process(_delta: float) -> void:
 				_craft_panel.move_selection(craft_delta)
 			if InputSource.is_action_just_pressed(&"interact"):
 				_craft_panel.activate()
+		return
+	# A data-driven conversation owns the input while it is open, ahead of every
+	# gameplay and modal branch below, so Esc/E/↑↓/Tab/Space reach only it. The
+	# legacy one-line dialogue leaves the runner null and falls through to the
+	# close-on-E path further down, exactly as before.
+	if _dialogue_open and _dialogue_runner != null:
+		_process_dialogue_navigation()
 		return
 	# Esc belongs to the character screen while it is open: it closes the panel
 	# instead of pausing the game underneath.

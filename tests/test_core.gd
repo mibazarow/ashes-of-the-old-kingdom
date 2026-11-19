@@ -248,6 +248,9 @@ func _run() -> void:
 	print("== craft ==")
 	await _test_craft()
 
+	print("== dialogues ==")
+	_test_dialogues()
+
 	print("== day cycle ==")
 	await _test_day_cycle()
 
@@ -259,7 +262,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 39, "every test group ran to completion (got %d/39)" % completed.size())
+	_check(completed.size() == 40, "every test group ran to completion (got %d/40)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -5011,4 +5014,117 @@ func _test_day_cycle() -> void:
 	await process_frame
 	gs.reset()
 	completed["day_cycle"] = true
+
+
+## Branching dialogue (spec §12.2): the data table, the runner's node traversal,
+## conditions, effects, the read-set that drives the HUD's fast-skip, and the
+## save round-trip. The runner is built with the live GameState/QuestManager
+## injected, exactly as the NPC builds it in game, so this exercises the same
+## object the conversation uses. The full NPC→HUD→runner handoff and the quest
+## turn-in fallback are covered end-to-end by BOT-001/BOT-002.
+func _test_dialogues() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- the data table -------------------------------------------------------
+	_check(DialogueDB.has_dialogue("edrik_intro"), "edrik_intro is defined")
+	_check(DialogueDB.has_dialogue("edrik_after_hunt"), "edrik_after_hunt is defined")
+	_check(not DialogueDB.has_dialogue("nope"), "an unknown dialogue id is not present")
+	_check(String(DialogueDB.get_dialogue("edrik_intro").get("speaker_id", "")) == "edrik",
+		"edrik_intro names the edrik speaker")
+	_check(DialogueDB.for_speaker("edrik").size() == 2, "edrik speaks both dialogues")
+	_check(DialogueDB.for_speaker("nobody").is_empty(), "an unknown speaker has no lines")
+	var n2 := DialogueDB.node("edrik_intro", "n2")
+	_check((n2.get("options", []) as Array).size() == 2, "the choice node offers two options")
+	_check(DialogueDB.node("edrik_intro", "ghost").is_empty(), "an unknown node reads as empty")
+	_check(DialogueDB.node("edrik_ghost", "n1").is_empty(), "a node of an unknown dialogue reads as empty")
+
+	# --- the after-hunt line is gated on quest_done ---------------------------
+	# While the quest is only available the runner must refuse it, which is what
+	# forces the NPC back onto its legacy turn-in path (the bot's completion).
+	var gate := DialogueRunner.new(gs, qm)
+	_check(not gate.start("edrik_after_hunt"), "after-hunt dialogue refuses while the quest is not done")
+	_check(gate.is_finished(), "a refused dialogue leaves the runner finished")
+
+	# --- unknown dialogue -----------------------------------------------------
+	var ghost := DialogueRunner.new(gs, qm)
+	_check(not ghost.start("no_such_dialogue"), "starting an unknown dialogue is refused")
+	_check(ghost.is_finished(), "the runner stays finished after a refused start")
+
+	# --- intro traversal: start -> n1 -> advance -> n2 -> choose(0) -> n3 ------
+	gs.reset()
+	qm.reset()
+	var r := DialogueRunner.new(gs, qm)
+	_check(r.start("edrik_intro"), "edrik_intro starts")
+	_check(not r.is_finished(), "a started dialogue is not finished")
+	_check(r.current_node_id() == "n1", "the runner opens on the start node")
+	_check(r.current_speaker() == "Эдрик", "the speaker comes from the dialogue")
+	_check(r.current_options().is_empty(), "the opening line offers no choices")
+	_check(r.advance() == "n2", "advancing a plain line moves to the choice node")
+	_check(r.current_node_id() == "n2", "the runner is now on the choice node")
+	# advance() must not move a node that offers choices — only choose() may.
+	_check(r.advance() == "" and r.current_node_id() == "n2", "advance is a no-op on a choice node")
+	# A choice out of range is refused and changes nothing.
+	var bad: Dictionary = r.choose(5)
+	_check(not bool(bad.get("ok", false)), "choosing past the last option is refused")
+	_check(r.current_node_id() == "n2", "a refused choice did not move the node")
+	_check(not bool(r.choose(-1).get("ok", false)), "choosing a negative index is refused")
+	# The accepted choice sets the flag and (via n3's effect) starts the quest.
+	var picked: Dictionary = r.choose(0)
+	_check(bool(picked.get("ok", false)), "choosing the first option is accepted")
+	_check(r.current_node_id() == "n3", "the choice moved the conversation to n3")
+	_check(gs.get_flag("accepted_wolf_hunt", false) == true, "the chosen option set its flag")
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_ACTIVE, "the node effect started the quest")
+	_check(r.current_options().is_empty(), "n3 offers no choices")
+	_check(r.advance() == "", "advancing the last line ends the conversation")
+	_check(r.is_finished(), "the conversation is finished after the last line")
+
+	# --- the after-hunt line still refuses while the quest is merely active ----
+	var gate2 := DialogueRunner.new(gs, qm)
+	_check(not gate2.start("edrik_after_hunt"), "after-hunt dialogue refuses while the quest is active")
+
+	# --- the second option loops back without starting anything ---------------
+	gs.reset()
+	qm.reset()
+	var loop := DialogueRunner.new(gs, qm)
+	loop.start("edrik_intro")
+	loop.advance()
+	var refused: Dictionary = loop.choose(1)
+	_check(bool(refused.get("ok", false)) and loop.current_node_id() == "n4",
+		"the greedy option leads to the refusal line")
+	_check(loop.advance() == "n2", "the refusal line loops back to the choice node")
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_AVAILABLE, "the greedy path started no quest")
+
+	# --- the read-set (drives the HUD fast-skip) ------------------------------
+	gs.reset()
+	qm.reset()
+	var rd := DialogueRunner.new(gs, qm)
+	rd.start("edrik_intro")
+	_check(not rd.is_read("n1"), "a fresh node reads as unseen")
+	rd.mark_read("n1")
+	_check(rd.is_read("n1"), "a marked node reads as seen")
+	_check(gs.is_dialogue_read("edrik_intro:n1"), "the read-set is keyed by dialogue_id:node_id")
+	_check(not gs.is_dialogue_read("edrik_after_hunt:n1"), "the same node id in another dialogue is separate")
+	rd.mark_read("n1")
+	_check(gs.dialogue_read.size() == 1, "re-marking the same node does not duplicate the entry")
+
+	# --- the read-set survives a save round-trip ------------------------------
+	var payload := JSON.stringify(gs.to_dict())
+	var fresh: Node = load("res://scripts/core/game_state.gd").new()
+	root.add_child(fresh)
+	fresh.call("from_dict", JSON.parse_string(payload))
+	_check(bool(fresh.call("is_dialogue_read", "edrik_intro:n1")), "the read-set survives a JSON save round-trip")
+	_check(not bool(fresh.call("is_dialogue_read", "edrik_intro:n2")), "unseen nodes stay unseen across a load")
+	fresh.queue_free()
+
+	# --- skip_remaining marks the current line fully shown --------------------
+	var sk := DialogueRunner.new(gs, qm)
+	sk.start("edrik_intro")
+	_check(not sk.is_revealed(), "a freshly entered line starts unrevealed")
+	sk.skip_remaining()
+	_check(sk.is_revealed(), "skip_remaining reveals the whole current line")
+
+	gs.reset()
+	qm.reset()
+	completed["dialogues"] = true
 

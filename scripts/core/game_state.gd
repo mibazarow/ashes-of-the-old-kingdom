@@ -116,6 +116,13 @@ var flags: Dictionary = {}
 var kills: Dictionary = {}
 var play_time_ms: int = 0
 
+## Dialogue nodes the player has already seen (spec §12.2 fast-skip). Keys are
+## `"<dialogue_id>:<node_id>"`, composed by `DialogueRunner`, so the same short
+## node id used in two dialogues never collides. Lives here rather than in the
+## runner because the runner is a throwaway per conversation while the read-set
+## must outlive it through a save.
+var dialogue_read: Array[String] = []
+
 ## Set while a modal UI (dialogue, inventory, pause) owns the input.
 var ui_blocking: bool = false
 
@@ -150,6 +157,7 @@ func reset() -> void:
 	flags = {}
 	kills = {}
 	play_time_ms = 0
+	dialogue_read = []
 	recompute_derived()
 	hp = max_hp
 	mana = max_mana
@@ -777,6 +785,36 @@ func kill_count(enemy_type: String) -> int:
 	return int(kills.get(enemy_type, 0))
 
 
+# --- dialogue read-set (spec §12.2 fast-skip) ---------------------------------
+
+## Records that one dialogue node has been seen. `key` is the composed
+## `"<dialogue_id>:<node_id>"` the runner builds. Idempotent: a repeat never
+## duplicates the entry, so re-walking a conversation cannot grow the array.
+func mark_dialogue_read(key: String) -> void:
+	if key == "":
+		return
+	if not dialogue_read.has(key):
+		dialogue_read.append(key)
+
+
+func is_dialogue_read(key: String) -> bool:
+	return key != "" and dialogue_read.has(key)
+
+
+## A save written before dialogues existed has no `dialogue_read` key, and a
+## hand-edited one may hold anything, so the array is rebuilt entry by entry:
+## only non-empty strings survive, duplicates are dropped, and a non-array (or a
+## missing key) falls back to empty rather than failing the load.
+func _restore_dialogue_read(raw: Variant) -> Array[String]:
+	var restored: Array[String] = []
+	if not (raw is Array):
+		return restored
+	for value: Variant in (raw as Array):
+		if value is String and String(value) != "" and not restored.has(String(value)):
+			restored.append(String(value))
+	return restored
+
+
 # --- serialization ------------------------------------------------------------
 
 func to_dict() -> Dictionary:
@@ -802,6 +840,7 @@ func to_dict() -> Dictionary:
 		"flags": flags.duplicate(true),
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
+		"dialogue_read": dialogue_read.duplicate(),
 	}
 
 
@@ -835,6 +874,7 @@ func from_dict(d: Dictionary) -> void:
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
+	dialogue_read = _restore_dialogue_read(d.get("dialogue_read", null))
 	recompute_derived()
 	_emit_all()
 

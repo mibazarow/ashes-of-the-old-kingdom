@@ -1,0 +1,50 @@
+{
+	"dialogues": {
+		"edrik_intro": {
+			"speaker_id": "edrik",
+			"speaker": "Эдрик",
+			"start": "n1",
+			"nodes": {
+				"n1": {
+					"text": "Слава павшим. Но живым работа нужнее.",
+					"next": "n2"
+				},
+				"n2": {
+					"text": "Волки у опушки рвут скот. Проводи их, и деревня вздохнёт.",
+					"options": [
+						{
+							"text": "Я сделаю это.",
+							"effects": [{"flag": "accepted_wolf_hunt", "value": true}],
+							"next": "n3"
+						},
+						{
+							"text": "Дай мне награду вперёд.",
+							"next": "n4"
+						}
+					]
+				},
+				"n3": {
+					"text": "Опушка к северу. Вернись, когда волков станет меньше.",
+					"effects": [{"quest": "q01_ash_wolves", "action": "start"}],
+					"next": ""
+				},
+				"n4": {
+					"text": "Награда ждёт тех, кто принёс волчьи клыки, а не тех, кто торгуется.",
+					"next": "n2"
+				}
+			}
+		},
+		"edrik_after_hunt": {
+			"speaker_id": "edrik",
+			"speaker": "Эдрик",
+			"start": "n1",
+			"condition": {"quest_done": "q01_ash_wolves"},
+			"nodes": {
+				"n1": {
+					"text": "Деревня дышит ровнее. Спасибо.",
+					"next": ""
+				}
+			}
+		}
+	}
+}
