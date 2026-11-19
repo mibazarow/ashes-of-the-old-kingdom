@@ -29,6 +29,11 @@ var player: Node2D
 var tile_layer: TileMapLayer
 var _map: Array[String] = []
 
+## The in-game day cycle driving the villager schedules (spec §12.1). Created as
+## a child node rather than an autoload so the world slice owns it and a test gets
+## it by instantiating the world scene. Exposed for the HUD and a test to reach.
+var day_clock: DayClock
+
 ## Radius (in tiles) around the player that counts as explored on the map.
 const VISIT_RADIUS := 3
 
@@ -68,6 +73,7 @@ func _ready() -> void:
 	_generate_map()
 	_build_tileset_and_layer()
 	_spawn_actors()
+	_setup_day_cycle()
 	_configure_camera()
 	_last_visited_tile = player_tile()
 	_mark_visited(_last_visited_tile)
@@ -389,3 +395,27 @@ func _configure_camera() -> void:
 	cam.position_smoothing_enabled = true
 	cam.position_smoothing_speed = 7.0
 	cam.make_current()
+
+
+## Builds the day cycle and gives every scheduled villager a `ScheduleComponent`.
+## The clock is added first so its `_ready` (which loads `data/schedules.json` and
+## seeds the morning phase) runs before any component reads `phase()`. The smith
+## keeps his forge tile: his schedule morning spot is the tile `_find_walkable_away`
+## already chose, so attaching a schedule never drags him into the village and
+## never breaks the separation that keeps the quest bots talking to Edrik.
+func _setup_day_cycle() -> void:
+	day_clock = DayClock.new()
+	day_clock.name = "DayClock"
+	add_child(day_clock)
+	_attach_schedule(_npc_node)
+	_attach_schedule(_merchant_node)
+	_attach_schedule(_smith_node)
+
+
+func _attach_schedule(npc: Node2D) -> void:
+	if npc == null or not is_instance_valid(npc):
+		return
+	var comp := ScheduleComponent.new()
+	comp.name = "ScheduleComponent"
+	comp.setup(npc, self, day_clock)
+	npc.add_child(comp)

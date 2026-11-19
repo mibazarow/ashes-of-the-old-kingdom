@@ -11,6 +11,15 @@ const MAX_VISIBLE_ROWS := 8
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
 
+## Russian display names for the day phases (spec §12.1), keyed by the phase id in
+## data/schedules.json. An unknown id falls back to the raw id rather than blank.
+const PHASE_LABELS_RU := {
+	"morning": "Утро",
+	"day": "День",
+	"evening": "Вечер",
+	"night": "Ночь",
+}
+
 ## Russian display names for the rarity tiers, shown in the selected-row detail
 ## line (spec §14.1). The colour reinforces the tier; this text is what actually
 ## names it, so colour never stands in for a clear description.
@@ -38,6 +47,7 @@ var _hp_label: Label
 var _mp_label: Label
 var _level_label: Label
 var _gold_label: Label
+var _clock_label: Label
 var _quest_label: Label
 var _skill_label: Label
 var _prompt_label: Label
@@ -77,6 +87,8 @@ var _character_open := false
 var _shop_open := false
 var _craft_open := false
 var _tab_held: bool = false
+var _day_clock: Node = null
+var _clock_refresh_left := 0.0
 
 
 func _ready() -> void:
@@ -156,6 +168,16 @@ func _build_ui() -> void:
 	_gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_gold_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.add_child(_gold_label)
+
+	# Compact day-clock line (spec §12.1), third row of the right column. It lives
+	# above the expanding middle spacer, so it grows downward into empty space and
+	# never shifts the bars, the prompt or the tracker.
+	_clock_label = _make_text("", Color(0.78, 0.82, 0.74))
+	_clock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_clock_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_clock_label.clip_text = true
+	_clock_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	right.add_child(_clock_label)
 
 	# --- toast under the top row ---
 	var toast_row := CenterContainer.new()
@@ -1053,6 +1075,9 @@ func _close_pause() -> void:
 ## drive menus through one code path. Real InputEvents would be invisible to the
 ## bot, which is exactly the privileged/unequal access the spec forbids.
 func _process(_delta: float) -> void:
+	# The clock line refreshes on its own one-second cadence, ahead of every
+	# modal early-return below, so it stays readable over the map, shop and bench.
+	_tick_clock(_delta)
 	# The settings screen captures raw events itself; while it is open no
 	# action polling may reach the gameplay paths below.
 	if _settings_open:
@@ -1280,3 +1305,49 @@ func _heal_player(amount: int) -> void:
 		player.call("heal_with_status", amount)
 	else:
 		GameState.heal(amount)
+
+
+## Refreshes the compact day-clock line at most once a second (spec §12.1). The
+## clock node is found through the `day_clock` group rather than a node path, and
+## a missing clock (a menu-only scene with no world) simply leaves the line blank.
+## The HUD runs with PROCESS_MODE_ALWAYS, but the clock fraction itself is frozen
+## while paused or UI-blocked, so the displayed time never ages off-screen.
+func _tick_clock(delta: float) -> void:
+	if _clock_label == null:
+		return
+	_clock_refresh_left -= delta
+	if _clock_refresh_left > 0.0:
+		return
+	_clock_refresh_left = 1.0
+	refresh_clock_line()
+
+
+## Rebuilds the day-clock line from the current clock state. Split out from the
+## one-second throttle in `_tick_clock` so a test or a screenshot probe can force
+## an immediate, deterministic refresh.
+func refresh_clock_line() -> void:
+	if _clock_label == null:
+		return
+	if _day_clock == null or not is_instance_valid(_day_clock):
+		_day_clock = get_tree().get_first_node_in_group("day_clock")
+	if _day_clock == null:
+		_clock_label.text = ""
+		return
+	var phase := String(_day_clock.call("phase"))
+	var fraction := float(_day_clock.get("time_fraction"))
+	# The in-game day starts at dawn, not midnight: fraction 0.0 is 06:00, so the
+	# phase labels land on the hours a player expects (morning 06:00, day 12:00,
+	# evening 19:12, night 01:12). The +6h offset is display-only; the schedule
+	# data and the phase logic still key off the raw fraction.
+	var display_hours := fmod(6.0 + fmod(fraction, 1.0) * 24.0, 24.0)
+	var total_minutes := roundi(display_hours * 60.0) % 1440
+	var hour := int(total_minutes / 60.0)
+	var minute := total_minutes % 60
+	var label := String(PHASE_LABELS_RU.get(phase, phase))
+	_clock_label.text = "%s · %02d:%02d" % [label, hour, minute]
+
+
+## Read-only view of the day-clock line, so a test or a screenshot probe can read
+## what the player sees without reaching into the HUD's private node tree.
+func clock_line_text() -> String:
+	return _clock_label.text if _clock_label != null else ""

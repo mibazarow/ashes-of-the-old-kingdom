@@ -248,6 +248,9 @@ func _run() -> void:
 	print("== craft ==")
 	await _test_craft()
 
+	print("== day cycle ==")
+	await _test_day_cycle()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -256,7 +259,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 38, "every test group ran to completion (got %d/38)" % completed.size())
+	_check(completed.size() == 39, "every test group ran to completion (got %d/39)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -4615,4 +4618,397 @@ func _reset_input_to_known_state() -> void:
 	_delete_settings_file()
 	_restore_control_defaults(ib)
 	_delete_settings_file()
+
+
+## The interactable whose node name matches exactly, so the schedule tests can
+## grab Edrik/Yorek/Bran without assuming their order in the group.
+func _find_interactable_named(group: String, node_name: String) -> Node:
+	for node in get_nodes_in_group(group):
+		if String(node.name) == node_name:
+			return node
+	return null
+
+
+## Tile an NPC currently stands on, using the same 16 px grid the world uses.
+func _npc_tile(npc: Node) -> Vector2i:
+	return Vector2i(
+		floori((npc as Node2D).global_position.x / 16.0),
+		floori((npc as Node2D).global_position.y / 16.0)
+	)
+
+
+## True when every NPC stands on the tile its schedule component is aiming for.
+func _all_at_spot(npcs: Array) -> bool:
+	for npc in npcs:
+		var comp: Node = npc.get_node_or_null("ScheduleComponent")
+		if comp == null:
+			return false
+		if _npc_tile(npc) != comp.call("current_spot"):
+			return false
+	return true
+
+
+## Steps physics frames (one fixed 1/60 s walk tick each) until every NPC has
+## reached its scheduled spot, or the cap is hit. Physics frames, not process
+## frames, because the walk runs in _physics_process.
+func _settle_walks(npcs: Array, cap: int) -> void:
+	for i in range(cap):
+		if _all_at_spot(npcs):
+			return
+		await physics_frame
+	await physics_frame
+
+
+## Stub world for the schedule-safety tests. `cell_at` answers from explicit tile
+## sets rather than the generated map, so a test can name a solid morning spot or
+## a walled-off target and check the component refuses to stand the NPC on rock.
+## With `default_walkable` true, listed `solid` tiles are rock and all else is
+## grass; with it false, only listed `walkable` tiles are grass.
+class SolidTileWorld:
+	extends Node
+
+	var solid: Dictionary = {}
+	var walkable: Dictionary = {}
+	var default_walkable := true
+
+	func mark_solid(tile: Vector2i) -> void:
+		solid[tile] = true
+
+	func mark_walkable(tile: Vector2i) -> void:
+		walkable[tile] = true
+
+	func cell_at(tile: Vector2i) -> String:
+		if default_walkable:
+			return "#" if solid.has(tile) else "."
+		return "." if walkable.has(tile) else "#"
+
+
+## Stub day clock for the schedule-safety tests: serves one canned schedule and a
+## fixed phase, with no `phase_changed` signal, so a ScheduleComponent's `_ready`
+## runs its morning-snap path in isolation from the real world.
+class StubDayClock:
+	extends Node
+
+	var data: Dictionary = {}
+	var phase_id := "morning"
+
+	func schedules() -> Dictionary:
+		return data
+
+	func phase() -> String:
+		return phase_id
+
+
+## Builds a ScheduleComponent wired to a caller-supplied stub world and a fresh
+## clock, on an NPC placed at `npc_tile`, then adds it to `arena` so `_ready`
+## runs the morning-snap path against `morning_tile`. The world must already be
+## configured and in the tree. Returns {npc, world, clock, comp}.
+func _build_schedule_rig(arena: Node, tag: String, home: Vector2i,
+		morning_tile: Vector2i, npc_tile: Vector2i, world: Node) -> Dictionary:
+	var clock := StubDayClock.new()
+	clock.name = tag + "Clock"
+	clock.data = {"npcs": {tag: {
+		"home": [home.x, home.y],
+		"spots": {"morning": [morning_tile.x, morning_tile.y]},
+	}}}
+	arena.add_child(clock)
+	var npc := Node2D.new()
+	npc.name = tag
+	npc.global_position = Vector2(npc_tile.x * 16 + 8, npc_tile.y * 16 + 8)
+	arena.add_child(npc)
+	# Loaded by path, not by the `ScheduleComponent` identifier: that class
+	# references the `GameState` autoload, and autoload globals do not exist when
+	# test_core.gd is compiled under `godot --script`, so a direct class reference
+	# would fail the whole suite's compilation. `load()` resolves it at runtime,
+	# once the autoloads are registered, exactly as `Forest` instantiates it.
+	var comp: Node = (load("res://scripts/npc/schedule_component.gd") as GDScript).new()
+	comp.name = "ScheduleComponent"
+	comp.setup(npc, world, clock)
+	npc.add_child(comp)
+	return {"npc": npc, "world": world, "clock": clock, "comp": comp}
+
+
+## Day cycle + compact villager schedules (spec §12.1). Loads the real world,
+## checks the data, the clock boundaries and its ui_blocking gate, that every
+## scheduled tile is walkable on the generated map, that the villagers start at
+## their morning spots and move to the right place when a phase is forced, that
+## nobody ever ends up inside a wall, and that neither a modal UI nor a pause
+## ages the world or teleports anyone. GameState, ui_blocking and the pause flag
+## are restored and the morning phase re-seeded before the group ends.
+func _test_day_cycle() -> void:
+	gs.reset()
+	gs.ui_blocking = false
+	paused = false
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var clock: Node = world.get_node_or_null("DayClock") if world != null else null
+
+	# --- data loads: 4 phases, 3 npcs, a positive day length ------------------
+	var data: Dictionary = {}
+	if FileAccess.file_exists("res://data/schedules.json"):
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/schedules.json"))
+		if parsed is Dictionary:
+			data = parsed as Dictionary
+	_check(not data.is_empty(), "data/schedules.json parses as a JSON object")
+	var phases: Array = data.get("phases", []) as Array
+	var npcs_data: Dictionary = data.get("npcs", {}) as Dictionary
+	_check(phases.size() == 4, "schedules data has 4 phases (got %d)" % phases.size())
+	_check(npcs_data.size() == 3, "schedules data has 3 npcs (got %d)" % npcs_data.size())
+	_check(float(data.get("day_length_seconds", 0)) > 0.0, "day_length_seconds is positive")
+	_check(clock != null, "Forest creates a DayClock node")
+
+	if clock == null or data.is_empty() or world == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["day_cycle"] = true
+		return
+
+	# --- phase boundaries: last phase whose start <= fraction -----------------
+	for probe: Array in [
+		[0.0, "morning"], [0.24, "morning"], [0.25, "day"], [0.54, "day"],
+		[0.55, "evening"], [0.79, "evening"], [0.8, "night"], [0.99, "night"],
+	]:
+		clock.call("set_time_fraction", float(probe[0]))
+		var got := String(clock.call("phase"))
+		_check(got == String(probe[1]), "phase at %.2f is %s (got %s)" % [float(probe[0]), String(probe[1]), got])
+
+	# --- set_time_fraction(1.0) wraps to the start of a new day ---------------
+	clock.call("set_time_fraction", 1.0)
+	_check(absf(float(clock.get("time_fraction"))) < 0.0001,
+		"set_time_fraction(1.0) wraps to 0.0 (got %f)" % float(clock.get("time_fraction")))
+
+	# --- the clock is frozen while a modal UI owns the input ------------------
+	clock.call("set_time_fraction", 0.0)
+	gs.ui_blocking = true
+	var frozen := float(clock.get("time_fraction"))
+	for i in range(20):
+		await process_frame
+	_check(absf(float(clock.get("time_fraction")) - frozen) < 0.0001,
+		"clock does not advance while ui_blocking (delta %f)" % (float(clock.get("time_fraction")) - frozen))
+	gs.ui_blocking = false
+	for i in range(20):
+		await process_frame
+	_check(float(clock.get("time_fraction")) > frozen,
+		"clock advances once ui_blocking clears (now %f)" % float(clock.get("time_fraction")))
+
+	# --- every scheduled spot is walkable on the real generated map -----------
+	var all_walkable := true
+	var bad: Array[String] = []
+	for npc_name: String in npcs_data.keys():
+		var entry: Dictionary = npcs_data[npc_name] as Dictionary
+		var spots: Dictionary = entry.get("spots", {}) as Dictionary
+		for phase_id: String in spots.keys():
+			var raw: Array = spots[phase_id] as Array
+			var tile := Vector2i(int(raw[0]), int(raw[1]))
+			var cell := String(world.call("cell_at", tile))
+			if cell != "." and cell != ",":
+				all_walkable = false
+				bad.append("%s/%s%s='%s'" % [npc_name, phase_id, str(tile), cell])
+	_check(all_walkable, "every schedule spot is walkable on the generated map (%s)" % ", ".join(bad))
+
+	# --- resolve the three scheduled villagers + their components -------------
+	var edrik := _find_interactable_named("interactable", "Edrik")
+	var yorek := _find_interactable_named("interactable", "Yorek")
+	var bran := _find_interactable_named("interactable", "Bran")
+	var scheduled: Array = []
+	for n in [edrik, yorek, bran]:
+		if n != null:
+			scheduled.append(n)
+	_check(edrik != null and yorek != null and bran != null, "Edrik, Yorek and Bran are all present")
+	var have_components := not scheduled.is_empty()
+	for n in scheduled:
+		if n.get_node_or_null("ScheduleComponent") == null:
+			have_components = false
+	_check(have_components, "each scheduled NPC carries a ScheduleComponent")
+
+	if not have_components:
+		clock.call("set_time_fraction", 0.0)
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["day_cycle"] = true
+		return
+
+	# --- Edrik stays the first interactable (the BOT-001 path guard) ----------
+	var interactables := get_nodes_in_group("interactable")
+	_check(not interactables.is_empty() and String(interactables[0].name) == "Edrik",
+		"Edrik remains the first interactable for the quest bots")
+
+	# --- everyone starts at the morning spot (= their spawn) ------------------
+	clock.call("set_time_fraction", 0.0)
+	for n in scheduled:
+		var comp: Node = n.get_node_or_null("ScheduleComponent")
+		var morning := (comp.call("current_spot")) as Vector2i
+		_check(String(comp.call("current_phase")) == "morning", "%s starts in the morning phase" % String(n.name))
+		_check(_npc_tile(n) == morning, "%s starts on its morning spot %s (on %s)" % [String(n.name), str(morning), str(_npc_tile(n))])
+
+	# --- forcing day moves Edrik to his day spot ------------------------------
+	var edrik_day: Array = ((npcs_data["Edrik"] as Dictionary).get("spots", {}) as Dictionary).get("day", []) as Array
+	var edrik_day_tile := Vector2i(int(edrik_day[0]), int(edrik_day[1]))
+	clock.call("set_time_fraction", 0.30)
+	_check((edrik.get_node_or_null("ScheduleComponent").call("current_spot")) == edrik_day_tile,
+		"forcing day assigns Edrik his day spot %s" % str(edrik_day_tile))
+	await _settle_walks(scheduled, 600)
+	_check(_npc_tile(edrik) == edrik_day_tile,
+		"Edrik walked to his day spot %s (on %s)" % [str(edrik_day_tile), str(_npc_tile(edrik))])
+
+	# --- forcing night returns everyone home ----------------------------------
+	clock.call("set_time_fraction", 0.85)
+	await _settle_walks(scheduled, 600)
+	var all_home := true
+	for n in scheduled:
+		var home: Array = ((npcs_data[String(n.name)]) as Dictionary).get("home", []) as Array
+		if _npc_tile(n) != Vector2i(int(home[0]), int(home[1])):
+			all_home = false
+	_check(all_home, "forcing night returns every villager to its home tile")
+
+	# --- after every phase change nobody stands on a solid tile ---------------
+	var never_solid := true
+	var solid_offenders: Array[String] = []
+	for probe: Array in [[0.05, "morning"], [0.30, "day"], [0.60, "evening"], [0.85, "night"]]:
+		clock.call("set_time_fraction", float(probe[0]))
+		await _settle_walks(scheduled, 600)
+		for n in scheduled:
+			var cell := String(world.call("cell_at", _npc_tile(n)))
+			if cell != "." and cell != ",":
+				never_solid = false
+				solid_offenders.append("%s@%s='%s'" % [String(n.name), str(probe[1]), cell])
+	_check(never_solid, "no villager ever ends up on a solid tile (%s)" % ", ".join(solid_offenders))
+
+	# --- ui_blocking and pause neither age the world nor teleport anyone ------
+	clock.call("set_time_fraction", 0.0)
+	await _settle_walks(scheduled, 600)
+	var positions: Dictionary = {}
+	for n in scheduled:
+		positions[n.get_instance_id()] = (n as Node2D).global_position
+	var before := float(clock.get("time_fraction"))
+
+	gs.ui_blocking = true
+	for i in range(20):
+		await process_frame
+	var clock_frozen := absf(float(clock.get("time_fraction")) - before) < 0.0001
+	var nobody_moved := true
+	for n in scheduled:
+		if (n as Node2D).global_position.distance_to(positions[n.get_instance_id()]) > 0.01:
+			nobody_moved = false
+	_check(clock_frozen and nobody_moved, "ui_blocking neither ages the clock nor moves a villager")
+	gs.ui_blocking = false
+
+	paused = true
+	for i in range(20):
+		await process_frame
+	var pause_clock_frozen := absf(float(clock.get("time_fraction")) - before) < 0.0001
+	var pause_nobody_moved := true
+	for n in scheduled:
+		if (n as Node2D).global_position.distance_to(positions[n.get_instance_id()]) > 0.01:
+			pause_nobody_moved = false
+	_check(pause_clock_frozen and pause_nobody_moved, "pause neither ages the clock nor moves a villager")
+	paused = false
+
+	# --- a solid morning spot must not teleport the NPC into a wall -------------
+	# Inject a schedule whose morning spot is rock and confirm the component keeps
+	# the villager on the tile it was placed on instead of snapping onto the wall.
+	var solid_world := SolidTileWorld.new()
+	solid_world.name = "SolidMorningWorld"
+	solid_world.mark_solid(Vector2i(9, 9))
+	scene.add_child(solid_world)
+	var solid_rig := _build_schedule_rig(scene, "SolidMorningVillager",
+			Vector2i(3, 4), Vector2i(9, 9), Vector2i(3, 4), solid_world)
+	var solid_npc: Node2D = solid_rig["npc"]
+	_check(_npc_tile(solid_npc) == Vector2i(3, 4),
+			"a solid morning spot keeps the NPC on its spawn tile (on %s)" % str(_npc_tile(solid_npc)))
+	_check(_npc_tile(solid_npc) != Vector2i(9, 9),
+			"the NPC is never snapped onto the solid morning spot")
+
+	# --- _nearest_walkable never lands on rock when grass exists in radius ------
+	var nw_world := SolidTileWorld.new()
+	nw_world.name = "NearestWalkableWorld"
+	nw_world.default_walkable = false
+	nw_world.mark_walkable(Vector2i(20, 18))
+	scene.add_child(nw_world)
+	var nw_rig := _build_schedule_rig(scene, "NearestWalkableVillager",
+			Vector2i(99, 99), Vector2i(99, 99), Vector2i(98, 98), nw_world)
+	var nw_comp: Node = nw_rig["comp"]
+	var nw_safe: Vector2i = nw_comp.call("_nearest_walkable", Vector2i(20, 20))
+	_check(nw_safe == Vector2i(20, 18),
+			"_nearest_walkable reaches the grass tile inside the radius (got %s)" % str(nw_safe))
+	_check(bool(nw_comp.call("_is_walkable", nw_safe)),
+			"_nearest_walkable never returns a solid tile when grass exists in radius")
+
+	# --- _nearest_walkable prefers home, then the current tile ------------------
+	var home_world := SolidTileWorld.new()
+	home_world.name = "HomePriorityWorld"
+	home_world.default_walkable = false
+	home_world.mark_walkable(Vector2i(40, 40))
+	home_world.mark_walkable(Vector2i(41, 41))
+	scene.add_child(home_world)
+	var home_rig := _build_schedule_rig(scene, "HomePriorityVillager",
+			Vector2i(40, 40), Vector2i(99, 99), Vector2i(41, 41), home_world)
+	var home_safe: Vector2i = (home_rig["comp"] as Node).call("_nearest_walkable", Vector2i(50, 50))
+	_check(home_safe == Vector2i(40, 40),
+			"_nearest_walkable prefers the walkable home tile (got %s)" % str(home_safe))
+
+	var cur_world := SolidTileWorld.new()
+	cur_world.name = "CurrentPriorityWorld"
+	cur_world.default_walkable = false
+	cur_world.mark_walkable(Vector2i(60, 60))
+	scene.add_child(cur_world)
+	var cur_rig := _build_schedule_rig(scene, "CurrentPriorityVillager",
+			Vector2i(99, 99), Vector2i(99, 99), Vector2i(60, 60), cur_world)
+	var cur_safe: Vector2i = (cur_rig["comp"] as Node).call("_nearest_walkable", Vector2i(70, 70))
+	_check(cur_safe == Vector2i(60, 60),
+			"_nearest_walkable falls back to the walkable current tile (got %s)" % str(cur_safe))
+
+	# --- with no walkable tile anywhere it stays put rather than snapping -------
+	var none_world := SolidTileWorld.new()
+	none_world.name = "NoSafeTileWorld"
+	none_world.default_walkable = false
+	scene.add_child(none_world)
+	var none_rig := _build_schedule_rig(scene, "NoSafeTileVillager",
+			Vector2i(99, 99), Vector2i(99, 99), Vector2i(80, 80), none_world)
+	var none_comp: Node = none_rig["comp"]
+	var none_npc: Node2D = none_rig["npc"]
+	var none_sentinel: Vector2i = none_comp.call("_nearest_walkable", Vector2i(85, 85))
+	_check(not bool(none_comp.call("_is_walkable", none_sentinel)),
+			"_nearest_walkable returns a solid sentinel only when nothing is walkable")
+	none_comp.call("_go_to", Vector2i(85, 85))
+	_check(_npc_tile(none_npc) == Vector2i(80, 80),
+			"with no safe tile _go_to leaves the NPC exactly where it was (on %s)" % str(_npc_tile(none_npc)))
+
+	# --- the HUD shows a readable clock line ----------------------------------
+	var hud := scene.get_node_or_null("HUD")
+	_check(hud != null, "HUD is present")
+	if hud != null:
+		# Freeze the clock at the start of morning and force one refresh, so the
+		# assertion does not depend on the HUD's one-second throttle or on how
+		# fast headless runs frames.
+		gs.ui_blocking = true
+		clock.call("set_time_fraction", 0.0)
+		hud.call("refresh_clock_line")
+		var clock_text := String(hud.call("clock_line_text"))
+		_check(clock_text.contains(":"), "HUD clock line shows a time (got '%s')" % clock_text)
+		_check(clock_text.begins_with("Утро"), "HUD clock line names the morning phase (got '%s')" % clock_text)
+		# Dawn offset: fraction 0.0 must read 06:00, not midnight, and 0.25 must
+		# read 12:00, so the phase label and the displayed hour agree (spec §12.1).
+		_check(clock_text == "Утро · 06:00", "HUD clock at fraction 0.0 reads Утро · 06:00 (got '%s')" % clock_text)
+		clock.call("set_time_fraction", 0.25)
+		hud.call("refresh_clock_line")
+		var noon_text := String(hud.call("clock_line_text"))
+		_check(noon_text == "День · 12:00", "HUD clock at fraction 0.25 reads День · 12:00 (got '%s')" % noon_text)
+		gs.ui_blocking = false
+
+	# --- restore: morning phase, no block, no pause, no state leak ------------
+	clock.call("set_time_fraction", 0.0)
+	gs.ui_blocking = false
+	paused = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	completed["day_cycle"] = true
 

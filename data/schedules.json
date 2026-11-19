@@ -1,0 +1,38 @@
+{
+  "day_length_seconds": 240,
+  "phases": [
+    {"id": "morning", "start": 0.0},
+    {"id": "day", "start": 0.25},
+    {"id": "evening", "start": 0.55},
+    {"id": "night", "start": 0.8}
+  ],
+  "npcs": {
+    "Edrik": {
+      "home": [7, 9],
+      "spots": {
+        "morning": [7, 9],
+        "day": [10, 12],
+        "evening": [6, 14],
+        "night": [7, 9]
+      }
+    },
+    "Yorek": {
+      "home": [3, 11],
+      "spots": {
+        "morning": [3, 11],
+        "day": [5, 16],
+        "evening": [3, 11],
+        "night": [3, 11]
+      }
+    },
+    "Bran": {
+      "home": [11, 8],
+      "spots": {
+        "morning": [11, 8],
+        "day": [13, 10],
+        "evening": [13, 12],
+        "night": [11, 8]
+      }
+    }
+  }
+}
