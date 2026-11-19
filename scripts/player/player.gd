@@ -21,6 +21,9 @@ const ACTIVE := 0.10
 const RECOVERY := 0.16
 const ATTACK_COOLDOWN := 0.06
 
+## Base attack-area placement; the per-step reach/arc multipliers scale it.
+const ATTACK_OFFSET := 14.0
+
 const INTERACT_RADIUS := 26.0
 
 enum State { IDLE, MOVE, ATTACK, DASH, DEAD }
@@ -49,6 +52,15 @@ var _interactable: Node = null
 var _dead_timer := 0.0
 var _flash_timer := 0.0
 var _status_component: StatusComponent = null
+
+## Weapon-driven attack chain (spec §6 "Комбо зависят от оружия"). The chain
+## itself lives here; every parameter comes from the equipped weapon's item data
+## through ItemDB.combo_steps(), so a new weapon needs no code. An unarmed
+## player, or a weapon without combo data, keeps the single swing described by
+## the WINDUP/ACTIVE/RECOVERY constants above.
+var _combo_index := 0
+var _combo_window_left := 0.0
+var _current_step: Dictionary = {}
 
 ## Per-skill cooldowns (skill id -> seconds left) and the cast counter that
 ## feeds unique hit_ids. The ice_barrier buff lives here, not in GameState.
@@ -141,6 +153,15 @@ func _tick_timers(delta: float) -> void:
 	_dash_cooldown_left = maxf(0.0, _dash_cooldown_left - delta)
 	_attack_cooldown_left = maxf(0.0, _attack_cooldown_left - delta)
 	_iframe_left = maxf(0.0, _iframe_left - delta)
+	# The chain window is a post-swing clock: it means "how long after a swing the
+	# next attack still counts as the same chain", so it only counts down once the
+	# swing that opened it is over. A spear step is longer than its own window
+	# (0.66 s swing, 0.55 s window), and letting it run mid-swing would drop the
+	# chain under the swing still in progress and make the next attack skip a step.
+	if state != State.ATTACK:
+		_combo_window_left = maxf(0.0, _combo_window_left - delta)
+		if _combo_window_left <= 0.0 and _combo_index != 0:
+			_combo_index = 0
 	if _barrier_left > 0.0:
 		_barrier_left = maxf(0.0, _barrier_left - delta)
 	for key in _skill_cooldowns.keys():
@@ -187,6 +208,7 @@ func _process_free(delta: float) -> void:
 
 
 func _start_attack() -> void:
+	_pick_combo_step()
 	state = State.ATTACK
 	_state_time = 0.0
 	# Attack direction is aim-driven (mouse for a human, target for the bot),
@@ -200,6 +222,58 @@ func _start_attack() -> void:
 	velocity = Vector2.ZERO
 	_position_attack_area()
 	attack_started.emit(_current_hit_id)
+
+
+## Equipped weapon id, "" when the player fights unarmed.
+func _weapon_id() -> String:
+	return String(GameState.equipment.get("weapon", ""))
+
+
+## Single-swing fallback so nothing regresses for an unarmed player or a weapon
+## with no combo block: the timings are exactly the constants above.
+func _default_step() -> Dictionary:
+	return {
+		"damage_mult": 1.0,
+		"windup": WINDUP,
+		"active": ACTIVE,
+		"recovery": RECOVERY,
+		"reach": 1.0,
+		"arc": 1.0,
+	}
+
+
+## Chooses the step this swing uses. Inside the combo window the chain moves to
+## the next step and wraps after the last one; outside it (or after the weapon
+## changed under a chain) the chain restarts at step 0.
+func _pick_combo_step() -> void:
+	var steps := ItemDB.combo_steps(_weapon_id())
+	if steps.is_empty():
+		_combo_index = 0
+		_current_step = _default_step()
+		return
+	if _combo_window_left > 0.0 and _combo_index < steps.size():
+		_combo_index = (_combo_index + 1) % steps.size()
+	else:
+		_combo_index = 0
+	var step: Variant = steps[_combo_index]
+	_current_step = step if step is Dictionary else _default_step()
+
+
+func combo_index() -> int:
+	return _combo_index
+
+
+func combo_step_count() -> int:
+	var steps := ItemDB.combo_steps(_weapon_id())
+	return steps.size() if not steps.is_empty() else 1
+
+
+func combo_window_left() -> float:
+	return _combo_window_left
+
+
+func current_step_multiplier() -> float:
+	return float(_current_step.get("damage_mult", 1.0))
 
 
 func _process_attack(delta: float) -> void:
@@ -216,20 +290,30 @@ func _process_attack(delta: float) -> void:
 	velocity = Vector2.ZERO
 	_update_sprite()
 
-	if _state_time < WINDUP:
+	# Phase lengths come from the current chain step; the constants are the
+	# fallback for a swing whose step data is missing.
+	var windup := float(_current_step.get("windup", WINDUP))
+	var active := float(_current_step.get("active", ACTIVE))
+	var recovery := float(_current_step.get("recovery", RECOVERY))
+
+	if _state_time < windup:
 		return
-	if _state_time < WINDUP + ACTIVE:
+	if _state_time < windup + active:
 		attack_shape.disabled = false
 		_apply_attack_hits()
 		return
 
 	attack_shape.disabled = true
-	if _state_time >= WINDUP + ACTIVE + RECOVERY:
+	if _state_time >= windup + active + recovery:
 		state = State.IDLE
 		_attack_cooldown_left = ATTACK_COOLDOWN
+		# The chain stays open only for this window after the swing ends, so a
+		# slow player or a paused player starts over instead of chaining forever.
+		_combo_window_left = ItemDB.combo_window(_weapon_id())
 
 
 func _apply_attack_hits() -> void:
+	var damage := _step_damage()
 	for body in attack_area.get_overlapping_bodies():
 		if body == self or not body.has_method("receive_damage"):
 			continue
@@ -238,12 +322,19 @@ func _apply_attack_hits() -> void:
 			continue
 		_hit_this_swing[key] = true
 		DamageResolver.resolve_hit(self, body, {
-			"damage": GameState.total_attack(),
+			"damage": damage,
 			"hit_id": _current_hit_id,
 			"damage_type": "physical",
 			"critical": randf() < 0.15,
 		})
 		_hit_stop(0.045)
+
+
+## Total attack scaled by the chain step multiplier, rounded and never below 1,
+## so a late chain step is strictly stronger than an early one.
+func _step_damage() -> int:
+	var mult := float(_current_step.get("damage_mult", 1.0))
+	return maxi(1, int(round(float(GameState.total_attack()) * mult)))
 
 
 func _hit_stop(duration: float) -> void:
@@ -407,10 +498,14 @@ func _update_sprite() -> void:
 		sprite.flip_h = false
 
 
+## Places the hitbox for the current chain step: `reach` pushes it further out
+## along the facing (a spear out-reaches a sword), `arc` scales it wider.
 func _position_attack_area() -> void:
-	var offset := facing * 14.0
-	attack_area.position = offset
+	var reach := float(_current_step.get("reach", 1.0))
+	var arc := float(_current_step.get("arc", 1.0))
+	attack_area.position = facing * ATTACK_OFFSET * reach
 	attack_area.rotation = facing.angle()
+	attack_area.scale = Vector2.ONE * arc
 
 
 func _scan_interactable() -> void:
@@ -471,6 +566,9 @@ func _on_player_died() -> void:
 	# A barrier cast a moment before death must not shield the respawned player.
 	_barrier_left = 0.0
 	_barrier_reduction = 0.0
+	# Neither may a half-finished chain: the respawned player starts at step 0.
+	_combo_index = 0
+	_combo_window_left = 0.0
 	if state == State.DEAD:
 		return
 	state = State.DEAD

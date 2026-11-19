@@ -20,7 +20,61 @@
       "slot": "weapon",
       "attack": 6,
       "price": 80,
-      "description": "Простой, но честный клинок. +6 к атаке."
+      "description": "Простой, но честный клинок. +6 к атаке.",
+      "combo_window": 0.45,
+      "combo": [
+        {
+          "damage_mult": 1.0,
+          "windup": 0.14,
+          "active": 0.08,
+          "recovery": 0.2,
+          "reach": 1.0,
+          "arc": 1.0
+        },
+        {
+          "damage_mult": 1.15,
+          "windup": 0.12,
+          "active": 0.08,
+          "recovery": 0.22,
+          "reach": 1.05,
+          "arc": 1.1
+        },
+        {
+          "damage_mult": 1.4,
+          "windup": 0.18,
+          "active": 0.1,
+          "recovery": 0.3,
+          "reach": 1.1,
+          "arc": 1.2
+        }
+      ]
+    },
+    "iron_spear": {
+      "name": "Железное копьё",
+      "type": "equipment",
+      "slot": "weapon",
+      "attack": 7,
+      "price": 90,
+      "description": "Бьёт с расстояния, но разворачивается тяжело. +7 к атаке.",
+      "combo_window": 0.55,
+      "combo": [
+        {
+          "damage_mult": 1.1,
+          "windup": 0.18,
+          "active": 0.09,
+          "recovery": 0.26,
+          "reach": 1.5,
+          "arc": 0.8
+        },
+        {
+          "damage_mult": 1.5,
+          "windup": 0.22,
+          "active": 0.1,
+          "recovery": 0.34,
+          "reach": 1.7,
+          "arc": 0.9
+        }
+      ]
     },
     "leather_armor": {
       "name": "Кожаный доспех",

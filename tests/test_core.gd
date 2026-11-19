@@ -81,6 +81,24 @@ class AoeTarget:
 		last_damage = amount
 
 
+## Stationary hit target for the player's melee swing. It sits on the enemy
+## physics layer (3), which is exactly what the player's AttackHitbox masks, and
+## it never moves, so the damage assertion measures the swing instead of an AI
+## walking out of the hitbox between frames.
+class AttackDummy:
+	extends StaticBody2D
+
+	var hits := 0
+	var last_damage := 0
+
+	func get_defense() -> int:
+		return 0
+
+	func receive_damage(amount: int, _info: Dictionary = {}) -> void:
+		hits += 1
+		last_damage = amount
+
+
 ## Combatant for the combination tests (spec §9.2): a Node2D in the "enemy" group
 ## with a real HealthComponent and StatusComponent, so every rule resolves
 ## end-to-end through DamageResolver exactly as it would against a live Enemy.
@@ -200,6 +218,9 @@ func _run() -> void:
 	print("== stagger recovery ==")
 	await _test_stagger_recovery()
 
+	print("== weapon combos ==")
+	await _test_weapon_combos()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -208,7 +229,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 28, "every test group ran to completion (got %d/28)" % completed.size())
+	_check(completed.size() == 29, "every test group ran to completion (got %d/29)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2196,6 +2217,203 @@ func _drive_out_of_stagger(node: Node, max_frames: int) -> int:
 	for i in range(max_frames):
 		await physics_frame
 		if int(node.get("state")) != 5:
+			return i + 1
+	return -1
+
+
+## Spec §6 "Комбо зависят от оружия": the attack chain is item data, not a
+## hardcoded swing. A sword chains three fast steps, a spear two slower steps
+## with longer reach, and the chain only survives inside the combo window the
+## weapon declares. Deterministic: a bare arena holds the player, so nothing
+## else can move it, block it or be hit by it, and every swing is started
+## through _start_attack() rather than injected input (the real mouse path stays
+## pinned by the human_input group). 2 == Player.State.ATTACK, spelled as a
+## number on purpose, as everywhere else in this suite.
+func _test_weapon_combos() -> void:
+	DamageResolver.reset()
+	gs.reset()
+
+	# --- the chain is data ------------------------------------------------------
+	var sword_steps := ItemDB.combo_steps("iron_sword")
+	var spear_steps := ItemDB.combo_steps("iron_spear")
+	_check(sword_steps.size() == 3, "iron_sword carries a 3-step chain (got %d)" % sword_steps.size())
+	_check(spear_steps.size() == 2, "iron_spear carries a 2-step chain (got %d)" % spear_steps.size())
+	_check(ItemDB.combo_steps("health_potion").is_empty(), "an item without a combo returns no steps")
+	_check(ItemDB.combo_steps("no_such_item").is_empty(), "an unknown item returns no steps")
+	_check(absf(ItemDB.combo_window("iron_sword") - 0.45) < 0.001, "sword combo window is 0.45 s")
+	_check(absf(ItemDB.combo_window("iron_spear") - 0.55) < 0.001, "spear combo window is 0.55 s")
+	_check(absf(ItemDB.combo_window("leather_armor") - 0.4) < 0.001,
+		"an item with no combo_window falls back to 0.4 s")
+	_check(absf(ItemDB.combo_window("no_such_item") - 0.4) < 0.001,
+		"an unknown item falls back to 0.4 s")
+	var reach_ok := sword_steps.size() == 3 and spear_steps.size() == 2 \
+			and float(spear_steps[0].get("reach", 0.0)) > float(sword_steps[0].get("reach", 0.0))
+	_check(reach_ok, "the spear out-reaches the sword on the first step")
+
+	# --- casting rig: a bare arena with one player ------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(player)
+	await process_frame
+
+	# --- sword: 0 -> 1 -> 2 -> wraps to 0 --------------------------------------
+	_equip_weapon("iron_sword")
+	_check(int(player.call("combo_step_count")) == 3, "sword player reports 3 chain steps")
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 0, "first attack starts the chain at step 0")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.0) < 0.001, "sword step 0 multiplier is 1.0")
+	await _finish_swing(player, 90)
+	_check(float(player.call("combo_window_left")) > 0.0, "a finished swing opens the combo window")
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 1, "attack inside the window advances to step 1")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.15) < 0.001, "sword step 1 multiplier is 1.15")
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 2, "second attack inside the window advances to step 2")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.4) < 0.001, "sword step 2 multiplier is 1.4")
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 0, "the attack after the last step wraps back to step 0")
+
+	# --- an expired window restarts the chain -----------------------------------
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 1, "chain is still alive before the window expires")
+	await _finish_swing(player, 90)
+	player.set("_combo_window_left", 0.0)
+	await physics_frame
+	_check(int(player.call("combo_index")) == 0, "an expired combo window resets the chain to step 0")
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 0, "the next attack after expiry starts at step 0")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.0) < 0.001,
+		"the restarted chain is back at multiplier 1.0")
+
+	# --- a chain must not index past a newly equipped weapon --------------------
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 2, "sword chain reached its last step")
+	await _finish_swing(player, 90)
+	_equip_weapon("iron_spear")
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 0,
+		"swapping to a shorter weapon mid-chain restarts at step 0")
+
+	# --- spear: 2 steps, second one 1.5 ----------------------------------------
+	_check(int(player.call("combo_step_count")) == 2, "spear player reports a 2-step chain")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.1) < 0.001, "spear step 0 multiplier is 1.1")
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 1, "spear advances to its second step")
+	_check(absf(float(player.call("current_step_multiplier")) - 1.5) < 0.001, "spear step 1 multiplier is 1.5")
+	await _finish_swing(player, 90)
+	player.call("_start_attack")
+	_check(int(player.call("combo_index")) == 0, "spear wraps back to step 0 after its last step")
+	await _finish_swing(player, 90)
+
+	# --- the step's own timings drive the swing --------------------------------
+	var sword_windup := float(sword_steps[0].get("windup", 0.0))
+	var spear_windup := float(spear_steps[0].get("windup", 0.0))
+	_check(spear_windup > sword_windup,
+		"the spear winds up slower than the sword (%.2f > %.2f s)" % [spear_windup, sword_windup])
+	_equip_weapon("iron_sword")
+	var sword_frames := await _frames_until_hitbox_open(player)
+	_equip_weapon("iron_spear")
+	var spear_frames := await _frames_until_hitbox_open(player)
+	_check(sword_frames > 0 and spear_frames > 0, "both swings opened their hitbox")
+	_check(spear_frames > sword_frames,
+		"the slower spear step keeps the hitbox shut longer (%d > %d frames)" % [spear_frames, sword_frames])
+	_check(sword_frames >= 0 and float(sword_frames) / 60.0 >= sword_windup - (1.0 / 60.0),
+		"sword hitbox opens no earlier than its own windup (%d frames vs %.2f s)" % [sword_frames, sword_windup])
+	_check(spear_frames >= 0 and float(spear_frames) / 60.0 >= spear_windup - (1.0 / 60.0),
+		"spear hitbox opens no earlier than its own windup (%d frames vs %.2f s)" % [spear_frames, spear_windup])
+
+	# --- unarmed still swings, still has one step, still deals damage -----------
+	_equip_weapon("")
+	_check(int(player.call("combo_step_count")) == 1, "unarmed player has a single-step chain")
+	await _settle_idle(player)
+	var dummy := AttackDummy.new()
+	dummy.collision_layer = 4
+	dummy.collision_mask = 0
+	var dummy_shape := CollisionShape2D.new()
+	var dummy_rect := RectangleShape2D.new()
+	dummy_rect.size = Vector2(10, 10)
+	dummy_shape.shape = dummy_rect
+	dummy.add_child(dummy_shape)
+	arena.add_child(dummy)
+	# The swing is aim-driven, so the dummy goes where the swing will actually be,
+	# exactly the way the skill group resolves the same ambiguity.
+	var aim := InputSource.aim_direction(player.global_position)
+	var dir: Vector2 = aim if aim.length() > 0.01 else Vector2.DOWN
+	player.set("facing", dir)
+	dummy.global_position = player.global_position + dir * 12.0
+	await physics_frame
+	player.call("_start_attack")
+	for i in range(60):
+		await physics_frame
+		if dummy.hits > 0:
+			break
+	_check(dummy.hits == 1, "unarmed swing damages the target exactly once (got %d)" % dummy.hits)
+	_check(dummy.last_damage >= gs.total_attack(),
+		"unarmed swing deals at least the raw attack (%d vs %d)" % [dummy.last_damage, gs.total_attack()])
+	_check(absf(float(player.call("current_step_multiplier")) - 1.0) < 0.001,
+		"unarmed multiplier is 1.0")
+	dummy.queue_free()
+	# A landed swing runs a short hit-stop through Engine.time_scale, and the
+	# player owns that coroutine: freeing it mid-await would strand the time scale
+	# at 0.12 for every group that follows, so let it finish first.
+	for i in range(120):
+		if Engine.time_scale == 1.0:
+			break
+		await process_frame
+	_check(Engine.time_scale == 1.0, "combo group restored Engine.time_scale after the hit-stop")
+
+	arena.queue_free()
+	await process_frame
+	DamageResolver.reset()
+	gs.reset()
+	completed["weapon_combos"] = true
+
+
+## Put a weapon into the equipment slot (or clear it with ""). Goes through the
+## real equip() path, which needs the item in the inventory first.
+func _equip_weapon(item_id: String) -> void:
+	gs.equipment["weapon"] = ""
+	if item_id == "":
+		return
+	gs.add_item(item_id, 1)
+	gs.equip(item_id)
+
+
+## Drive frames until the player leaves ATTACK and return without an extra frame,
+## so the next attack is issued while the combo window is still fresh.
+func _finish_swing(player: Node, max_frames: int) -> void:
+	for i in range(max_frames):
+		if int(player.get("state")) != 2:
+			return
+		await physics_frame
+
+
+## Start a guaranteed chain step 0 and drive real physics frames until the attack
+## hitbox first opens. The frame count is the step's wind-up, so a weapon with a
+## longer wind-up must open its hitbox strictly later than a faster one.
+func _frames_until_hitbox_open(player: Node) -> int:
+	for i in range(60):
+		if int(player.get("state")) != 2:
+			break
+		await physics_frame
+	# Cleared only once the previous swing is over: a finishing swing re-opens its
+	# own window, which would push this one to step 1 and measure the wrong wind-up.
+	player.set("_combo_window_left", 0.0)
+	player.call("_start_attack")
+	var shape := player.get_node_or_null("AttackHitbox/CollisionShape2D") as CollisionShape2D
+	if shape == null:
+		return -1
+	for i in range(60):
+		await physics_frame
+		if not shape.disabled:
 			return i + 1
 	return -1
 
