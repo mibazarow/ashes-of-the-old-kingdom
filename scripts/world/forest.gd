@@ -39,6 +39,7 @@ var _last_visited_tile := Vector2i(-9999, -9999)
 ## Points of interest kept as live node references so the map can show them
 ## without fragile path lookups. Populated in _spawn_actors.
 var _npc_node: Node2D
+var _merchant_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
@@ -113,6 +114,7 @@ func landmarks() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for entry: Array in [
 		["Edrik", "npc", _npc_node],
+		["Yorek", "npc", _merchant_node],
 		["Chest", "chest", _chest_node],
 		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
@@ -259,6 +261,19 @@ func _spawn_actors() -> void:
 	var npc := _instantiate(NPC_SCENE, _tile_center(7, 9), "Edrik")
 	npc.name = "Edrik"
 	_npc_node = npc
+
+	# The merchant is added after Edrik on purpose: the debug bot picks the first
+	# node in the `interactable` group, so Edrik must stay first or the quest bots
+	# would open the shop instead of the dialogue. It sits on the village clearing
+	# (dirt, walkable, never a tree cluster), far enough from the spawn point that
+	# no prompt shows at start and far enough from Edrik that walking to him never
+	# comes within the interact radius of the shop.
+	var merchant := Merchant.new()
+	merchant.name = "Yorek"
+	merchant.sprite_texture = load("res://assets/sprites/npc.png")
+	merchant.position = _tile_center(3, 11)
+	add_child(merchant)
+	_merchant_node = merchant
 
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"

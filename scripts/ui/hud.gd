@@ -61,6 +61,8 @@ var _hint_label: Label
 var _map_panel: MapPanel
 var _settings_panel: SettingsPanel
 var _character_panel: CharacterPanel
+var _shop_panel: ShopPanel
+var _shop_manager: ShopManager
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
@@ -70,11 +72,16 @@ var _paused := false
 var _settings_open := false
 var _settings_just_closed := false
 var _character_open := false
+var _shop_open := false
+var _tab_held: bool = false
 
 
 func _ready() -> void:
 	layer = 10
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	# Merchants have no EventBus signal to knock on (the bus is not editable), so
+	# they reach the HUD through this group to open the shop modal.
+	add_to_group("hud")
 	_build_ui()
 	_connect_signals()
 	_refresh_all()
@@ -203,6 +210,7 @@ func _build_ui() -> void:
 	_build_settings_panel()
 	_build_map_panel()
 	_build_character_panel()
+	_build_shop_panel()
 
 
 ## The character screen lives in its own script (like SettingsPanel): it owns
@@ -212,6 +220,16 @@ func _build_character_panel() -> void:
 	_character_panel.name = "CharacterPanel"
 	_character_panel.visible = false
 	_root.add_child(_character_panel)
+
+
+## The shop screen lives in its own script (like CharacterPanel): it owns its
+## layout and centring, and hud.gd only opens, closes and gates it. The panel is
+## given the merchant's ShopManager when it opens, so it never builds its own.
+func _build_shop_panel() -> void:
+	_shop_panel = ShopPanel.new()
+	_shop_panel.name = "ShopPanel"
+	_shop_panel.visible = false
+	_root.add_child(_shop_panel)
 
 
 ## Rebinding lives in its own script (like MapPanel): it has its own raw-event
@@ -681,7 +699,7 @@ func _toggle_character() -> void:
 			_character_panel.visible = true
 			_character_panel.open()
 	GameState.ui_blocking = _character_open or _inventory_open or _dialogue_open \
-			or _journal_open or _paused or _map_open or _settings_open
+			or _journal_open or _paused or _map_open or _settings_open or _shop_open
 
 
 ## One close path for the character screen, so every sibling modal (inventory,
@@ -694,7 +712,7 @@ func _close_character() -> void:
 	if _character_panel != null:
 		_character_panel.visible = false
 	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open
+			or _paused or _map_open or _settings_open or _shop_open
 
 
 ## The character screen owns the input while it is open: the cursor walks the
@@ -723,6 +741,56 @@ func is_character_open() -> bool:
 func open_character_for_shot() -> void:
 	if not _character_open:
 		_toggle_character()
+
+
+## Opens the shop modal with the merchant's own manager. Like the map it closes
+## every panel it could visually overlap first, then takes the screen. The manager
+## is owned by the merchant, so the stock shown is that merchant's live stock.
+func open_shop(shop_manager: ShopManager) -> void:
+	if shop_manager == null:
+		return
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	_close_character()
+	if _paused:
+		_close_pause()
+	_shop_manager = shop_manager
+	_shop_open = true
+	_tab_held = false
+	if _shop_panel != null:
+		_shop_panel.visible = true
+		_shop_panel.open(shop_manager)
+	GameState.ui_blocking = true
+
+
+func close_shop() -> void:
+	if not _shop_open:
+		return
+	_shop_open = false
+	_tab_held = false
+	if _shop_panel != null:
+		_shop_panel.visible = false
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
+			or _paused or _map_open or _settings_open or _character_open
+
+
+func is_shop_open() -> bool:
+	return _shop_open
+
+
+## Screenshot hook: builds a throwaway manager from the live state so the shop can
+## be captured without a merchant in the frame. The real merchant path is
+## `open_shop`, which passes the merchant's own manager instead.
+func open_shop_for_shot() -> void:
+	if _shop_open:
+		return
+	open_shop(ShopManager.new(GameState))
 
 
 ## One line per quick slot: "1: Настой здоровья", empty slots show "—".
@@ -803,7 +871,7 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
-	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open
+	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open or _shop_open
 	EventBus.dialogue_closed.emit()
 
 
@@ -824,7 +892,7 @@ func _toggle_inventory() -> void:
 	else:
 		_enter_held = false
 	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open or _shop_open
 
 
 func _toggle_journal() -> void:
@@ -836,7 +904,7 @@ func _toggle_journal() -> void:
 			_close_character()
 		_refresh_journal()
 	_journal_panel.visible = _journal_open
-	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open
+	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open or _shop_open
 
 
 func _refresh_journal() -> void:
@@ -869,7 +937,7 @@ func _toggle_pause() -> void:
 	_paused = not _paused
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open
 	EventBus.game_paused.emit(_paused)
 
 
@@ -904,6 +972,30 @@ func _process(_delta: float) -> void:
 			return
 		if _map_panel != null:
 			_map_panel.refresh()
+		return
+	# The shop owns the input while it is open, exactly like the map: Esc closes it
+	# (never pauses underneath), Tab flips buy/sell, the movement actions walk the
+	# list and E trades one unit. Tab has no InputMap action, so it is edge-detected
+	# by hand the way Enter is in the inventory; the bot never presses Tab, so it
+	# stays on the buy list and can never reach a sell it was not meant to do.
+	if _shop_open:
+		if InputSource.is_action_just_pressed(&"pause"):
+			close_shop()
+			return
+		if _shop_panel != null:
+			var tab_now := Input.is_key_pressed(KEY_TAB)
+			if tab_now and not _tab_held:
+				_shop_panel.toggle_mode()
+			_tab_held = tab_now
+			var shop_delta := 0
+			if InputSource.is_action_just_pressed(&"move_up"):
+				shop_delta -= 1
+			if InputSource.is_action_just_pressed(&"move_down"):
+				shop_delta += 1
+			if shop_delta != 0:
+				_shop_panel.move_selection(shop_delta)
+			if InputSource.is_action_just_pressed(&"interact"):
+				_shop_panel.activate()
 		return
 	# Esc belongs to the character screen while it is open: it closes the panel
 	# instead of pausing the game underneath.
@@ -999,7 +1091,7 @@ func _close_map() -> void:
 	_map_open = false
 	if _map_panel != null:
 		_map_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open or _shop_open
 
 
 func is_map_open() -> bool:
@@ -1026,7 +1118,7 @@ func _close_settings() -> void:
 	_settings_just_closed = true
 	_settings_panel.visible = false
 	_pause_panel.visible = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open
 
 
 func is_settings_open() -> bool:

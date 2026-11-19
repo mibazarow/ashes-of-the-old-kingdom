@@ -61,6 +61,15 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_map_for_shot")
+	elif ui_probe == "shop":
+		# Gold plus a couple of sellable goods so the capture shows a real shop:
+		# the gold line, the merchant's buy list and a non-empty sell list.
+		GameState.add_gold(120)
+		GameState.add_item("wolf_fang", 4)
+		GameState.add_item("health_potion", 2)
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_shop_for_shot")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

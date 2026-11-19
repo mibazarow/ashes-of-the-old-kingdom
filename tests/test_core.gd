@@ -242,6 +242,9 @@ func _run() -> void:
 	print("== character panel ==")
 	await _test_character_panel()
 
+	print("== shop ==")
+	await _test_shop()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -250,7 +253,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 36, "every test group ran to completion (got %d/36)" % completed.size())
+	_check(completed.size() == 37, "every test group ran to completion (got %d/37)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3798,6 +3801,235 @@ func _test_character_panel() -> void:
 	gs.reset()
 	qm.reset()
 	completed["character_panel"] = true
+
+
+## Shop (spec §14.3). Two halves: the pure ShopManager rules run against the live
+## GameState with no scene, then the buy/sell panel is driven through the real
+## scene and the same InputSource a human uses. The whole point of §14.3 is that a
+## trade never half-applies, so every refusal here is checked to leave gold,
+## inventory and stock exactly as they were, not merely to return ok=false.
+func _test_shop() -> void:
+	gs.reset()
+	qm.reset()
+	paused = false
+
+	# --- pure logic against the live GameState, no scene ---------------------
+	var shop = load("res://scripts/shop/shop_manager.gd").new(gs)
+	_check(shop.merchant_id() == "yorek", "shop merchant_id is yorek")
+	_check(shop.stock_of("health_potion") == 5, "stock health_potion is 5 from data/shop.json")
+	_check(shop.stock_of("wooden_shield") == 1, "stock wooden_shield is 1 from data/shop.json")
+	_check(shop.buy_price("mana_potion") == 20, "buy price mana_potion is 20")
+	_check(shop.sell_price("mana_potion") == 10, "sell price mana_potion is floor(20*0.5)=10")
+	_check(shop.sell_price("wolf_fang") == 4, "sell price wolf_fang is floor(8*0.5)=4")
+
+	# buy then sell of the same unit is a net loss, never a gold printer
+	gs.gold = 100
+	var r: Dictionary = shop.buy("mana_potion", 1)
+	_check(bool(r.get("ok")), "buy mana_potion succeeds")
+	_check(gs.gold == 80, "buying mana_potion spent 20 (gold=%d)" % gs.gold)
+	_check(gs.count_item("mana_potion") == 1, "buying added one mana_potion")
+	_check(shop.stock_of("mana_potion") == 2, "stock decremented on buy (got %d)" % shop.stock_of("mana_potion"))
+	var s: Dictionary = shop.sell("mana_potion", 1)
+	_check(bool(s.get("ok")), "sell mana_potion succeeds")
+	_check(gs.gold == 90, "buy then sell is net -10, not a profit (gold=%d)" % gs.gold)
+	_check(shop.stock_of("mana_potion") == 2, "selling does not restock the merchant (got %d)" % shop.stock_of("mana_potion"))
+
+	# every refusal reason the spec names
+	_check(String(shop.can_buy("nope", 1).get("reason")) == "unknown_item", "can_buy unknown_item")
+	_check(String(shop.can_sell("nope", 1).get("reason")) == "unknown_item", "can_sell unknown_item")
+	_check(String(shop.can_buy("wooden_shield", 2).get("reason")) == "not_in_stock", "can_buy not_in_stock when stock < amount")
+	gs.gold = 0
+	_check(String(shop.can_buy("health_potion", 1).get("reason")) == "not_enough_gold", "can_buy not_enough_gold")
+	gs.gold = 1000
+	gs.add_item("health_potion", 99)
+	_check(String(shop.can_buy("health_potion", 1).get("reason")) == "no_space", "can_buy no_space at the 99 stack cap")
+	gs.add_item("rusted_seal", 1)
+	_check(String(shop.can_sell("rusted_seal", 1).get("reason")) == "quest_item", "can_sell refuses quest items")
+	gs.add_item("leather_boots", 1)
+	gs.equip("leather_boots")
+	_check(String(shop.can_sell("leather_boots", 1).get("reason")) == "equipped_item", "can_sell refuses equipped items")
+	_check(String(shop.can_sell("iron_sword", 1).get("reason")) == "not_owned", "can_sell refuses unowned items")
+
+	# Gap 2: a 0-price item must not be an infinite gold printer. The smallest-
+	# priced item in the shipped data is rusted_seal (price 0), so its sell price is
+	# now 0, not a forced 1, and every sellable (non-quest) item still has value.
+	_check(shop.sell_price("rusted_seal") == 0, "sell price of the 0-price rusted_seal is 0, not a forced 1")
+	var printer_items: Array[String] = []
+	for item_id in ItemDB.all_items():
+		if shop.sell_price(String(item_id)) <= 0 and String(ItemDB.get_item(item_id).get("type", "")) != "quest":
+			printer_items.append(String(item_id))
+	_check(printer_items.is_empty(), "no sellable non-quest item is priced at 0 (would be a gold printer)")
+
+	# the no_value refusal, exercised with a throwaway 0-price item injected into
+	# ItemDB's live table for these checks and removed again — data/items.json is
+	# never touched. Owning it must not let the player mint gold.
+	var tmp_id := "__test_zero_value__"
+	var item_table: Dictionary = ItemDB.all_items()
+	item_table[tmp_id] = {"name": "Тест", "type": "material", "price": 0}
+	gs.add_item(tmp_id, 1)
+	_check(shop.sell_price(tmp_id) == 0, "a 0-price item sells for 0")
+	_check(String(shop.can_sell(tmp_id, 1).get("reason")) == "no_value", "can_sell refuses a 0-value item with no_value")
+	var gold_nv: int = gs.gold
+	var cnt_nv: int = gs.count_item(tmp_id)
+	var vs: Dictionary = shop.sell(tmp_id, 1)
+	_check(not bool(vs.get("ok")), "sell of a 0-value item is refused")
+	_check(String(vs.get("reason")) == "no_value", "sell returns no_value for a 0-value item")
+	_check(gs.gold == gold_nv and gs.count_item(tmp_id) == cnt_nv, "a refused 0-value sell changes neither gold nor inventory")
+	item_table.erase(tmp_id)
+	gs.remove_item(tmp_id, cnt_nv)
+
+	# atomicity: a refused buy changes nothing at all
+	gs.reset()
+	var shop2 = load("res://scripts/shop/shop_manager.gd").new(gs)
+	gs.gold = 5
+	var g0: int = gs.gold
+	var c0: int = gs.count_item("wooden_shield")
+	var k0: int = shop2.stock_of("wooden_shield")
+	var bad: Dictionary = shop2.buy("wooden_shield", 1)
+	_check(not bool(bad.get("ok")), "buy with too little gold is refused")
+	_check(gs.gold == g0 and gs.count_item("wooden_shield") == c0 and shop2.stock_of("wooden_shield") == k0,
+		"a refused buy leaves gold, inventory and stock untouched")
+
+	# a full stack must not lose or split the item on an overflowing buy
+	gs.reset()
+	var shop3 = load("res://scripts/shop/shop_manager.gd").new(gs)
+	gs.gold = 1000
+	gs.add_item("health_potion", 99)
+	var overflow: Dictionary = shop3.buy("health_potion", 1)
+	_check(not bool(overflow.get("ok")), "buy that would overflow the stack is refused")
+	_check(gs.count_item("health_potion") == 99, "the refused overflow left exactly 99, nothing lost or split")
+	_check(gs.gold == 1000, "the refused overflow spent no gold")
+
+	# --- the buy/sell panel through the live scene ---------------------------
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var hud := scene.get_node_or_null("HUD")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and player != null, "hud and player present for shop panel test")
+	if hud == null or player == null:
+		gs.ui_blocking = false
+		paused = false
+		gs.reset()
+		completed["shop"] = true
+		return
+
+	# the merchant joins the interactable group without displacing Edrik (the
+	# quest bots pick the first interactable, so Edrik must stay first)
+	var prompts: Array[String] = []
+	var interactables := get_nodes_in_group("interactable")
+	for n in interactables:
+		if n.has_method("prompt_text"):
+			prompts.append(String(n.call("prompt_text")))
+	_check(interactables.size() >= 2, "at least two interactables (Edrik and the merchant)")
+	_check(interactables.size() > 0 and String(interactables[0].name) == "Edrik",
+		"Edrik stays the first interactable so the quest bots never open the shop")
+	_check(prompts.has("Торговать"), "a merchant offering Торговать is in the interactable group")
+
+	# --- the real in-game path: E near the merchant opens the shop, buys nothing --
+	# Player._process_free calls interact() on the nearest interactable; the merchant
+	# must open the panel through that path and must NOT also run a trade on the same
+	# frame. Every other shop test opens the panel directly, so this is the only
+	# coverage of Merchant.interact -> hud.open_shop.
+	var merchant: Node = null
+	for n in interactables:
+		if n.has_method("prompt_text") and String(n.call("prompt_text")) == "Торговать":
+			merchant = n
+			break
+	_check(merchant != null, "a merchant interactable offering Торговать was found in the group")
+	if merchant != null:
+		_check(merchant != interactables[0],
+			"the merchant is not the first interactable (Edrik stays first so the quest bots never open the shop)")
+		gs.gold = 100
+		var gold_pre: int = gs.gold
+		var inv_size_pre: int = gs.inventory.size()
+		var potion_pre: int = gs.count_item("health_potion")
+		merchant.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_shop_open")), "Merchant.interact opens the shop through the real path")
+		_check(gs.ui_blocking, "Merchant.interact sets ui_blocking")
+		_check(gs.gold == gold_pre, "opening the shop via interact spent no gold (got %d)" % gs.gold)
+		_check(gs.inventory.size() == inv_size_pre, "opening the shop via interact left the inventory unchanged")
+		_check(gs.count_item("health_potion") == potion_pre,
+			"the selected row bought nothing on the open frame")
+		hud.call("close_shop")
+		await process_frame
+		_check(not bool(hud.call("is_shop_open")), "close_shop closes the interact-opened shop")
+		_check(not gs.ui_blocking, "ui_blocking cleared after closing the interact-opened shop")
+
+	# open the shop through the HUD and check the modal gate
+	gs.gold = 100
+	hud.call("open_shop_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_shop_open")), "open_shop opens the shop")
+	_check(gs.ui_blocking, "ui_blocking is true while the shop is open")
+	var before := player.global_position
+	var d_down := InputEventKey.new()
+	d_down.physical_keycode = KEY_D
+	d_down.keycode = KEY_D
+	d_down.pressed = true
+	Input.parse_input_event(d_down)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) < 2.0, "shop open blocks player movement")
+	var d_up := InputEventKey.new()
+	d_up.physical_keycode = KEY_D
+	d_up.keycode = KEY_D
+	d_up.pressed = false
+	Input.parse_input_event(d_up)
+	await physics_frame
+
+	# E buys one unit of the selected (first) stock item through the real input path
+	var gold_before: int = gs.gold
+	var count_before: int = gs.count_item("health_potion")
+	await _tap_key(KEY_E)
+	_check(gs.gold == gold_before - 25, "E buys one health_potion for 25 (gold %d -> %d)" % [gold_before, gs.gold])
+	_check(gs.count_item("health_potion") == count_before + 1, "the bought item entered the inventory")
+
+	# Tab flips to the sell list; E then sells that same unit back
+	await _tap_key(KEY_TAB)
+	await _tap_key(KEY_E)
+	_check(gs.count_item("health_potion") == count_before, "Tab+E sells the unit back (net to the start count)")
+	_check(bool(hud.call("is_shop_open")), "the shop stays open after a sell")
+
+	# Esc closes the shop and does not pause the game underneath
+	await _tap_key(KEY_ESCAPE)
+	_check(not bool(hud.call("is_shop_open")), "Esc closes the shop")
+	_check(not gs.ui_blocking, "ui_blocking cleared after Esc closed the shop")
+	_check(not paused, "Esc closing the shop does not pause the game")
+
+	# while the shop owns the screen the inventory key is swallowed (modal)
+	hud.call("open_shop_for_shot")
+	await process_frame
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_shop_open")), "the shop stays open when I is pressed (modal swallows it)")
+	_check(not bool(hud.call("is_inventory_open")), "I does not open the inventory while the shop is open")
+	await _tap_key(KEY_ESCAPE)
+
+	# opening the shop closes an already-open inventory (mutual exclusivity)
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "I opens the inventory when the shop is closed")
+	hud.call("open_shop_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_shop_open")), "open_shop opens the shop over the inventory")
+	_check(not bool(hud.call("is_inventory_open")), "opening the shop closed the inventory")
+
+	# leave no residue for later groups
+	if bool(hud.call("is_shop_open")):
+		hud.call("close_shop")
+	if bool(hud.call("is_inventory_open")):
+		await _tap_key(KEY_I)
+	gs.ui_blocking = false
+	paused = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	qm.reset()
+	completed["shop"] = true
 
 
 ## Put a weapon into the equipment slot (or clear it with ""). Goes through the
