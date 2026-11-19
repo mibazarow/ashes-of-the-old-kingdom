@@ -3,6 +3,17 @@ extends Node
 
 const QUICK_SLOT_COUNT := 4
 
+## The six equipment slots of spec §7.3. The order is the display order of the
+## character screen, and it is also the order every aggregation walks, so a slot
+## cannot be skipped by one code path and seen by another. `accessory_1` and
+## `accessory_2` are two concrete slots for the one data-level slot name
+## `accessory`: an accessory item never names which of the two it wants.
+const EQUIPMENT_SLOTS := ["weapon", "secondary", "armor", "boots", "accessory_1", "accessory_2"]
+
+## The data-level slot name that may live in either of the two accessory slots.
+const ACCESSORY_DATA_SLOT := "accessory"
+const ACCESSORY_SLOTS := ["accessory_1", "accessory_2"]
+
 # --- attributes (spec §7.1) ---------------------------------------------------
 ## The four attributes and their starting value. Every derived number the game
 ## reads (HP, mana, attack, crit, speed, magic power, control resistance) is a
@@ -28,8 +39,10 @@ const ATTACK_PER_STRENGTH := 1
 
 ## Safety ceilings and floors of the cached multipliers. The speed and resistance
 ## ceilings sit above what the attribute cap alone can produce (agility 30 gives
-## 1.2 speed, endurance 30 gives 0.5 resistance), so they only ever bind on
-## out-of-range data or a temporary effect. The magic ceiling is the design value
+## 1.2 speed, endurance 30 gives 0.5 resistance), so the room left below them is
+## the budget for equipment bonuses (`speed_bonus`, `resist_bonus`); past that
+## the ceiling binds, which is the point — a ring cannot buy unlimited speed.
+## The magic ceiling is the design value
 ## itself: intelligence 30 lands exactly on 2.5, so it is the end of the curve,
 ## and the floor keeps a below-base intelligence from ever weakening a spell.
 const SPEED_MULTIPLIER_CAP := 1.3
@@ -65,7 +78,11 @@ var _progression_data: Dictionary = {}
 var _progression_loaded: bool = false
 
 var inventory: Array[Dictionary] = []
-var equipment: Dictionary = {"weapon": "", "armor": ""}
+
+## The six slots of `EQUIPMENT_SLOTS`, each holding an item id or "" when empty.
+## An item is never consumed by equipping, so it stays in `inventory` and the
+## slot only records that it is currently worn.
+var equipment: Dictionary = _default_equipment()
 
 ## Quick slots 1–4 (index 0..3); an empty string means the slot is unassigned.
 var quick_slots: Array[String] = ["health_potion", "mana_potion", "", ""]
@@ -106,7 +123,7 @@ func reset() -> void:
 	base_defense = 0
 	gold = 0
 	inventory = []
-	equipment = {"weapon": "", "armor": ""}
+	equipment = _default_equipment()
 	quick_slots = _default_quick_slots()
 	known_skills = _default_known_skills()
 	selected_skill = _default_selected_skill()
@@ -206,12 +223,14 @@ func spend_attribute_point(attr_name: String) -> bool:
 	return true
 
 
-## The ONE place that turns level + attributes into numbers. It only ever
-## assigns from those inputs (never accumulates), so calling it twice is the same
-## as calling it once, and no other system can add to a derived value twice.
-## Equipment and temporary effects stay outside on purpose: they are read where
-## they are used (`total_attack()`, `Player._move_multiplier()`), so taking them
-## off can never leave a residue here.
+## The ONE place that turns level + attributes + equipment into numbers. It only
+## ever assigns from those inputs (never accumulates), so calling it twice is the
+## same as calling it once, and no other system can add to a derived value twice.
+## The equipment terms that feed a cached multiplier (`speed_bonus`,
+## `resist_bonus`) are read here through `total_bonus()`, which recomputes them
+## from the slots every time, so taking an item off can never leave a residue.
+## Attack and defense stay read-through (`total_attack()`, `total_defense()`)
+## because they are not cached; temporary effects stay outside entirely.
 func recompute_derived() -> void:
 	var strength_points := attribute("strength") - BASE_ATTRIBUTE
 	var agility_points := attribute("agility") - BASE_ATTRIBUTE
@@ -228,14 +247,19 @@ func recompute_derived() -> void:
 	_crit_chance = clampf(
 		_float_setting("crit_base", 0.05) \
 		+ float(agility_points) * _float_setting("crit_per_agility", 0.005), 0.0, 1.0)
+	# The agility term and the equipment term are added before the clamp, so a
+	# ring speeds up an already quick character up to the same ceiling and no
+	# further. Both terms are percentages of the base speed.
 	_move_speed_multiplier = clampf(
-		1.0 + float(agility_points) * _float_setting("speed_per_agility", 0.8) / 100.0,
+		1.0 + float(agility_points) * _float_setting("speed_per_agility", 0.8) / 100.0 \
+		+ float(total_bonus("speed_bonus")) / 100.0,
 		1.0, SPEED_MULTIPLIER_CAP)
 	_magic_multiplier = clampf(
 		1.0 + float(intelligence_points) * _float_setting("magic_per_intelligence", 0.06),
 		1.0, MAGIC_MULTIPLIER_CAP)
 	_control_resistance = clampf(
-		float(endurance_points) * _float_setting("control_resist_per_endurance", 0.02),
+		float(endurance_points) * _float_setting("control_resist_per_endurance", 0.02) \
+		+ float(total_bonus("resist_bonus")) / 100.0,
 		0.0, CONTROL_RESIST_CAP)
 
 	# Current pools only get clamped into the new maxima: raising a maximum never
@@ -250,8 +274,9 @@ func crit_chance() -> float:
 	return _crit_chance
 
 
-## Множитель скорости бега (Ловкость). Stacks multiplicatively with the status
-## movement multiplier in `Player._move_multiplier()`.
+## Множитель скорости бега (Ловкость плюс `speed_bonus` экипировки, с потолком
+## SPEED_MULTIPLIER_CAP). Stacks multiplicatively with the status movement
+## multiplier in `Player._move_multiplier()`.
 func move_speed_multiplier() -> float:
 	return _move_speed_multiplier
 
@@ -414,22 +439,36 @@ func spend_gold(amount: int) -> bool:
 
 
 ## Attack as the game sees it: the recomputed base (which already contains the
-## strength bonus) plus the equipped weapon. The weapon is the only term added
-## here, so equipping, unequipping and re-equipping cannot double anything.
+## strength bonus) plus the equipment. Everything equipment-derived goes through
+## `total_bonus()`, which walks the slots and reads the data, so equipping,
+## unequipping and re-equipping cannot double anything: the number is rebuilt
+## from the slots, never accumulated onto a previous value.
 func total_attack() -> int:
-	var bonus := 0
-	var weapon: String = equipment.get("weapon", "")
-	if weapon != "":
-		bonus += int(ItemDB.get_item(weapon).get("attack", 0))
-	return base_attack + bonus
+	return base_attack + total_bonus("attack")
 
 
 func total_defense() -> int:
-	var bonus := 0
-	var armor: String = equipment.get("armor", "")
-	if armor != "":
-		bonus += int(ItemDB.get_item(armor).get("defense", 0))
-	return base_defense + bonus
+	return base_defense + total_bonus("defense")
+
+
+## The single aggregation helper behind every equipment total. Sums one numeric
+## item field (`attack`, `defense`, `speed_bonus`, `resist_bonus`) over the items
+## currently worn, in `EQUIPMENT_SLOTS` order.
+##
+## An id that is no longer in the data contributes 0 instead of failing the load,
+## and a non-numeric field contributes 0 instead of throwing, so a hand-edited
+## item cannot take combat down with it. An item contributes once per slot it
+## occupies, which is why `equip()` refuses to wear the same item twice.
+func total_bonus(stat: String) -> int:
+	var total := 0
+	for slot: String in EQUIPMENT_SLOTS:
+		var item_id: String = String(equipment.get(slot, ""))
+		if item_id == "":
+			continue
+		var raw: Variant = ItemDB.get_item(item_id).get(stat, 0)
+		if raw is int or raw is float:
+			total += int(raw)
+	return total
 
 
 # --- inventory ----------------------------------------------------------------
@@ -470,35 +509,96 @@ func count_item(item_id: String) -> int:
 	return 0
 
 
+## Wears an item into the slot its data names (spec §7.3). The rules:
+## - only an item that exists in the data, is typed `equipment` and is present in
+##   the inventory can be worn, and wearing never consumes it — the previously
+##   worn item of the same slot simply stops being worn while it stays in the
+##   inventory, so the swap is always reversible;
+## - an `accessory` item takes the first free accessory slot, and when both are
+##   worn it replaces `accessory_1`;
+## - any other slot named in the data must be one of `EQUIPMENT_SLOTS`, so a
+##   hand-edited slot name is refused instead of quietly creating a seventh slot
+##   that nothing aggregates;
+## - wearing an item that is already worn changes nothing and still succeeds,
+##   which is what keeps one ring from landing in both accessory slots and being
+##   counted twice.
 func equip(item_id: String) -> bool:
 	var def := ItemDB.get_item(item_id)
-	if def.is_empty():
-		return false
-	var slot: String = String(def.get("slot", ""))
-	if slot == "":
+	if def.is_empty() or not ItemDB.is_equipment(item_id):
 		return false
 	if count_item(item_id) <= 0:
 		return false
-	equipment[slot] = item_id
+	if equipped_slot_of(item_id) != "":
+		return true
+	var target := _equipment_slot_for(item_id)
+	if target == "":
+		return false
+	equipment[target] = item_id
+	recompute_derived()
 	EventBus.equipment_changed.emit()
 	EventBus.toast.emit("Надето: %s" % String(def.get("name", item_id)))
 	return true
 
 
-## Clears an equipment slot ("weapon" / "armor"). Returns true only when
+## Clears an equipment slot (any of `EQUIPMENT_SLOTS`). Returns true only when
 ## something was actually equipped there; an empty or unknown slot is a no-op.
 ## The item stays in the inventory (equip never consumes it), so unequipping is
 ## always reversible.
 func unequip(slot: String) -> bool:
-	if not equipment.has(slot):
+	if not EQUIPMENT_SLOTS.has(slot):
 		return false
 	var current: String = String(equipment.get(slot, ""))
 	if current == "":
 		return false
 	equipment[slot] = ""
+	recompute_derived()
 	EventBus.equipment_changed.emit()
 	EventBus.toast.emit("Снято: %s" % ItemDB.display_name(current))
 	return true
+
+
+## The concrete slot an item belongs in, or "" when the slot named by its data is
+## not one of the six. An `accessory` resolves to the first free accessory slot
+## and falls back to `accessory_1` when both are worn, so the data never has to
+## know that there are two of them.
+func _equipment_slot_for(item_id: String) -> String:
+	var data_slot := ItemDB.equipment_slot(item_id)
+	if data_slot == ACCESSORY_DATA_SLOT:
+		for accessory_slot: String in ACCESSORY_SLOTS:
+			if String(equipment.get(accessory_slot, "")) == "":
+				return accessory_slot
+		return String(ACCESSORY_SLOTS[0])
+	return data_slot if EQUIPMENT_SLOTS.has(data_slot) else ""
+
+
+## The slot an item is currently worn in, or "" when it is not worn. The HUD reads
+## this for both the `[надето]` marker and the equip/unequip toggle, so an
+## accessory in either of the two accessory slots behaves like any other slot.
+func equipped_slot_of(item_id: String) -> String:
+	if item_id == "":
+		return ""
+	for slot: String in EQUIPMENT_SLOTS:
+		if String(equipment.get(slot, "")) == item_id:
+			return slot
+	return ""
+
+
+## How many of the six slots are currently worn.
+func equipped_count() -> int:
+	var count := 0
+	for slot: String in EQUIPMENT_SLOTS:
+		if String(equipment.get(slot, "")) != "":
+			count += 1
+	return count
+
+
+## A fresh, empty set of the six slots. Static so the member initializer, reset()
+## and the save restore all build the same shape.
+static func _default_equipment() -> Dictionary:
+	var slots: Dictionary = {}
+	for slot: String in EQUIPMENT_SLOTS:
+		slots[slot] = ""
+	return slots
 
 
 # --- quick slots --------------------------------------------------------------
@@ -622,7 +722,7 @@ func from_dict(d: Dictionary) -> void:
 	for slot in d.get("inventory", []):
 		if slot is Dictionary and slot.has("id"):
 			inventory.append({"id": String(slot["id"]), "amount": int(slot.get("amount", 1))})
-	equipment = d.get("equipment", {"weapon": "", "armor": ""}).duplicate(true)
+	equipment = _restore_equipment(d.get("equipment", null))
 	quick_slots = _restore_quick_slots(d.get("quick_slots", null))
 	# Skills are tolerant of a missing key (saves written before spec §9) and of
 	# unknown ids (a skill removed from the data), so no schema bump is needed.
@@ -633,6 +733,26 @@ func from_dict(d: Dictionary) -> void:
 	play_time_ms = int(d.get("play_time_ms", 0))
 	recompute_derived()
 	_emit_all()
+
+
+## Equipment grew from the two slots the first slice had to the six of spec §7.3,
+## and a save written before the growth only carries `weapon` and `armor`. Every
+## slot is restored on its own: a slot the save does not mention comes back as an
+## empty string rather than staying missing, so the loaded dictionary always holds
+## exactly the six keys `total_bonus()` walks, while the values the old save did
+## have survive untouched. A key that is not one of the six is dropped instead of
+## carried, because nothing aggregates it. That is why no schema bump is needed:
+## the old shape is a strict subset of the new one.
+func _restore_equipment(raw: Variant) -> Dictionary:
+	var restored := _default_equipment()
+	if not (raw is Dictionary):
+		return restored
+	var block: Dictionary = raw as Dictionary
+	for slot: String in EQUIPMENT_SLOTS:
+		var value: Variant = block.get(slot, "")
+		if value is String and String(value) != "":
+			restored[slot] = String(value)
+	return restored
 
 
 ## A save written before the attributes existed has no such key, and a

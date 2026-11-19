@@ -84,6 +84,41 @@
       "price": 60,
       "description": "Дублёная кожа. +3 к защите."
     },
+    "wooden_shield": {
+      "name": "Деревянный щит",
+      "type": "equipment",
+      "slot": "secondary",
+      "defense": 3,
+      "price": 45,
+      "description": "Дубовая доска с железной нашлёпкой. +3 к защите."
+    },
+    "leather_boots": {
+      "name": "Кожаные сапоги",
+      "type": "equipment",
+      "slot": "boots",
+      "defense": 1,
+      "speed_bonus": 5,
+      "price": 30,
+      "description": "Разношенная подошва. +1 к защите, +5% к скорости."
+    },
+    "swift_ring": {
+      "name": "Кольцо тихого шага",
+      "type": "equipment",
+      "slot": "accessory",
+      "defense": 0,
+      "speed_bonus": 8,
+      "price": 120,
+      "description": "Не слышно шага. +8% к скорости."
+    },
+    "echo_amulet": {
+      "name": "Амулет колокольного эха",
+      "type": "equipment",
+      "slot": "accessory",
+      "defense": 1,
+      "resist_bonus": 10,
+      "price": 140,
+      "description": "Эх колокола глушит чужую волю. +1 к защите, +10% к сопротивлению контролю."
+    },
     "wolf_fang": {
       "name": "Клык пепельного волка",
       "type": "material",

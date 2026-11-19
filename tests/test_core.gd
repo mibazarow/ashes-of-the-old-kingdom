@@ -233,6 +233,9 @@ func _run() -> void:
 	print("== inventory equip ==")
 	await _test_inventory_equip()
 
+	print("== equipment slots ==")
+	_test_equipment_slots()
+
 	print("== character panel ==")
 	await _test_character_panel()
 
@@ -244,7 +247,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 34, "every test group ran to completion (got %d/34)" % completed.size())
+	_check(completed.size() == 35, "every test group ran to completion (got %d/35)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3158,6 +3161,341 @@ func _row_with_marker(hud: Node) -> String:
 		if row.contains("[надето]"):
 			return row
 	return "" if rows.is_empty() else rows[0]
+
+
+## Equipment slots (spec §7.3): six of them — weapon, secondary, armor, boots and
+## two accessories — filled from `data/items.json`, with one aggregation helper
+## behind every total. Pins that all six slots exist and start empty, that one
+## item per slot produces exactly the sum of the data values, that accessories
+## take the free slot and then resolve to `accessory_1` without ever dropping an
+## item out of the inventory, that `equip` refuses a non-equipment item, an item
+## that is not carried and an item naming a slot the game does not have, that
+## unequipping each slot gives the previous totals back, that equipping a second
+## time cannot double a bonus, that `speed_bonus` and `resist_bonus` stack with
+## the attributes and stop at the 1.3 / 0.6 ceilings, and that a save round-trips
+## all six slots while a save written for the old two-slot format gains the four
+## missing ones as empty strings instead of losing the two it did have. GameState
+## is reset at both ends so no later group inherits worn items.
+func _test_equipment_slots() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- the six slots exist and are empty by default -------------------------
+	_check(gs.EQUIPMENT_SLOTS.size() == 6, "six equipment slots are declared (got %d)" % gs.EQUIPMENT_SLOTS.size())
+	_check(gs.EQUIPMENT_SLOTS == ["weapon", "secondary", "armor", "boots", "accessory_1", "accessory_2"],
+		"the declared slots are exactly the six of spec §7.3")
+	_check(gs.equipment.size() == 6, "the equipment dictionary holds exactly six keys (got %d)" % gs.equipment.size())
+	_check(_slots_all_empty(), "every slot exists and is empty after reset")
+	_check(gs.equipped_count() == 0, "nothing is worn after reset")
+	_check(gs.total_attack() == gs.base_attack and gs.total_defense() == gs.base_defense,
+		"empty slots leave attack and defense at their base")
+	_check(gs.total_bonus("attack") == 0 and gs.total_bonus("defense") == 0,
+		"the aggregation helper returns 0 with nothing worn")
+	_check(gs.total_bonus("not_a_stat") == 0, "an unknown item field aggregates to 0")
+
+	# --- one item per slot: the totals are the exact sums ---------------------
+	var per_slot := {
+		"weapon": "iron_sword",
+		"secondary": "wooden_shield",
+		"armor": "leather_armor",
+		"boots": "leather_boots",
+		"accessory_1": "swift_ring",
+		"accessory_2": "echo_amulet",
+	}
+	var expected_attack: int = gs.base_attack
+	var expected_defense: int = gs.base_defense
+	for item_id: String in per_slot.values():
+		gs.add_item(item_id, 1)
+		var def := ItemDB.get_item(item_id)
+		_check(String(def.get("type", "")) == "equipment", "%s is typed equipment" % item_id)
+		expected_attack += int(def.get("attack", 0))
+		expected_defense += int(def.get("defense", 0))
+	_check(gs.inventory.size() == 6, "six equipment stacks in the inventory (got %d)" % gs.inventory.size())
+	_check(expected_defense == 8, "the six items carry 8 defense between them (got %d)" % expected_defense)
+	_check(_equip_all(per_slot), "each of the six items equips into its own slot")
+	_check(_slots_match(per_slot), "all six slots hold the item that was put in them")
+	_check(gs.equipped_count() == 6, "all six slots report as worn")
+	_check(gs.total_attack() == expected_attack,
+		"total_attack is the base plus every equipped attack term (%d, expected %d)" % [gs.total_attack(), expected_attack])
+	_check(gs.total_defense() == expected_defense,
+		"total_defense sums defense across ALL six slots (%d, expected %d)" % [gs.total_defense(), expected_defense])
+	_check(gs.total_bonus("attack") == 6, "only the weapon contributes attack (got %d)" % gs.total_bonus("attack"))
+	_check(gs.total_bonus("defense") == expected_defense,
+		"total_bonus is the single aggregation behind total_defense (got %d)" % gs.total_bonus("defense"))
+	_check(gs.equipped_slot_of("wooden_shield") == "secondary",
+		"the shield is found in secondary, not in weapon or armor")
+	_check(gs.equipped_slot_of("echo_amulet") == "accessory_2",
+		"the amulet is found in the second accessory slot")
+	_check(gs.equipped_slot_of("health_potion") == "", "an item that is not worn reports no slot")
+	var kept := true
+	for item_id: String in per_slot.values():
+		if gs.count_item(item_id) < 1:
+			kept = false
+	_check(kept, "equipping never consumes an item: all six are still in the inventory")
+
+	# --- accessories: free slot first, then accessory_1 -----------------------
+	gs.reset()
+	gs.add_item("swift_ring", 1)
+	gs.add_item("echo_amulet", 1)
+	_check(gs.equip("swift_ring"), "the first accessory equips")
+	_check(String(gs.equipment.get("accessory_1", "")) == "swift_ring",
+		"the first accessory takes accessory_1")
+	_check(gs.equip("echo_amulet"), "the second accessory equips")
+	_check(String(gs.equipment.get("accessory_2", "")) == "echo_amulet",
+		"the second accessory takes the free accessory_2 instead of replacing accessory_1")
+	_check(gs.count_item("swift_ring") == 1 and gs.count_item("echo_amulet") == 1,
+		"neither accessory left the inventory while being worn")
+	_check(gs.total_bonus("speed_bonus") == 8, "only the ring contributes speed (got %d)" % gs.total_bonus("speed_bonus"))
+	_check(gs.total_bonus("defense") == 1, "only the amulet contributes defense (got %d)" % gs.total_bonus("defense"))
+	# Re-wearing an item that is already worn must not put it in the other
+	# accessory slot as well: one ring cannot be counted twice.
+	_check(gs.equip("swift_ring"), "re-wearing a worn accessory still succeeds")
+	_check(gs.equipped_slot_of("swift_ring") == "accessory_1",
+		"a worn accessory is never duplicated into the other accessory slot")
+	_check(gs.total_bonus("speed_bonus") == 8, "re-wearing the ring did not double its bonus (got %d)" % gs.total_bonus("speed_bonus"))
+	# Both accessory slots occupied by something the incoming item is not: the
+	# rule is to replace accessory_1. A save can legitimately hold an id the data
+	# no longer knows about, which is how this state is built here without
+	# inventing a third accessory item that the spec does not list.
+	gs.equipment["accessory_1"] = "ghost_ring"
+	_check(gs.equip("swift_ring"), "with both accessory slots full the equip still succeeds")
+	_check(String(gs.equipment.get("accessory_1", "")) == "swift_ring",
+		"a full pair of accessory slots replaces accessory_1")
+	_check(String(gs.equipment.get("accessory_2", "")) == "echo_amulet",
+		"that replacement leaves accessory_2 alone")
+	_check(gs.count_item("swift_ring") == 1 and gs.count_item("echo_amulet") == 1,
+		"the replacement lost no item from the inventory")
+	_check(gs.total_bonus("defense") == 1,
+		"an id the data does not know contributes nothing (got %d)" % gs.total_bonus("defense"))
+
+	# --- equip refuses what it must -------------------------------------------
+	gs.reset()
+	gs.add_item("health_potion", 1)
+	gs.add_item("wolf_fang", 1)
+	gs.add_item("rusted_seal", 1)
+	_check(not gs.equip("health_potion"), "a consumable is refused by equip")
+	_check(not gs.equip("wolf_fang"), "a material is refused by equip")
+	_check(not gs.equip("rusted_seal"), "a quest item is refused by equip")
+	_check(not gs.equip("no_such_item"), "an unknown item id is refused by equip")
+	_check(not gs.equip("iron_sword"), "an item that is not in the inventory is refused")
+	_check(gs.equipment.size() == 6 and _slots_all_empty(),
+		"every refusal left all six slots empty and added no key")
+	_check(gs.equipped_count() == 0, "a refused equip wears nothing")
+	# An item whose data names a slot the game does not have must be refused too,
+	# rather than quietly create a seventh slot nothing aggregates. The entry is
+	# injected into the already-loaded item cache and removed again, because no
+	# shipped item is that wrong.
+	var item_cache: Dictionary = ItemDB.all_items()
+	item_cache["bogus_helmet"] = {"name": "Шлем ниоткуда", "type": "equipment", "slot": "head", "defense": 9}
+	gs.add_item("bogus_helmet", 1)
+	_check(not gs.equip("bogus_helmet"), "an item naming a slot outside the six is refused")
+	_check(gs.equipment.size() == 6, "a refused slot name never becomes a seventh key")
+	item_cache.erase("bogus_helmet")
+	gs.reset()
+	gs.add_item("iron_sword", 1)
+	_check(gs.equip("iron_sword"), "the same weapon equips once it is carried")
+
+	# --- unequipping each slot gives the previous totals back -----------------
+	gs.reset()
+	for item_id: String in per_slot.values():
+		gs.add_item(item_id, 1)
+	_check(_equip_all(per_slot), "rebuilt the full six-slot loadout")
+	_check(gs.total_attack() == expected_attack and gs.total_defense() == expected_defense,
+		"the rebuilt loadout reads the same totals (%d/%d)" % [gs.total_attack(), gs.total_defense()])
+	var walk_ok := true
+	for slot: String in gs.EQUIPMENT_SLOTS:
+		var item_id := String(gs.equipment.get(slot, ""))
+		var def := ItemDB.get_item(item_id)
+		var attack_before: int = gs.total_attack()
+		var defense_before: int = gs.total_defense()
+		if not gs.unequip(slot):
+			walk_ok = false
+			continue
+		if gs.total_attack() != attack_before - int(def.get("attack", 0)):
+			walk_ok = false
+		if gs.total_defense() != defense_before - int(def.get("defense", 0)):
+			walk_ok = false
+		if gs.equipped_slot_of(item_id) != "":
+			walk_ok = false
+	_check(walk_ok, "unequipping each slot drops exactly that item's terms and nothing else")
+	_check(gs.total_attack() == gs.base_attack,
+		"unequipping all six returns attack to the base (got %d)" % gs.total_attack())
+	_check(gs.total_defense() == gs.base_defense,
+		"unequipping all six returns defense to the base (got %d)" % gs.total_defense())
+	_check(gs.equipped_count() == 0 and _slots_all_empty(), "all six slots are empty again")
+	_check(not gs.unequip("weapon"), "unequipping an already-empty slot is a no-op")
+	_check(not gs.unequip("head"), "an unknown slot name is refused by unequip")
+	_check(not gs.unequip("accessory"), "the data-level accessory name is not itself a slot")
+
+	# --- equip -> unequip -> equip cannot double anything ---------------------
+	_check(_equip_all(per_slot), "equipped the loadout for the cycle")
+	var full_cycle := _equipment_snapshot()
+	for slot: String in gs.EQUIPMENT_SLOTS:
+		gs.unequip(slot)
+	_check(_slots_all_empty(), "the cycle took the whole loadout off")
+	_check(_equip_all(per_slot), "the cycle put the whole loadout back on")
+	_check(_equipment_snapshot() == full_cycle,
+		"equip -> unequip -> equip produced identical numbers (%s)" % [full_cycle])
+	_check(_equip_all(per_slot), "equipping the whole loadout again succeeds")
+	_check(_equipment_snapshot() == full_cycle, "equipping everything a second time changes nothing")
+	_check(gs.total_attack() == expected_attack and gs.total_defense() == expected_defense,
+		"the repeated passes still read the exact sums (%d/%d)" % [gs.total_attack(), gs.total_defense()])
+	_check(gs.equipment.size() == 6, "no pass invented a seventh slot")
+
+	# --- speed_bonus stacks with agility and stops at the ceiling -------------
+	gs.reset()
+	gs.add_item("leather_boots", 1)
+	gs.add_item("swift_ring", 1)
+	_check(absf(gs.move_speed_multiplier() - 1.0) < 0.0001, "no speed bonus with nothing worn")
+	gs.equip("leather_boots")
+	_check(absf(gs.move_speed_multiplier() - 1.05) < 0.0001,
+		"the boots' 5 percent is additive on the 1.0 base (got %.4f)" % gs.move_speed_multiplier())
+	gs.equip("swift_ring")
+	_check(String(gs.equipment.get("accessory_1", "")) == "swift_ring", "the ring went into accessory_1")
+	_check(absf(gs.move_speed_multiplier() - 1.13) < 0.0001,
+		"boots and ring add their 13 percent together (got %.4f)" % gs.move_speed_multiplier())
+	gs.attribute_points = 1
+	gs.spend_attribute_point("agility")
+	_check(absf(gs.move_speed_multiplier() - 1.138) < 0.0001,
+		"one agility point adds its 0.8 percent on top of the equipment (got %.4f)" % gs.move_speed_multiplier())
+	gs.attributes["agility"] = 30
+	gs.recompute_derived()
+	_check(absf(gs.move_speed_multiplier() - 1.3) < 0.0001,
+		"agility 30 plus 13 percent equipment is held at the 1.3 ceiling (got %.4f)" % gs.move_speed_multiplier())
+	gs.attributes["agility"] = 5
+	gs.recompute_derived()
+	_check(absf(gs.move_speed_multiplier() - 1.13) < 0.0001,
+		"the equipment bonus survives the agility round-trip (got %.4f)" % gs.move_speed_multiplier())
+	gs.unequip("boots")
+	gs.unequip("accessory_1")
+	_check(absf(gs.move_speed_multiplier() - 1.0) < 0.0001,
+		"taking both speed items off returns the multiplier to 1.0 (got %.4f)" % gs.move_speed_multiplier())
+
+	# --- resist_bonus stacks with endurance and stops at the ceiling ----------
+	gs.reset()
+	gs.add_item("echo_amulet", 1)
+	_check(absf(gs.control_resistance()) < 0.0001, "no control resistance with nothing worn")
+	_check(gs.equip("echo_amulet"), "the amulet equips")
+	_check(absf(gs.control_resistance() - 0.1) < 0.0001,
+		"the amulet's 10 percent is additive on the endurance base (got %.4f)" % gs.control_resistance())
+	gs.attribute_points = 1
+	gs.spend_attribute_point("endurance")
+	_check(absf(gs.control_resistance() - 0.12) < 0.0001,
+		"one endurance point adds its 2 percent on top of the amulet (got %.4f)" % gs.control_resistance())
+	gs.attributes["endurance"] = 30
+	gs.recompute_derived()
+	_check(absf(gs.control_resistance() - 0.6) < 0.0001,
+		"endurance 30 plus 10 percent equipment sits on the 0.6 ceiling (got %.4f)" % gs.control_resistance())
+	gs.attributes["endurance"] = 200
+	gs.recompute_derived()
+	_check(absf(gs.control_resistance() - 0.6) < 0.0001,
+		"an out-of-range endurance never pushes control resistance past 0.6 (got %.4f)" % gs.control_resistance())
+	gs.attributes["endurance"] = 5
+	gs.recompute_derived()
+	gs.unequip("accessory_1")
+	_check(absf(gs.control_resistance()) < 0.0001,
+		"taking the amulet off returns control resistance to 0 (got %.4f)" % gs.control_resistance())
+
+	# --- all six slots survive a save round-trip ------------------------------
+	gs.reset()
+	for item_id: String in per_slot.values():
+		gs.add_item(item_id, 1)
+	_check(_equip_all(per_slot), "equipped the loadout for the round-trip")
+	var saved: Dictionary = gs.to_dict()
+	_check(saved.get("equipment") is Dictionary, "to_dict writes an equipment block")
+	var saved_equipment: Dictionary = saved.get("equipment", {})
+	_check(saved_equipment.size() == 6, "to_dict writes all six slots (got %d)" % saved_equipment.size())
+	gs.reset()
+	_check(gs.equipped_count() == 0, "reset cleared the slots before the restore")
+	gs.from_dict(saved)
+	_check(_slots_match(per_slot), "from_dict restores all six slots")
+	_check(gs.total_attack() == expected_attack and gs.total_defense() == expected_defense,
+		"the restored loadout fights the same (%d/%d)" % [gs.total_attack(), gs.total_defense()])
+	_check(absf(gs.move_speed_multiplier() - 1.13) < 0.0001,
+		"the restore recomputes the speed bonus from the slots (got %.4f)" % gs.move_speed_multiplier())
+	_check(absf(gs.control_resistance() - 0.1) < 0.0001,
+		"the restore recomputes the control resistance from the slots (got %.4f)" % gs.control_resistance())
+
+	# --- the old two-slot save format loads without a schema bump -------------
+	gs.reset()
+	gs.from_dict({"equipment": {"weapon": "iron_sword", "armor": "leather_armor"}})
+	_check(String(gs.equipment.get("weapon", "")) == "iron_sword", "a two-slot save keeps its weapon")
+	_check(String(gs.equipment.get("armor", "")) == "leather_armor", "a two-slot save keeps its armor")
+	_check(gs.equipment.size() == 6,
+		"a restored old save ends up with exactly six keys (got %d)" % gs.equipment.size())
+	var gained_ok := true
+	for slot: String in ["secondary", "boots", "accessory_1", "accessory_2"]:
+		if String(gs.equipment.get(slot, "<missing>")) != "":
+			gained_ok = false
+	_check(gained_ok, "the four slots an old save never wrote come back as empty strings")
+	_check(gs.total_attack() == gs.base_attack + 6,
+		"the restored old weapon still attacks (got %d)" % gs.total_attack())
+	_check(gs.total_defense() == gs.base_defense + 3,
+		"the restored old armor still defends (got %d)" % gs.total_defense())
+	gs.add_item("wooden_shield", 1)
+	_check(gs.equip("wooden_shield"), "a save restored from the old format gains the new slots")
+	_check(String(gs.equipment.get("secondary", "")) == "wooden_shield",
+		"the shield lands in the slot the old save never had")
+	# A save whose equipment block is not a dictionary at all must still leave a
+	# usable six-slot player rather than a half-built dictionary.
+	var junk_ok := true
+	for junk: Variant in [null, "weapon", 7, [], true]:
+		gs.from_dict({"equipment": junk})
+		if gs.equipment.size() != 6 or gs.equipped_count() != 0:
+			junk_ok = false
+	_check(junk_ok, "a non-dictionary equipment block still yields six empty slots")
+	# A key that is not one of the six is dropped rather than carried, because
+	# nothing aggregates it and the HUD would show a slot it cannot clear.
+	gs.reset()
+	gs.from_dict({"equipment": {"weapon": "iron_sword", "head": "bogus_helmet"}})
+	_check(gs.equipment.size() == 6, "an unknown slot in a save is not carried into the six")
+	_check(not gs.equipment.has("head"), "the unknown slot key is dropped")
+	_check(String(gs.equipment.get("weapon", "")) == "iron_sword",
+		"dropping the unknown key keeps the known one")
+
+	# --- leave no residue for later groups ------------------------------------
+	gs.reset()
+	qm.reset()
+	completed["equipment_slots"] = true
+
+
+## True when every declared slot exists in the dictionary and holds an empty
+## string — the shape a fresh or freshly restored GameState must always have.
+func _slots_all_empty() -> bool:
+	for slot: String in gs.EQUIPMENT_SLOTS:
+		if not gs.equipment.has(slot) or String(gs.equipment[slot]) != "":
+			return false
+	return true
+
+
+## Equips one item per declared slot through the real equip() path.
+func _equip_all(items_by_slot: Dictionary) -> bool:
+	var ok := true
+	for slot: String in items_by_slot.keys():
+		if not gs.equip(String(items_by_slot[slot])):
+			ok = false
+	return ok
+
+
+## True when each declared slot holds exactly the item the caller expects.
+func _slots_match(items_by_slot: Dictionary) -> bool:
+	for slot: String in items_by_slot.keys():
+		if String(gs.equipment.get(slot, "")) != String(items_by_slot[slot]):
+			return false
+	return true
+
+
+## Every number the equipment can move, so a round-trip can be compared as one
+## value instead of one assertion per field.
+func _equipment_snapshot() -> Dictionary:
+	return {
+		"attack": gs.total_attack(),
+		"defense": gs.total_defense(),
+		"speed": gs.move_speed_multiplier(),
+		"resist": gs.control_resistance(),
+		"speed_bonus": gs.total_bonus("speed_bonus"),
+		"resist_bonus": gs.total_bonus("resist_bonus"),
+	}
 
 
 ## Character screen (spec §7.1 UI): C opens and closes it, the modal gate keeps

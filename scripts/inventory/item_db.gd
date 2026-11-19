@@ -47,6 +47,22 @@ static func is_consumable(item_id: String) -> bool:
 	return String(get_item(item_id).get("type", "")) == "consumable"
 
 
+## Whether an item can go into an equipment slot at all. The type is the gate,
+## not the presence of a `slot` key: a material that picked up a stray `slot` by
+## a hand edit is still not wearable, and an equipment item whose slot names a
+## slot the game does not have is rejected later by `GameState.equip()`.
+static func is_equipment(item_id: String) -> bool:
+	return String(get_item(item_id).get("type", "")) == "equipment"
+
+
+## The slot an item's data names ("weapon", "armor", "accessory", …), or "" when
+## it names none. The data-level name is returned as written: `accessory` covers
+## both concrete accessory slots, and choosing between them is the state's job,
+## not the data's.
+static func equipment_slot(item_id: String) -> String:
+	return String(get_item(item_id).get("slot", ""))
+
+
 ## Attack chain of a weapon (spec §6 "Комбо зависят от оружия"): an ordered list
 ## of steps, each one a Dictionary with damage_mult / windup / active / recovery
 ## / reach / arc. An item without a combo (unarmed, armor, a legacy weapon)

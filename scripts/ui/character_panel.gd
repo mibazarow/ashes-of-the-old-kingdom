@@ -70,7 +70,10 @@ func _ready() -> void:
 	right.add_theme_constant_override("separation", 1)
 	columns.add_child(right)
 
-	for i in 4:
+	# Five lines: the four combat numbers plus the equipment summary, so the
+	# player can see which of the six slots are still empty without opening the
+	# inventory.
+	for i in 5:
 		var line := _make_text("", COLOR_DERIVED)
 		right.add_child(line)
 		_derived_labels.append(line)
@@ -105,6 +108,13 @@ func refresh() -> void:
 		int(round((GameState.move_speed_multiplier() - 1.0) * 100.0)),
 	]
 	_derived_labels[3].text = "Сопротивление контролю %d%%" % int(round(GameState.control_resistance() * 100.0))
+	# The equipment summary closes the block: how much of the defence shown above
+	# is worn rather than earned, and which of the six slots are still empty.
+	_derived_labels[4].text = "Экипировано %d/%d · Защита с экипировки +%d" % [
+		GameState.equipped_count(),
+		GameState.EQUIPMENT_SLOTS.size(),
+		GameState.total_bonus("defense"),
+	]
 
 
 ## Move the cursor by `step` rows, clamped to the attribute list.

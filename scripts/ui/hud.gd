@@ -459,14 +459,14 @@ func _refresh_inventory() -> void:
 	_inventory_scroll = clampi(_inventory_scroll, 0, maxi(0, size - MAX_VISIBLE_ROWS))
 	var first := _inventory_scroll
 	var last := mini(size, first + MAX_VISIBLE_ROWS)
-	var weapon_id: String = String(GameState.equipment.get("weapon", ""))
-	var armor_id: String = String(GameState.equipment.get("armor", ""))
 	for i in range(first, last):
 		var slot: Dictionary = GameState.inventory[i]
 		var id := String(slot["id"])
 		var amount := int(slot["amount"])
 		var label := "%s x%d" % [ItemDB.display_name(id), amount]
-		var equipped: bool = weapon_id == id or armor_id == id
+		# One lookup against all six slots rather than a hardcoded pair, so an
+		# accessory or a shield is tagged the moment it is worn.
+		var equipped: bool = GameState.equipped_slot_of(id) != ""
 		if equipped:
 			label += "  [надето]"
 		var selected: bool = i == _inventory_selection
@@ -476,11 +476,16 @@ func _refresh_inventory() -> void:
 
 
 ## One compact line with the player's current combat stats, so the effect of an
-## equip/unequip is visible without leaving the panel.
+## equip/unequip is visible without leaving the panel. The speed term only shows
+## when the equipment actually grants some, so the common line stays short.
 func _refresh_stats() -> void:
 	if _inventory_stats == null:
 		return
-	_inventory_stats.text = "Атака %d · Защита %d" % [GameState.total_attack(), GameState.total_defense()]
+	var line := "Атака %d · Защита %d" % [GameState.total_attack(), GameState.total_defense()]
+	var speed_bonus := GameState.total_bonus("speed_bonus")
+	if speed_bonus > 0:
+		line += " · Скорость +%d%%" % speed_bonus
+	_inventory_stats.text = line
 
 
 ## Move the selection cursor by `delta` rows, clamped to the inventory bounds.
@@ -494,7 +499,7 @@ func _move_inventory_selection(delta: int) -> void:
 
 
 ## E / Enter on the selected row: equip it if it is equipment and not yet worn,
-## unequip it if it is the item currently in that slot. Anything that is not
+## unequip it if it is the item currently in a slot. Anything that is not
 ## equipment only toasts and leaves the equipment untouched.
 func _activate_inventory_selection() -> void:
 	var size := GameState.inventory.size()
@@ -502,14 +507,15 @@ func _activate_inventory_selection() -> void:
 		return
 	_inventory_selection = clampi(_inventory_selection, 0, size - 1)
 	var id := String(GameState.inventory[_inventory_selection]["id"])
-	var def := ItemDB.get_item(id)
-	var slot: String = String(def.get("slot", ""))
-	if slot == "":
+	if not ItemDB.is_equipment(id):
 		EventBus.toast.emit("Нельзя надеть")
 		return
-	var equipped_now: bool = String(GameState.equipment.get(slot, "")) == id
-	if equipped_now:
-		GameState.unequip(slot)
+	# The slot comes from the state rather than from the slot name in the item's
+	# data, because that name is `accessory` while the real slot is one of the two
+	# accessory slots: asking the state is the only way to clear the right one.
+	var worn_slot := GameState.equipped_slot_of(id)
+	if worn_slot != "":
+		GameState.unequip(worn_slot)
 	else:
 		GameState.equip(id)
 	_refresh_inventory()
