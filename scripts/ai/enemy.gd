@@ -23,6 +23,10 @@ const RECOVERY := 0.45
 const STAGGER_TIME := 0.22
 const ATTACK_COOLDOWN := 0.85
 
+## How much further a charging enemy spots the player (spec §10, "кабан идёт в
+## атаку, как только почует"). Applied only when `charge_on_sight` is set.
+const CHARGE_DETECT_MULTIPLIER := 1.5
+
 @export var kind: Kind = Kind.MELEE
 @export var enemy_type: StringName = &"ash_wolf"
 @export var display_name: String = "Пепельный волк"
@@ -33,6 +37,22 @@ const ATTACK_COOLDOWN := 0.85
 @export var loot_item: String = "wolf_fang"
 @export var loot_chance: float = 0.75
 @export var projectile_scene: PackedScene
+
+## Behaviour tuning for a specific enemy type (spec §10). Every multiplier
+## defaults to 1.0 and every flag to the value the wolf and the cultist already
+## had, so a new enemy is a .tscn with different numbers rather than a new
+## script, and the two original enemies keep their exact old feel.
+@export var speed_multiplier: float = 1.0
+@export var attack_cooldown_multiplier: float = 1.0
+@export var windup_multiplier: float = 1.0
+## A charger spots the player from `CHARGE_DETECT_MULTIPLIER` times the detection
+## radius and pushes straight in: the ranged minimum distance (back off below
+## `MIN_RANGED_RANGE`, refuse to shoot inside it) is inert while it is set.
+@export var charge_on_sight: bool = false
+## Colour of this enemy's own sprite, so a reused placeholder sprite still reads
+## as a different creature. The damage flash returns to this colour rather than
+## to plain white, otherwise the first hit would wash the identity away.
+@export var sprite_tint: Color = Color.WHITE
 
 @onready var sprite: Sprite2D = $Sprite2D
 @onready var health: HealthComponent = $HealthComponent
@@ -71,6 +91,7 @@ func _ready() -> void:
 	health.damaged.connect(_on_damaged)
 	attack_shape.disabled = true
 	telegraph.visible = false
+	sprite.modulate = sprite_tint
 	_attack_cooldown_left = randf_range(0.2, 0.9)
 	_wander_timer = randf_range(1.0, 3.0)
 	if get_node_or_null("StatusComponent") == null:
@@ -136,7 +157,10 @@ func _combination_stagger_bonus(info: Dictionary) -> float:
 
 func _on_damaged(_amount: int, _info: Dictionary) -> void:
 	_flash_timer = 0.1
-	modulate = Color(1.6, 1.2, 1.2)
+	# The flash brightens this enemy's own tint instead of replacing it, so a
+	# hit boar still flashes boar-coloured. With the default white tint the
+	# product is the original flash colour, byte for byte.
+	sprite.modulate = sprite_tint * Color(1.6, 1.2, 1.2)
 
 
 func _on_died(_info: Dictionary) -> void:
@@ -218,7 +242,7 @@ func _tick(delta: float) -> void:
 	if _flash_timer > 0.0:
 		_flash_timer -= delta
 		if _flash_timer <= 0.0:
-			modulate = Color.WHITE
+			sprite.modulate = sprite_tint
 
 
 func _enter(next: State) -> void:
@@ -251,11 +275,19 @@ func _distance_to_player() -> float:
 	return global_position.distance_to(p.global_position)
 
 
+## Sight line of this enemy. A charger notices the player from further out, which
+## is what makes it leave its post first; everything that does not charge keeps
+## the plain `DETECT_RADIUS`, so the wolf and the cultist see exactly as far as
+## they did before these exports existed.
+func _detect_radius() -> float:
+	return DETECT_RADIUS * (CHARGE_DETECT_MULTIPLIER if charge_on_sight else 1.0)
+
+
 func _player_visible() -> bool:
 	var p := _player_ref()
 	if p == null:
 		return false
-	if _distance_to_player() > DETECT_RADIUS:
+	if _distance_to_player() > _detect_radius():
 		return false
 	var space := get_world_2d().direct_space_state
 	var query := PhysicsRayQueryParameters2D.create(global_position, p.global_position, 1)
@@ -305,27 +337,33 @@ func _process_chase(delta: float) -> void:
 		_enter(State.INVESTIGATE)
 		return
 	var dist := _distance_to_player()
-	if dist > DETECT_RADIUS * 1.4:
+	if dist > _detect_radius() * 1.4:
 		_enter(State.INVESTIGATE)
 		return
 
 	var dir := global_position.direction_to(p.global_position)
 	_face(dir)
 
+	# The ranged minimum distance is the kiting rule: back off below it, hold fire
+	# inside it. A charger ignores the rule as a whole, so its floor drops to zero
+	# and both halves fall out of the same number instead of needing a branch.
+	# Anything that does not charge gets MIN_RANGED_RANGE, exactly as before.
+	var min_range := MIN_RANGED_RANGE if (kind == Kind.RANGED and not charge_on_sight) else 0.0
+
 	# Turning stays allowed while rooted/stunned; only the attack itself is gated.
 	if not _blocks_actions() and _attack_cooldown_left <= 0.0:
 		if kind == Kind.MELEE and dist <= ATTACK_RANGE_MELEE:
 			_start_attack()
 			return
-		if kind == Kind.RANGED and dist <= ATTACK_RANGE_RANGED and dist >= MIN_RANGED_RANGE:
+		if kind == Kind.RANGED and dist <= ATTACK_RANGE_RANGED and dist >= min_range:
 			_start_attack()
 			return
 
-	if kind == Kind.RANGED and dist < MIN_RANGED_RANGE:
-		velocity = -dir * RANGED_SPEED
+	if kind == Kind.RANGED and min_range > 0.0 and dist < min_range:
+		velocity = -dir * RANGED_SPEED * speed_multiplier
 	else:
-		var speed := MELEE_SPEED if kind == Kind.MELEE else RANGED_SPEED
-		velocity = dir * speed
+		var base_speed := MELEE_SPEED if kind == Kind.MELEE else RANGED_SPEED
+		velocity = dir * base_speed * speed_multiplier
 
 
 func _start_attack() -> void:
@@ -354,14 +392,18 @@ func _process_attack(delta: float) -> void:
 
 	_state_time += delta
 	velocity = Vector2.ZERO
-	if _state_time < WINDUP:
-		var t := _state_time / WINDUP
+	# Both the telegraph length and the pause after a swing are per-enemy knobs, so
+	# a heavy hitter can read its attack longer and recover slower while a quick one
+	# does the opposite. At the default 1.0 every threshold below is the constant.
+	var windup := WINDUP * windup_multiplier
+	if _state_time < windup:
+		var t := _state_time / windup
 		telegraph.modulate.a = 0.25 + 0.45 * t
 		return
 
 	telegraph.visible = false
 
-	if _state_time < WINDUP + ACTIVE:
+	if _state_time < windup + ACTIVE:
 		if kind == Kind.MELEE:
 			attack_shape.disabled = false
 			_apply_melee_hits()
@@ -371,8 +413,8 @@ func _process_attack(delta: float) -> void:
 		return
 
 	attack_shape.disabled = true
-	if _state_time >= WINDUP + ACTIVE + RECOVERY:
-		_attack_cooldown_left = ATTACK_COOLDOWN
+	if _state_time >= windup + ACTIVE + RECOVERY:
+		_attack_cooldown_left = ATTACK_COOLDOWN * attack_cooldown_multiplier
 		_enter(State.CHASE)
 
 

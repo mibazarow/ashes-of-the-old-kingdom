@@ -9,6 +9,8 @@ const ATLAS := "res://assets/sprites/tiles.png"
 const PLAYER_SCENE := "res://scenes/player/player.tscn"
 const WOLF_SCENE := "res://scenes/enemies/wolf.tscn"
 const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
+const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
+const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
@@ -67,6 +69,21 @@ const SMITH_ANCHOR := Vector2i(12, 12)
 ## spawn point. 4 tiles is 64 px against a 26 px interact radius and an 18 px bot
 ## stop tolerance, so standing at Edrik can never put the forge inside reach.
 const SMITH_MIN_SEPARATION := 4
+
+## Anchors for the two new predator types (roadmap stage D), on the east/south
+## half of the map: far enough from the wolf pack and the village that the BOT-008
+## hunter still reaches a wolf first, far enough from the eastern clearing that
+## the cultist stays the only ranged enemy of note there. Each anchor is only a
+## starting point — the actual tile comes from `_find_walkable_near`, so a tree
+## cluster from the fixed seed can never swallow a spawn.
+const BOAR_A_ANCHOR := Vector2i(38, 22)
+const BOAR_B_ANCHOR := Vector2i(44, 26)
+const WISP_A_ANCHOR := Vector2i(34, 26)
+const WISP_B_ANCHOR := Vector2i(41, 18)
+
+## How far the walkable scan looks around a new-enemy anchor before giving up.
+## 5 tiles is 80 px against a 2x2 tree cluster, so it always finds the clearing.
+const NEW_ENEMY_SCAN_RADIUS := 5
 
 
 func _ready() -> void:
@@ -362,12 +379,32 @@ func _spawn_actors() -> void:
 	_spawn_enemy(WOLF_SCENE, 34, 20, "WolfE")
 	_spawn_enemy(ARCHER_SCENE, MAP_W - 6, 6, "ArcherA")
 
+	# The two new types differ from a wolf by behaviour, not only by numbers: the
+	# boar spots the player from 1.5x the sight line, charges at 1.35x the speed
+	# and lands a longer, heavier, less frequent swing, while the wisp is a fragile
+	# caster that kites at 1.5x speed and fires a short-telegraph shot often.
+	# Their tiles come from the generated grid instead of hardcoded coordinates.
+	_spawn_enemy_walkable(BOAR_SCENE, BOAR_A_ANCHOR, "BoarA")
+	_spawn_enemy_walkable(BOAR_SCENE, BOAR_B_ANCHOR, "BoarB")
+	_spawn_enemy_walkable(WISP_SCENE, WISP_A_ANCHOR, "WispA")
+	_spawn_enemy_walkable(WISP_SCENE, WISP_B_ANCHOR, "WispB")
+
 	_instantiate(PICKUP_SCENE, _tile_center(13, 10), "PickupA")
 
 
 func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> void:
 	var e := _instantiate(scene_path, _tile_center(tx, ty), node_name)
 	e.name = node_name
+
+
+## `_spawn_enemy` for a spawn whose tile is derived from the generated grid rather
+## than hardcoded: the anchor is snapped to the nearest walkable tile by the same
+## deterministic outward scan the chests use, so a solid tile (stone or a tree)
+## can never take an enemy. Deterministic like every other spawn here, because the
+## scan order depends only on the fixed seed and the fixed anchor.
+func _spawn_enemy_walkable(scene_path: String, anchor: Vector2i, node_name: String) -> void:
+	var tile := _find_walkable_near(anchor, NEW_ENEMY_SCAN_RADIUS)
+	_spawn_enemy(scene_path, tile.x, tile.y, node_name)
 
 
 func _instantiate(scene_path: String, pos: Vector2, node_name: String) -> Node2D:

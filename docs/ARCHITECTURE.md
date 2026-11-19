@@ -134,7 +134,12 @@ payload `DamageResolver.resolve_hit` ключи `status` и `status_duration` �
 `Enemy` (`scripts/ai/enemy.gd`) — явная FSM с таймером состояния. Телеграф —
 `ColorRect`, который проявляется во время WINDUP; хитбокс открывается после.
 Дальний враг стреляет снарядом (`Projectile`), урон всё равно идёт через
-`DamageResolver`.
+`DamageResolver`. Отличия конкретного типа задаются не новым скриптом, а
+экспортами `Enemy` — `speed_multiplier`, `attack_cooldown_multiplier`,
+`windup_multiplier`, `charge_on_sight` (полуторная дальность обнаружения и
+отказ от минимальной дистанции удержания) и `sprite_tint`; у всех них нейтральное
+значение (1.0 / false / белый), поэтому волк и культист играют ровно так же, как
+до появления этих параметров.
 
 ## Мир
 

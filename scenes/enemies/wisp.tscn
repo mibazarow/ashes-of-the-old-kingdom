@@ -1,0 +1,62 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
+[ext_resource type="Texture2D" path="res://assets/sprites/archer.png" id="2_tex"]
+[ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
+[ext_resource type="PackedScene" path="res://scenes/items/projectile.tscn" id="4_proj"]
+
+[sub_resource type="RectangleShape2D" id="body_shape"]
+size = Vector2(8, 8)
+
+[sub_resource type="RectangleShape2D" id="attack_shape"]
+size = Vector2(14, 12)
+
+[node name="Wisp" type="CharacterBody2D"]
+collision_layer = 4
+collision_mask = 3
+motion_mode = 1
+script = ExtResource("1_enemy")
+kind = 1
+enemy_type = &"ash_wisp"
+display_name = "Пепельный огонёк"
+max_health = 16
+attack_damage = 5
+xp_reward = 14
+gold_reward = 7
+loot_item = "mana_potion"
+loot_chance = 0.35
+speed_multiplier = 1.5
+attack_cooldown_multiplier = 0.7
+windup_multiplier = 0.7
+charge_on_sight = false
+sprite_tint = Color(0.65, 0.85, 1, 1)
+projectile_scene = ExtResource("4_proj")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture = ExtResource("2_tex")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("body_shape")
+
+[node name="HealthComponent" type="Node" parent="."]
+script = ExtResource("3_health")
+max_health = 16
+
+[node name="AttackHitbox" type="Area2D" parent="."]
+collision_layer = 16
+collision_mask = 2
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="AttackHitbox"]
+shape = SubResource("attack_shape")
+disabled = true
+
+[node name="Telegraph" type="ColorRect" parent="."]
+offset_left = -8.0
+offset_top = -8.0
+offset_right = 8.0
+offset_bottom = 8.0
+color = Color(0.55, 0.8, 1, 0.5)
+visible = false
+
+[node name="Muzzle" type="Marker2D" parent="."]
+position = Vector2(9, 0)

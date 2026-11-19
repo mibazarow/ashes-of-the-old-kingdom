@@ -193,6 +193,7 @@ func _run() -> void:
 	print("== scene smoke ==")
 	await _test_scene_loads()
 	await _test_world_enemy_composition()
+	await _test_enemy_variants()
 
 	print("== map panel ==")
 	await _test_map_panel()
@@ -262,7 +263,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 40, "every test group ran to completion (got %d/40)" % completed.size())
+	_check(completed.size() == 41, "every test group ran to completion (got %d/41)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1387,6 +1388,224 @@ func _test_world_enemy_composition() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["world_composition"] = true
+
+
+## Six behaviour exports were added to the shared `Enemy` script for the two new
+## forest types (roadmap stage D, spec §10). This group proves three things at
+## once: the world really spawns both of them and on ground an enemy can stand
+## on; the exports actually change how the new enemies move and die rather than
+## only their hit points; and the wolf and the cultist still read every default,
+## which is the regression risk of putting a knob on a shared script. The last
+## blocks measure behaviour on a bare arena instead of reading numbers back.
+func _test_enemy_variants() -> void:
+	gs.reset()
+	DamageResolver.reset()
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var boars: Array[Node] = []
+	var wisps: Array[Node] = []
+	var wolves: Array[Node] = []
+	var archers: Array[Node] = []
+	for node in get_nodes_in_group("enemy"):
+		var type: Variant = node.get("enemy_type")
+		if type == &"ash_boar":
+			boars.append(node)
+		elif type == &"ash_wisp":
+			wisps.append(node)
+		elif type == &"ash_wolf":
+			wolves.append(node)
+		elif type == &"ash_archer":
+			archers.append(node)
+
+	_check(boars.size() == 2, "world spawns exactly 2 ash_boar (got %d)" % boars.size())
+	_check(wisps.size() == 2, "world spawns exactly 2 ash_wisp (got %d)" % wisps.size())
+	# The two new types must not disturb the composition the quest and the other
+	# groups depend on: five wolves and the single cultist.
+	_check(wolves.size() >= 5, "world still spawns at least 5 wolves (got %d)" % wolves.size())
+	_check(archers.size() == 1 and String(archers[0].name) == "ArcherA",
+		"world still spawns exactly one cultist named ArcherA")
+
+	# Both new spawns go through `_find_walkable_near`, so neither may end up on
+	# stone or in a tree cluster. The tile is read back through the public Forest
+	# API rather than assumed from the anchor.
+	var new_spawns: Array[Node] = []
+	new_spawns.append_array(boars)
+	new_spawns.append_array(wisps)
+	var solid_spawns := 0
+	for node: Node in new_spawns:
+		var body := node as Node2D
+		var tile := Vector2i(
+			floori(body.global_position.x / 16.0),
+			floori(body.global_position.y / 16.0)
+		)
+		var cell := String(world.call("cell_at", tile)) if world != null else ""
+		if cell != "." and cell != ",":
+			solid_spawns += 1
+			print("      %s stands on %s = '%s'" % [String(node.name), str(tile), cell])
+	_check(solid_spawns == 0, "every new enemy stands on a walkable tile (%d on solid)" % solid_spawns)
+
+	var boar: Node = boars[0] if not boars.is_empty() else null
+	var wisp: Node = wisps[0] if not wisps.is_empty() else null
+	var wolf: Node = wolves[0] if not wolves.is_empty() else null
+	var cultist: Node = archers[0] if not archers.is_empty() else null
+	_check(boar != null and wisp != null, "a boar and a wisp are available to inspect")
+	if boar != null and wisp != null and wolf != null and cultist != null:
+		# The kinds are compared against the two original enemies rather than
+		# against `Enemy.Kind`: naming that class here would drag enemy.gd into
+		# the suite's compile graph, and its autoloads do not exist under --script.
+		_check(int(boar.get("kind")) == int(wolf.get("kind")), "the boar fights melee like a wolf")
+		_check(int(wisp.get("kind")) == int(cultist.get("kind")), "the wisp fights ranged like a cultist")
+		_check(float(boar.get("speed_multiplier")) > 1.0,
+			"the boar is built to outrun a wolf (speed_multiplier=%.2f)" % float(boar.get("speed_multiplier")))
+		_check(bool(boar.get("charge_on_sight")), "the boar charges on sight")
+		_check(not bool(wisp.get("charge_on_sight")), "the wisp does not charge, it keeps its distance")
+		_check(float(boar.get("windup_multiplier")) > 1.0, "the boar telegraphs longer than a wolf")
+		_check(float(boar.get("attack_cooldown_multiplier")) > 1.0,
+			"the boar pays for its heavy swing with a longer pause")
+		_check(float(wisp.get("windup_multiplier")) < 1.0, "the wisp telegraphs shorter than a cultist")
+		_check(float(wisp.get("attack_cooldown_multiplier")) < 1.0,
+			"the wisp shoots more often than a cultist")
+		_check(boar.get("projectile_scene") == null, "the melee boar carries no projectile")
+		_check(wisp.get("projectile_scene") != null, "the wisp carries the shared projectile scene")
+		_check(int(boar.get("max_health")) == 46, "the boar pool is 46 hp")
+		_check(int(wisp.get("max_health")) == 16, "the wisp pool is 16 hp")
+		_check(String(boar.get("loot_item")) == "wolf_fang"
+			and String(wisp.get("loot_item")) == "mana_potion",
+			"both new enemies drop items that already exist in the data")
+
+		# The tint is the only thing separating a reused placeholder sprite from
+		# its original owner, so it has to be on the sprite from the first frame.
+		var boar_sprite := boar.get_node_or_null("Sprite2D") as Sprite2D
+		var wisp_sprite := wisp.get_node_or_null("Sprite2D") as Sprite2D
+		_check(boar_sprite != null
+			and (boar.get("sprite_tint") as Color).is_equal_approx(boar_sprite.modulate),
+			"the boar sprite carries its exported tint at start")
+		_check(wisp_sprite != null
+			and (wisp.get("sprite_tint") as Color).is_equal_approx(wisp_sprite.modulate),
+			"the wisp sprite carries its exported tint at start")
+		_check(boar_sprite != null and wisp_sprite != null
+			and not boar_sprite.modulate.is_equal_approx(wisp_sprite.modulate),
+			"the two new enemies do not read as the same tinted sprite")
+
+	if wolf != null:
+		_check_original_enemy_defaults("wolf", wolf)
+	if cultist != null:
+		_check_original_enemy_defaults("cultist", cultist)
+
+	scene.queue_free()
+	await process_frame
+	await process_frame
+
+	# --- behaviour, measured on a bare arena ----------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player_scene: PackedScene = load("res://scenes/player/player.tscn")
+	var player := player_scene.instantiate() as Node2D
+	player.position = Vector2.ZERO
+	arena.add_child(player)
+	var boar_scene: PackedScene = load("res://scenes/enemies/boar.tscn")
+	var wisp_scene: PackedScene = load("res://scenes/enemies/wisp.tscn")
+	var wolf_scene: PackedScene = load("res://scenes/enemies/wolf.tscn")
+
+	# Same distance from the player on opposite sides, so both acquire it on the
+	# same frame, neither can block the other on the way in, and both are walked
+	# by the same physics delta. The first frame only turns IDLE into CHASE, so
+	# three of the four frames are real movement for both — the comparison holds
+	# whatever the actual tick length turns out to be.
+	var charger := boar_scene.instantiate() as Node2D
+	charger.position = Vector2(0, -60)
+	var baseline := wolf_scene.instantiate() as Node2D
+	baseline.position = Vector2(0, 60)
+	arena.add_child(charger)
+	arena.add_child(baseline)
+	await process_frame
+
+	var charger_start := charger.global_position
+	var baseline_start := baseline.global_position
+	for i in range(4):
+		await physics_frame
+	var charger_moved := charger.global_position.distance_to(charger_start)
+	var baseline_moved := baseline.global_position.distance_to(baseline_start)
+	_check(charger_moved > baseline_moved * 1.15,
+		"the boar closes on the player faster than a wolf over the same frames (%.2f px vs %.2f px)" % [charger_moved, baseline_moved])
+	# Out of the way before the next blocks: two live chasers would beat the
+	# player down while the slower kiting and firing checks are still stepping.
+	charger.queue_free()
+	baseline.queue_free()
+	await process_frame
+	await process_frame
+
+	# A boar eats exactly its own pool: 46 hp in 10 hp bites is five hits, the
+	# fifth one lands on zero, and the kill is credited to the new type.
+	var tank := boar_scene.instantiate() as Node2D
+	tank.position = Vector2(400, 400)
+	arena.add_child(tank)
+	var tank_health := tank.get_node("HealthComponent") as HealthComponent
+	var hits := 0
+	while not tank_health.is_dead and hits < 20:
+		hits += 1
+		tank.receive_damage(10, {"damage": 10, "hit_id": "variants-%d" % hits})
+	_check(hits == 5, "a boar dies to exactly 5 hits of 10 damage (got %d)" % hits)
+	_check(tank_health.current_health == 0, "the boar hp lands exactly on zero")
+	_check(int(gs.call("kill_count", "ash_boar")) == 1, "the boar death is credited to ash_boar")
+
+	# The wisp kites: inside the ranged minimum distance it backs off, which is
+	# the one thing a wolf never does. It cannot fire there either, so the only
+	# movement it can show is the retreat.
+	var kite := wisp_scene.instantiate() as Node2D
+	kite.position = Vector2(40, 0)
+	arena.add_child(kite)
+	await process_frame
+	var kite_from := kite.global_position.distance_to(player.global_position)
+	for i in range(6):
+		await physics_frame
+	var kite_to := kite.global_position.distance_to(player.global_position)
+	_check(kite_to > kite_from,
+		"the wisp backs away inside the ranged minimum distance (%.1f -> %.1f px)" % [kite_from, kite_to])
+
+	# And at a distance it really is the ranged kind: it fires the shared
+	# projectile, exactly like the cultist does in the `ranged` group.
+	gs.hp = gs.max_hp
+	var shooter := wisp_scene.instantiate() as Node2D
+	shooter.position = Vector2(90, 0)
+	arena.add_child(shooter)
+	var saw_shot := false
+	for i in range(180):
+		await physics_frame
+		for child in arena.get_children():
+			if child is Area2D and child.get_script() != null and String(child.get_script().resource_path).ends_with("projectile.gd"):
+				saw_shot = true
+		if saw_shot:
+			break
+	_check(saw_shot, "the wisp fires a projectile")
+
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	completed["enemy_variants"] = true
+
+
+## The wolf and the cultist are built from the same script that grew the new
+## behaviour exports, so every knob has to read as if it were never added. Called
+## once per original enemy type; the label prefix keeps the two apart in the log.
+func _check_original_enemy_defaults(who: String, node: Node) -> void:
+	_check(absf(float(node.get("speed_multiplier")) - 1.0) < 0.0001,
+		"%s keeps speed_multiplier 1.0" % who)
+	_check(absf(float(node.get("attack_cooldown_multiplier")) - 1.0) < 0.0001,
+		"%s keeps attack_cooldown_multiplier 1.0" % who)
+	_check(absf(float(node.get("windup_multiplier")) - 1.0) < 0.0001,
+		"%s keeps windup_multiplier 1.0" % who)
+	_check(not bool(node.get("charge_on_sight")), "%s keeps charge_on_sight false" % who)
+	_check((node.get("sprite_tint") as Color) == Color.WHITE, "%s keeps a white tint" % who)
+	var spr := node.get_node_or_null("Sprite2D") as Sprite2D
+	_check(spr != null and spr.modulate == Color.WHITE, "%s sprite is untinted" % who)
 
 
 ## Zone map on M: explored-only tiles, fog, landmarks, and input blocking.
