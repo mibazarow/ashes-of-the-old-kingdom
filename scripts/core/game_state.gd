@@ -97,6 +97,15 @@ var equipment: Dictionary = _default_equipment()
 ## Quick slots 1–4 (index 0..3); an empty string means the slot is unassigned.
 var quick_slots: Array[String] = ["health_potion", "mana_potion", "", ""]
 
+## Permanent equipment upgrades from the smith (spec §14.4): item id -> a block of
+## stat -> bonus, e.g. `{"iron_sword": {"attack": 2}}`. Keyed by item id, not by
+## the worn instance, because the game has no per-instance item identity: the
+## smith tempers the *type*, and every sword of that type carries the tempering.
+## `total_bonus()` reads this dictionary on the fly, so the bonus is rebuilt from
+## the slots on every read — equipping, unequipping and re-equipping cannot stack
+## it, and there is exactly one place that decides what an upgrade is worth.
+var item_upgrades: Dictionary = {}
+
 ## Skills the player knows (spec §9). Default loadout: one projectile from each
 ## damage school plus the nature heal. selected_skill is what the right mouse
 ## button casts.
@@ -134,6 +143,7 @@ func reset() -> void:
 	gold = 0
 	inventory = []
 	equipment = _default_equipment()
+	item_upgrades = {}
 	quick_slots = _default_quick_slots()
 	known_skills = _default_known_skills()
 	selected_skill = _default_selected_skill()
@@ -463,12 +473,15 @@ func total_defense() -> int:
 
 ## The single aggregation helper behind every equipment total. Sums one numeric
 ## item field (`attack`, `defense`, `speed_bonus`, `resist_bonus`) over the items
-## currently worn, in `EQUIPMENT_SLOTS` order.
+## currently worn, in `EQUIPMENT_SLOTS` order, plus the permanent smith upgrade of
+## the same stat for the same item (`item_upgrades`, spec §14.4).
 ##
 ## An id that is no longer in the data contributes 0 instead of failing the load,
 ## and a non-numeric field contributes 0 instead of throwing, so a hand-edited
 ## item cannot take combat down with it. An item contributes once per slot it
-## occupies, which is why `equip()` refuses to wear the same item twice.
+## occupies, which is why `equip()` refuses to wear the same item twice — and the
+## upgrade term is read from the dictionary rather than accumulated anywhere, so
+## the same tempering is counted once per worn item and never twice.
 func total_bonus(stat: String) -> int:
 	var total := 0
 	for slot: String in EQUIPMENT_SLOTS:
@@ -478,7 +491,54 @@ func total_bonus(stat: String) -> int:
 		var raw: Variant = ItemDB.get_item(item_id).get(stat, 0)
 		if raw is int or raw is float:
 			total += int(raw)
+		total += upgrade_bonus(item_id, stat)
 	return total
+
+
+## The permanent upgrade one item carries for one stat (spec §14.4), or 0 when it
+## was never upgraded or the block does not name this stat. A hand-edited
+## non-number reads as 0 rather than poisoning the total.
+func upgrade_bonus(item_id: String, stat: String) -> int:
+	var block: Variant = item_upgrades.get(item_id, null)
+	if not (block is Dictionary):
+		return 0
+	var raw: Variant = (block as Dictionary).get(stat, 0)
+	return int(raw) if (raw is int or raw is float) else 0
+
+
+## Whether one item already carries this upgrade stat. `CraftManager` asks this
+## before it charges anything, so the refusal is a decision made up front rather
+## than a half-applied tempering discovered afterwards.
+func has_item_upgrade(item_id: String, stat: String) -> bool:
+	var block: Variant = item_upgrades.get(item_id, null)
+	return block is Dictionary and (block as Dictionary).has(stat)
+
+
+## Records a permanent upgrade block on one item (spec §14.4) and recomputes what
+## the bonus feeds. All-or-nothing: the block is refused, writing nothing, when
+## the item already carries any of its stats or any value is not a positive
+## number. That refusal is the idempotency gate — the same tempering cannot be
+## applied twice, so a repeated craft can never stack the bonus — and it is why
+## the bonus is stored as a value rather than as a counter of crafts.
+func apply_item_upgrade(item_id: String, block: Dictionary) -> bool:
+	if item_id == "" or block.is_empty():
+		return false
+	var entry: Dictionary = {}
+	var current: Variant = item_upgrades.get(item_id, null)
+	if current is Dictionary:
+		entry = (current as Dictionary).duplicate(true)
+	for stat: String in block:
+		var raw: Variant = block[stat]
+		if not (raw is int or raw is float) or int(raw) < 1:
+			return false
+		if entry.has(stat):
+			return false
+	for stat: String in block:
+		entry[stat] = int(entry.get(stat, 0)) + int(block[stat])
+	item_upgrades[item_id] = entry
+	recompute_derived()
+	EventBus.equipment_changed.emit()
+	return true
 
 
 # --- inventory ----------------------------------------------------------------
@@ -735,6 +795,7 @@ func to_dict() -> Dictionary:
 		"gold": gold,
 		"inventory": inventory.duplicate(true),
 		"equipment": equipment.duplicate(true),
+		"item_upgrades": item_upgrades.duplicate(true),
 		"quick_slots": quick_slots.duplicate(),
 		"known_skills": known_skills.duplicate(),
 		"selected_skill": selected_skill,
@@ -765,6 +826,7 @@ func from_dict(d: Dictionary) -> void:
 		if slot is Dictionary and slot.has("id"):
 			inventory.append({"id": String(slot["id"]), "amount": int(slot.get("amount", 1))})
 	equipment = _restore_equipment(d.get("equipment", null))
+	item_upgrades = _restore_item_upgrades(d.get("item_upgrades", null))
 	quick_slots = _restore_quick_slots(d.get("quick_slots", null))
 	# Skills are tolerant of a missing key (saves written before spec §9) and of
 	# unknown ids (a skill removed from the data), so no schema bump is needed.
@@ -794,6 +856,36 @@ func _restore_equipment(raw: Variant) -> Dictionary:
 		var value: Variant = block.get(slot, "")
 		if value is String and String(value) != "":
 			restored[slot] = String(value)
+	return restored
+
+
+## A save written before the smith existed has no `item_upgrades` key at all, and
+## a hand-edited one may hold anything, so the block is rebuilt entry by entry:
+## an item id with no dictionary behind it, a stat that is not a number and a
+## bonus that does not raise the stat are each dropped on their own while the
+## good entries in the same save survive. Nothing is clamped upward here — the
+## recipes are the only thing that should ever write a bonus, and a save is
+## allowed to carry a tempering the current data no longer offers.
+func _restore_item_upgrades(raw: Variant) -> Dictionary:
+	var restored: Dictionary = {}
+	if not (raw is Dictionary):
+		return restored
+	var block: Dictionary = raw as Dictionary
+	for raw_id: Variant in block:
+		var item_id := String(raw_id)
+		var entry: Variant = block[raw_id]
+		if item_id == "" or not (entry is Dictionary):
+			continue
+		var clean: Dictionary = {}
+		var stats: Dictionary = entry as Dictionary
+		for raw_stat: Variant in stats:
+			var stat := String(raw_stat)
+			var value: Variant = stats[raw_stat]
+			if stat == "" or not (value is int or value is float) or int(value) < 1:
+				continue
+			clean[stat] = int(value)
+		if not clean.is_empty():
+			restored[item_id] = clean
 	return restored
 
 

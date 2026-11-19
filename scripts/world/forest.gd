@@ -40,6 +40,7 @@ var _last_visited_tile := Vector2i(-9999, -9999)
 ## without fragile path lookups. Populated in _spawn_actors.
 var _npc_node: Node2D
 var _merchant_node: Node2D
+var _smith_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
@@ -49,6 +50,18 @@ var _trap_node: Node2D
 ## (see _find_walkable_near), so the spawn stays deterministic and never lands
 ## inside a tree cluster.
 const SPEAR_CHEST_ANCHOR := Vector2i(12, 24)
+
+## Anchor for the smith's forge, on the road just east of the village clearing.
+## He is kept well outside Edrik's interact radius on purpose (see
+## `_find_walkable_away`): the debug bot walks up to Edrik and presses E on the
+## NEAREST interactable, so a forge within reach would steal the quest dialogue
+## and the turn-in and break every quest bot.
+const SMITH_ANCHOR := Vector2i(12, 12)
+
+## Tile distance the smith must keep from the quest-giver, the merchant and the
+## spawn point. 4 tiles is 64 px against a 26 px interact radius and an 18 px bot
+## stop tolerance, so standing at Edrik can never put the forge inside reach.
+const SMITH_MIN_SEPARATION := 4
 
 
 func _ready() -> void:
@@ -115,6 +128,7 @@ func landmarks() -> Array[Dictionary]:
 	for entry: Array in [
 		["Edrik", "npc", _npc_node],
 		["Yorek", "npc", _merchant_node],
+		["Bran", "npc", _smith_node],
 		["Chest", "chest", _chest_node],
 		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
@@ -252,6 +266,30 @@ func _find_walkable_near(anchor: Vector2i, radius: int) -> Vector2i:
 	return anchor
 
 
+## The same outward row-major scan, but a tile that lies within `min_distance`
+## tiles of any point in `avoid` (Chebyshev, so the diagonal counts as close too)
+## is skipped. The smith needs this where the merchant does not: the player
+## interacts with the NEAREST interactable in range, and the debug bot presses E
+## the moment it is within its stop tolerance of Edrik, so the forge has to sit
+## outside that reach rather than merely on a free tile. Deterministic, like every
+## other spawn here: the scan order depends only on the fixed seed and the anchor.
+func _find_walkable_away(anchor: Vector2i, radius: int, avoid: Array[Vector2i], min_distance: int) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			var ch := cell_at(t)
+			if ch != "." and ch != ",":
+				continue
+			var too_close := false
+			for point: Vector2i in avoid:
+				if absi(t.x - point.x) < min_distance and absi(t.y - point.y) < min_distance:
+					too_close = true
+					break
+			if not too_close:
+				return t
+	return anchor
+
+
 func _spawn_actors() -> void:
 	player = _instantiate(PLAYER_SCENE, _tile_center(4, 9), "Player")
 	player.name = "Player"
@@ -274,6 +312,20 @@ func _spawn_actors() -> void:
 	merchant.position = _tile_center(3, 11)
 	add_child(merchant)
 	_merchant_node = merchant
+
+	# The smith joins last among the village NPCs, after Edrik and Yorek, for the
+	# same reason the merchant does: the debug bot picks the FIRST node of the
+	# `interactable` group, so Edrik must stay first or the quest bots would open a
+	# bench instead of the dialogue. His tile is chosen by `_find_walkable_away` so
+	# that he is also outside the interact radius of anyone standing at Edrik.
+	var smith := Smith.new()
+	smith.name = "Bran"
+	smith.sprite_texture = load("res://assets/sprites/npc.png")
+	var smith_tile := _find_walkable_away(
+		SMITH_ANCHOR, 4, [Vector2i(7, 9), Vector2i(3, 11), Vector2i(4, 9)], SMITH_MIN_SEPARATION)
+	smith.position = _tile_center(smith_tile.x, smith_tile.y)
+	add_child(smith)
+	_smith_node = smith
 
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"

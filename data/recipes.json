@@ -1,0 +1,54 @@
+{
+  "recipes": {
+    "potion_health": {
+      "name": "Настой здоровья",
+      "station": "herbalist",
+      "output": "health_potion",
+      "output_amount": 1,
+      "gold": 5,
+      "materials": {
+        "wolf_fang": 2
+      },
+      "unlock_flag": ""
+    },
+    "potion_mana": {
+      "name": "Настой маны",
+      "station": "herbalist",
+      "output": "mana_potion",
+      "output_amount": 1,
+      "gold": 5,
+      "materials": {
+        "wolf_fang": 1
+      },
+      "unlock_flag": "recipe_mana_known"
+    },
+    "temper_sword": {
+      "name": "Закалка меча",
+      "station": "smith",
+      "output": "iron_sword",
+      "output_amount": 1,
+      "gold": 30,
+      "materials": {
+        "wolf_fang": 3
+      },
+      "unlock_flag": "recipe_temper_known",
+      "upgrade": {
+        "attack": 2
+      }
+    },
+    "reinforce_armor": {
+      "name": "Усиление доспеха",
+      "station": "smith",
+      "output": "leather_armor",
+      "output_amount": 1,
+      "gold": 25,
+      "materials": {
+        "wolf_fang": 2
+      },
+      "unlock_flag": "",
+      "upgrade": {
+        "defense": 1
+      }
+    }
+  }
+}

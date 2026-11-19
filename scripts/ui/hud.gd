@@ -63,6 +63,8 @@ var _settings_panel: SettingsPanel
 var _character_panel: CharacterPanel
 var _shop_panel: ShopPanel
 var _shop_manager: ShopManager
+var _craft_panel: CraftPanel
+var _craft_manager: CraftManager
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
@@ -73,6 +75,7 @@ var _settings_open := false
 var _settings_just_closed := false
 var _character_open := false
 var _shop_open := false
+var _craft_open := false
 var _tab_held: bool = false
 
 
@@ -211,6 +214,7 @@ func _build_ui() -> void:
 	_build_map_panel()
 	_build_character_panel()
 	_build_shop_panel()
+	_build_craft_panel()
 
 
 ## The character screen lives in its own script (like SettingsPanel): it owns
@@ -230,6 +234,17 @@ func _build_shop_panel() -> void:
 	_shop_panel.name = "ShopPanel"
 	_shop_panel.visible = false
 	_root.add_child(_shop_panel)
+
+
+## The craft bench lives in its own script (like ShopPanel): it owns its layout
+## and centring, and hud.gd only opens, closes and gates it. The panel is given
+## the station's CraftManager when it opens, so it never builds its own and never
+## learns a recipe from anywhere but data/recipes.json.
+func _build_craft_panel() -> void:
+	_craft_panel = CraftPanel.new()
+	_craft_panel.name = "CraftPanel"
+	_craft_panel.visible = false
+	_root.add_child(_craft_panel)
 
 
 ## Rebinding lives in its own script (like MapPanel): it has its own raw-event
@@ -689,6 +704,10 @@ func _toggle_character() -> void:
 			_close_map()
 		if _settings_open:
 			_close_settings()
+		# The craft bench is a sibling modal too: it owns the screen and must not
+		# stay open under the character panel.
+		if _craft_open:
+			close_craft()
 		# The pause menu advertises "C — Персонаж", so C can arrive while it is
 		# on screen. Hide it, otherwise the two centred panels overlap.
 		if _paused:
@@ -699,7 +718,7 @@ func _toggle_character() -> void:
 			_character_panel.visible = true
 			_character_panel.open()
 	GameState.ui_blocking = _character_open or _inventory_open or _dialogue_open \
-			or _journal_open or _paused or _map_open or _settings_open or _shop_open
+			or _journal_open or _paused or _map_open or _settings_open or _shop_open or _craft_open
 
 
 ## One close path for the character screen, so every sibling modal (inventory,
@@ -712,7 +731,7 @@ func _close_character() -> void:
 	if _character_panel != null:
 		_character_panel.visible = false
 	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _shop_open
+			or _paused or _map_open or _settings_open or _shop_open or _craft_open
 
 
 ## The character screen owns the input while it is open: the cursor walks the
@@ -757,6 +776,8 @@ func open_shop(shop_manager: ShopManager) -> void:
 		_toggle_journal()
 	if _map_open:
 		_close_map()
+	if _craft_open:
+		close_craft()
 	_close_character()
 	if _paused:
 		_close_pause()
@@ -777,7 +798,7 @@ func close_shop() -> void:
 	if _shop_panel != null:
 		_shop_panel.visible = false
 	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _character_open
+			or _paused or _map_open or _settings_open or _character_open or _craft_open
 
 
 func is_shop_open() -> bool:
@@ -791,6 +812,82 @@ func open_shop_for_shot() -> void:
 	if _shop_open:
 		return
 	open_shop(ShopManager.new(GameState))
+
+
+## Opens the craft bench with the station's own manager. Like the shop it closes
+## every panel it could visually overlap first, then takes the screen. Opening
+## crafts nothing: the manager is only handed to the panel, which acts on E.
+func open_craft(craft_manager: CraftManager) -> void:
+	if craft_manager == null:
+		return
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	if _shop_open:
+		close_shop()
+	_close_character()
+	if _paused:
+		_close_pause()
+	_craft_manager = craft_manager
+	_craft_open = true
+	if _craft_panel != null:
+		_craft_panel.visible = true
+		_craft_panel.open(craft_manager)
+	GameState.ui_blocking = true
+
+
+func close_craft() -> void:
+	if not _craft_open:
+		return
+	_craft_open = false
+	if _craft_panel != null:
+		_craft_panel.visible = false
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
+			or _paused or _map_open or _settings_open or _character_open or _shop_open
+
+
+func is_craft_open() -> bool:
+	return _craft_open
+
+
+## Screenshot hook: builds a throwaway manager bound to the smith's bench from the
+## live state so the forge can be captured without the NPC in frame. The real path
+## is `open_craft`, which takes the manager the smith itself created.
+func open_craft_for_shot() -> void:
+	if _craft_open:
+		return
+	open_craft(CraftManager.new(GameState, "smith"))
+
+
+# Read-only views of the craft panel, so a test or a screenshot probe can read
+# the recipe list, the promised result and the refusal line without reaching into
+# the panel's private node tree — the same contract `inventory_row_texts` gives.
+
+func craft_row_texts() -> PackedStringArray:
+	return _craft_panel.row_texts() if _craft_panel != null else PackedStringArray()
+
+
+func craft_material_texts() -> PackedStringArray:
+	return _craft_panel.material_texts() if _craft_panel != null else PackedStringArray()
+
+
+func craft_detail_text() -> String:
+	return _craft_panel.detail_text() if _craft_panel != null else ""
+
+
+func craft_reason_text() -> String:
+	return _craft_panel.reason_text() if _craft_panel != null else ""
+
+
+## Parks the craft cursor on one row without simulating keys (test/screenshot).
+func craft_select_row(index: int) -> void:
+	if _craft_panel != null:
+		_craft_panel.select_row(index)
 
 
 ## One line per quick slot: "1: Настой здоровья", empty slots show "—".
@@ -871,7 +968,7 @@ func close_dialogue() -> void:
 		return
 	_dialogue_panel.visible = false
 	_dialogue_open = false
-	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open or _shop_open
+	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open or _shop_open or _craft_open
 	EventBus.dialogue_closed.emit()
 
 
@@ -892,7 +989,7 @@ func _toggle_inventory() -> void:
 	else:
 		_enter_held = false
 	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open or _shop_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open or _shop_open or _craft_open
 
 
 func _toggle_journal() -> void:
@@ -904,7 +1001,7 @@ func _toggle_journal() -> void:
 			_close_character()
 		_refresh_journal()
 	_journal_panel.visible = _journal_open
-	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open or _shop_open
+	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open or _shop_open or _craft_open
 
 
 func _refresh_journal() -> void:
@@ -937,7 +1034,7 @@ func _toggle_pause() -> void:
 	_paused = not _paused
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open or _craft_open
 	EventBus.game_paused.emit(_paused)
 
 
@@ -996,6 +1093,26 @@ func _process(_delta: float) -> void:
 				_shop_panel.move_selection(shop_delta)
 			if InputSource.is_action_just_pressed(&"interact"):
 				_shop_panel.activate()
+		return
+	# The craft bench owns the input while it is open, exactly like the shop: Esc
+	# closes it (never pausing the game underneath), the movement actions walk the
+	# recipe list and E crafts one item. Every other key is swallowed, so a player
+	# at the forge cannot open the inventory or the map over the bench, and the
+	# panel — not the HUD — decides what E is worth through the CraftManager.
+	if _craft_open:
+		if InputSource.is_action_just_pressed(&"pause"):
+			close_craft()
+			return
+		if _craft_panel != null:
+			var craft_delta := 0
+			if InputSource.is_action_just_pressed(&"move_up"):
+				craft_delta -= 1
+			if InputSource.is_action_just_pressed(&"move_down"):
+				craft_delta += 1
+			if craft_delta != 0:
+				_craft_panel.move_selection(craft_delta)
+			if InputSource.is_action_just_pressed(&"interact"):
+				_craft_panel.activate()
 		return
 	# Esc belongs to the character screen while it is open: it closes the panel
 	# instead of pausing the game underneath.
@@ -1079,6 +1196,8 @@ func _open_map() -> void:
 		_toggle_inventory()
 	if _journal_open:
 		_toggle_journal()
+	if _craft_open:
+		close_craft()
 	_close_character()
 	_map_open = true
 	if _map_panel != null:
@@ -1091,7 +1210,7 @@ func _close_map() -> void:
 	_map_open = false
 	if _map_panel != null:
 		_map_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open or _shop_open
+	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open or _shop_open or _craft_open
 
 
 func is_map_open() -> bool:
@@ -1118,7 +1237,7 @@ func _close_settings() -> void:
 	_settings_just_closed = true
 	_settings_panel.visible = false
 	_pause_panel.visible = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open
+	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open or _craft_open
 
 
 func is_settings_open() -> bool:

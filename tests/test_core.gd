@@ -245,6 +245,9 @@ func _run() -> void:
 	print("== shop ==")
 	await _test_shop()
 
+	print("== craft ==")
+	await _test_craft()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -253,7 +256,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 37, "every test group ran to completion (got %d/37)" % completed.size())
+	_check(completed.size() == 38, "every test group ran to completion (got %d/38)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -4030,6 +4033,372 @@ func _test_shop() -> void:
 	gs.reset()
 	qm.reset()
 	completed["shop"] = true
+
+
+## Crafting (spec §14.4). Three halves, in the order the risk sits in: the pure
+## `CraftManager` rules against the live GameState with no scene (including the
+## permanent smith upgrade and its idempotency), then the same state through a
+## save round-trip, then the bench through the real scene and the same InputSource
+## a human uses. Like the shop group, every refusal is checked to leave gold,
+## materials and inventory exactly as they were — a craft that half-applies is the
+## bug this whole section exists to prevent. GameState, ui_blocking, the pause
+## tree, slot 2 and the scene are reset at both ends so no later group inherits an
+## open panel, an upgrade or a save.
+func _test_craft() -> void:
+	gs.reset()
+	qm.reset()
+	paused = false
+	_clear_slot(2)
+
+	# --- pure logic against the live GameState, no scene ---------------------
+	var craft = load("res://scripts/craft/craft_manager.gd").new(gs)
+	var all_ids: Array = craft.recipe_ids()
+	_check(all_ids.size() == 4, "data/recipes.json defines 4 recipes (got %d)" % all_ids.size())
+	_check(craft.station_recipes("smith").size() == 2, "the smith bench has 2 recipes")
+	_check(craft.station_recipes("herbalist").size() == 2, "the herbalist bench has 2 recipes")
+	_check(craft.station_recipes("alchemy").is_empty(), "an unknown station lists no recipe")
+	_check(craft.station_recipes("").is_empty(), "no station asks for nothing rather than everything")
+	_check(not craft.station_recipes("smith").has("potion_health"),
+		"the smith bench does not list the herbalist's recipe")
+
+	# every refusal reason the spec names
+	_check(String(craft.can_craft("no_such_recipe").get("reason")) == "unknown_recipe",
+		"can_craft unknown_recipe")
+	_check(String(craft.craft("no_such_recipe").get("reason")) == "unknown_recipe",
+		"craft refuses an unknown recipe")
+	_check(not craft.is_unlocked("potion_mana"), "potion_mana starts locked")
+	_check(String(craft.can_craft("potion_mana").get("reason")) == "locked", "can_craft locked")
+	gs.gold = 4
+	gs.add_item("wolf_fang", 4)
+	_check(String(craft.can_craft("potion_health").get("reason")) == "not_enough_gold",
+		"can_craft not_enough_gold")
+	gs.gold = 5
+	gs.remove_item("wolf_fang", 4)
+	_check(String(craft.can_craft("potion_health").get("reason")) == "missing_material",
+		"can_craft missing_material")
+	gs.add_item("wolf_fang", 4)
+	gs.add_item("health_potion", 99)
+	_check(String(craft.can_craft("potion_health").get("reason")) == "no_space",
+		"can_craft no_space at the 99 stack cap of the output")
+
+	# a successful craft moves gold, materials and the result in one go
+	gs.reset()
+	craft = load("res://scripts/craft/craft_manager.gd").new(gs)
+	gs.gold = 20
+	gs.add_item("wolf_fang", 3)
+	var made: Dictionary = craft.craft("potion_health")
+	_check(bool(made.get("ok")), "crafting potion_health succeeds")
+	_check(gs.gold == 15, "the craft spent exactly its 5 gold (gold=%d)" % gs.gold)
+	_check(gs.count_item("wolf_fang") == 1, "the craft consumed exactly 2 claws (got %d)" % gs.count_item("wolf_fang"))
+	_check(gs.count_item("health_potion") == 1, "the craft produced the output item")
+	_check(String(made.get("output")) == "health_potion", "the result names the produced item")
+	_check(int(made.get("gold_spent")) == 5, "the result reports the 5 gold it spent")
+
+	# a failed craft leaves everything it would have touched untouched: the gold is
+	# sufficient here, only the claws are not, so a craft that paid before it
+	# checked would be caught by exactly these four assertions
+	gs.remove_item("wolf_fang", 1)
+	var gold_before: int = gs.gold
+	var fangs_before: int = gs.count_item("wolf_fang")
+	var potions_before: int = gs.count_item("health_potion")
+	var inv_before: int = gs.inventory.size()
+	var refused: Dictionary = craft.craft("potion_health")
+	_check(not bool(refused.get("ok")), "the second craft is refused for want of material")
+	_check(String(refused.get("reason")) == "missing_material", "the refusal names missing_material")
+	_check(gs.gold == gold_before, "a refused craft spent no gold")
+	_check(gs.count_item("wolf_fang") == fangs_before, "a refused craft consumed no material")
+	_check(gs.count_item("health_potion") == potions_before, "a refused craft produced nothing")
+	_check(gs.inventory.size() == inv_before, "a refused craft left the inventory slots untouched")
+	_check(int(refused.get("gold_spent")) == 0, "a refused craft reports zero gold spent")
+
+	# preview is what the panel shows before confirming: fee, need/have, result
+	gs.add_item("wolf_fang", 1)
+	var info: Dictionary = craft.preview("potion_health")
+	_check(String(info.get("name")) == "Настой здоровья", "preview names the recipe")
+	_check(int(info.get("gold")) == 5, "preview reports the 5 gold fee")
+	_check(String(info.get("output_name")) == "Настой здоровья", "preview names the produced item")
+	var preview_materials: Dictionary = info.get("materials", {})
+	var fang_entry: Dictionary = preview_materials.get("wolf_fang", {})
+	_check(int(fang_entry.get("need", 0)) == 2 and int(fang_entry.get("have", 0)) == 1,
+		"preview shows the claw need 2 against the 1 actually held")
+	_check(craft.preview("no_such_recipe").get("name") == "", "preview of an unknown recipe is empty")
+
+	# unlock makes a locked recipe craftable, and the unlock is a plain flag so it
+	# rides the save file exactly like a quest flag does
+	gs.reset()
+	craft = load("res://scripts/craft/craft_manager.gd").new(gs)
+	gs.gold = 10
+	gs.add_item("wolf_fang", 2)
+	_check(not bool(craft.craft("potion_mana").get("ok")), "a locked recipe cannot be crafted")
+	_check(not craft.unlock("no_such_recipe"), "unlocking an unknown recipe does nothing")
+	_check(not craft.unlock("potion_health"), "unlocking a recipe with no flag does nothing")
+	_check(craft.unlock("potion_mana"), "unlock reports that it set the flag")
+	_check(craft.is_unlocked("potion_mana"), "the recipe is known after unlock")
+	_check(bool(craft.craft("potion_mana").get("ok")), "the unlocked recipe crafts")
+	_check(gs.count_item("mana_potion") == 1, "the unlocked craft produced the mana potion")
+	var save_res: Dictionary = sm.save_game(2)
+	_check(bool(save_res.get("ok", false)), "craft group saved slot 2")
+	gs.reset()
+	_check(not bool(gs.get_flag("recipe_mana_known", false)), "reset cleared the unlock flag")
+	var load_res: Dictionary = sm.load_game(2)
+	_check(bool(load_res.get("ok", false)), "craft group loaded slot 2")
+	_check(bool(gs.get_flag("recipe_mana_known", false)), "the unlock flag survived the round-trip")
+	_check(craft.is_unlocked("potion_mana"), "the recipe is still known after the round-trip")
+	_check(not craft.is_unlocked("temper_sword"), "the other locked recipe stayed locked")
+
+	# --- the smith upgrade: permanent, exact, idempotent ---------------------
+	gs.reset()
+	var smith_craft = load("res://scripts/craft/craft_manager.gd").new(gs, "smith")
+	gs.set_flag("recipe_temper_known", true)
+	gs.gold = 200
+	gs.add_item("wolf_fang", 8)
+	gs.add_item("iron_sword", 1)
+	gs.equip("iron_sword")
+	var attack_pre: int = gs.total_attack()
+	_check(attack_pre == 11, "an iron sword over strength 5 gives attack 11 (got %d)" % attack_pre)
+	var temper: Dictionary = smith_craft.craft("temper_sword")
+	_check(bool(temper.get("ok")), "temper_sword crafts once")
+	_check(gs.total_attack() == attack_pre + 2,
+		"the tempering raises total_attack by exactly 2 while the sword is worn (%d -> %d)" % [attack_pre, gs.total_attack()])
+	_check(gs.gold == 170, "the tempering charged its 30 gold (gold=%d)" % gs.gold)
+	_check(gs.count_item("wolf_fang") == 5, "the tempering ate its 3 claws (got %d)" % gs.count_item("wolf_fang"))
+	_check(gs.count_item("iron_sword") == 2, "the tempering still handed the sword over (got %d)" % gs.count_item("iron_sword"))
+	_check(gs.upgrade_bonus("iron_sword", "attack") == 2, "the stored upgrade is +2 attack")
+
+	# the second attempt is refused outright, before a coin or a claw moves
+	var gold_2: int = gs.gold
+	var fangs_2: int = gs.count_item("wolf_fang")
+	var swords_2: int = gs.count_item("iron_sword")
+	var attack_2: int = gs.total_attack()
+	var again: Dictionary = smith_craft.craft("temper_sword")
+	_check(not bool(again.get("ok")), "the same tempering cannot be crafted twice")
+	_check(String(again.get("reason")) == "already_upgraded", "the second attempt is refused as already_upgraded")
+	_check(String(smith_craft.can_craft("temper_sword").get("reason")) == "already_upgraded",
+		"can_craft answers already_upgraded before the costs")
+	_check(gs.gold == gold_2, "the refused second tempering spent no gold")
+	_check(gs.count_item("wolf_fang") == fangs_2, "the refused second tempering ate no claws")
+	_check(gs.count_item("iron_sword") == swords_2, "the refused second tempering produced no sword")
+	_check(gs.total_attack() == attack_2, "the refused second tempering added no bonus")
+
+	# the upgrade is permanent: it rides the save, and taking the sword off and on
+	# again must not stack it, because total_bonus rebuilds from the slots
+	var save_2: Dictionary = sm.save_game(2)
+	_check(bool(save_2.get("ok", false)), "upgrade round-trip saved slot 2")
+	gs.reset()
+	var load_2: Dictionary = sm.load_game(2)
+	_check(bool(load_2.get("ok", false)), "upgrade round-trip loaded slot 2")
+	_check(gs.total_attack() == attack_2, "the tempering survived the round-trip (%d)" % gs.total_attack())
+	gs.unequip("weapon")
+	_check(gs.total_attack() == 5, "taking the sword off leaves only the base attack")
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == attack_2, "re-equipping does not double the tempering (%d)" % gs.total_attack())
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == attack_2, "equipping twice in a row still does not double it")
+	_check(smith_craft.is_unlocked("temper_sword"),
+		"the unlock flag the tempering needed rode the same save round-trip")
+
+	# the armor recipe is unlocked from the start and upgrades defense instead
+	gs.reset()
+	smith_craft = load("res://scripts/craft/craft_manager.gd").new(gs, "smith")
+	gs.gold = 100
+	gs.add_item("wolf_fang", 4)
+	gs.add_item("leather_armor", 1)
+	gs.equip("leather_armor")
+	var defense_pre: int = gs.total_defense()
+	_check(smith_craft.is_unlocked("reinforce_armor"), "reinforce_armor needs no unlock flag")
+	_check(bool(smith_craft.craft("reinforce_armor").get("ok")), "reinforce_armor crafts")
+	_check(gs.total_defense() == defense_pre + 1,
+		"the reinforcement raises total_defense by exactly 1 (%d -> %d)" % [defense_pre, gs.total_defense()])
+	_check(String(smith_craft.can_craft("reinforce_armor").get("reason")) == "already_upgraded",
+		"the armor cannot be reinforced twice either")
+
+	# --- the bench through the live scene ------------------------------------
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var hud := scene.get_node_or_null("HUD")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and player != null, "hud and player present for craft panel test")
+	if hud == null or player == null:
+		gs.ui_blocking = false
+		paused = false
+		_clear_slot(2)
+		gs.reset()
+		completed["craft"] = true
+		return
+
+	# the smith joins the interactable group without displacing Edrik, and he is
+	# far enough away that standing at Edrik never reaches him
+	var interactables := get_nodes_in_group("interactable")
+	var prompts: Array[String] = []
+	for n in interactables:
+		if n.has_method("prompt_text"):
+			prompts.append(String(n.call("prompt_text")))
+	_check(interactables.size() >= 3, "at least three interactables (Edrik, Yorek, Bran)")
+	_check(String(interactables[0].name) == "Edrik",
+		"Edrik stays the first interactable so the quest bots never open the bench")
+	_check(prompts.has("Ремесло"), "a station offering Ремесло is in the interactable group")
+
+	var smith: Node = null
+	for n in interactables:
+		if n.has_method("prompt_text") and String(n.call("prompt_text")) == "Ремесло":
+			smith = n
+			break
+	_check(smith != null, "the smith interactable was found in the group")
+	if smith != null:
+		_check(smith != interactables[0], "the smith is not the first interactable")
+		var smith_2d := smith as Node2D
+		var edrik := interactables[0] as Node2D
+		_check(smith_2d != null and edrik != null
+				and smith_2d.global_position.distance_to(edrik.global_position) > 44.0,
+			"the forge sits outside the interact radius of anyone standing at Edrik")
+
+	# the real in-game path: E at the forge opens the bench and crafts nothing
+	if smith != null:
+		gs.gold = 100
+		gs.add_item("wolf_fang", 4)
+		var gold_pre: int = gs.gold
+		var fangs_pre: int = gs.count_item("wolf_fang")
+		var inv_pre: int = gs.inventory.size()
+		smith.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_craft_open")), "Smith.interact opens the bench through the real path")
+		_check(gs.ui_blocking, "Smith.interact sets ui_blocking")
+		_check(gs.gold == gold_pre, "opening the bench via interact spent no gold (got %d)" % gs.gold)
+		_check(gs.count_item("wolf_fang") == fangs_pre, "opening the bench via interact ate no material")
+		_check(gs.inventory.size() == inv_pre, "opening the bench via interact left the inventory unchanged")
+		_check(not bool(hud.call("is_shop_open")), "opening the bench did not open the shop")
+		hud.call("close_craft")
+		await process_frame
+		_check(not bool(hud.call("is_craft_open")), "close_craft closes the interact-opened bench")
+		_check(not gs.ui_blocking, "ui_blocking cleared after closing the interact-opened bench")
+
+	# open the bench through the HUD and check the modal gate (the claws from the
+	# interact block above are still there, so the bench has 3/4 of what it wants)
+	gs.gold = 100
+	hud.call("open_craft_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_craft_open")), "open_craft opens the bench")
+	_check(gs.ui_blocking, "ui_blocking is true while the bench is open")
+	var before := player.global_position
+	var d_down := InputEventKey.new()
+	d_down.physical_keycode = KEY_D
+	d_down.keycode = KEY_D
+	d_down.pressed = true
+	Input.parse_input_event(d_down)
+	for i in range(12):
+		await physics_frame
+	_check(player.global_position.distance_to(before) < 2.0, "the open bench blocks player movement")
+	var d_up := InputEventKey.new()
+	d_up.physical_keycode = KEY_D
+	d_up.keycode = KEY_D
+	d_up.pressed = false
+	Input.parse_input_event(d_up)
+	await physics_frame
+
+	# the bench lists its own station only, and promises the result before E
+	var rows: PackedStringArray = hud.call("craft_row_texts")
+	_check(rows.size() == 2, "the bench shows its two recipes (got %d)" % rows.size())
+	var detail: String = hud.call("craft_detail_text")
+	_check(detail.contains("Железный меч"), "the detail line names the produced item (%s)" % detail)
+	_check(detail.contains("Атака +2"), "the detail line spells out the permanent bonus (%s)" % detail)
+	var mats: PackedStringArray = hud.call("craft_material_texts")
+	_check(mats.size() == 1, "the selected recipe shows its one material line")
+	_check(mats.size() == 1 and mats[0].contains("3/4"), "the material line reads need/have 3/4 (%s)" % str(mats))
+
+	# a locked recipe refuses and says so, without touching the state
+	var gold_locked: int = gs.gold
+	await _tap_key(KEY_E)
+	_check(String(hud.call("craft_reason_text")) == "Рецепт ещё не известен",
+		"E on a locked recipe shows the locked reason (%s)" % str(hud.call("craft_reason_text")))
+	_check(gs.gold == gold_locked, "a locked craft spent no gold")
+	_check(bool(hud.call("is_craft_open")), "a refusal keeps the bench open")
+
+	# the second row is the armor upgrade, and the cursor really moved
+	await _tap_key(KEY_S)
+	var detail_2: String = hud.call("craft_detail_text")
+	_check(detail_2.contains("Кожаный доспех") and detail_2.contains("Защита +1"),
+		"the cursor moved to the armor recipe (%s)" % detail_2)
+	await _tap_key(KEY_W)
+
+	# unlocking the tempering the way an NPC would, then crafting it with E
+	gs.set_flag("recipe_temper_known", true)
+	await process_frame
+	var gold_craft: int = gs.gold
+	var fangs_craft: int = gs.count_item("wolf_fang")
+	await _tap_key(KEY_E)
+	_check(gs.gold == gold_craft - 30, "E crafts the tempering for its 30 gold (%d -> %d)" % [gold_craft, gs.gold])
+	_check(gs.count_item("wolf_fang") == fangs_craft - 3, "E ate the 3 claws the tempering asks for")
+	_check(gs.count_item("iron_sword") == 1, "the crafted sword entered the inventory")
+	_check(String(hud.call("craft_reason_text")) == "", "a successful craft clears the reason line")
+	_check(gs.upgrade_bonus("iron_sword", "attack") == 2, "the crafted sword carries the permanent +2")
+	_check(gs.total_attack() == 5, "an upgrade in the bag adds nothing until the sword is worn")
+	gs.equip("iron_sword")
+	_check(gs.total_attack() == 13, "wearing the tempered sword gives 5 + 6 + 2 (got %d)" % gs.total_attack())
+
+	# and the very same row now refuses as already upgraded, spending nothing
+	var gold_again: int = gs.gold
+	var fangs_again: int = gs.count_item("wolf_fang")
+	await _tap_key(KEY_E)
+	_check(String(hud.call("craft_reason_text")) == "Это уже улучшено",
+		"E on an upgraded item shows the already-upgraded reason (%s)" % str(hud.call("craft_reason_text")))
+	_check(gs.gold == gold_again, "the refused repeat spent no gold")
+	_check(gs.count_item("wolf_fang") == fangs_again, "the refused repeat ate no claws")
+	_check(gs.total_attack() == 13, "the refused repeat added no bonus")
+
+	# Esc closes the bench and does not pause the game underneath
+	await _tap_key(KEY_ESCAPE)
+	_check(not bool(hud.call("is_craft_open")), "Esc closes the bench")
+	_check(not gs.ui_blocking, "ui_blocking cleared after Esc closed the bench")
+	_check(not paused, "Esc closing the bench does not pause the game")
+
+	# while the bench owns the screen the inventory key is swallowed (modal)
+	hud.call("open_craft_for_shot")
+	await process_frame
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_craft_open")), "the bench stays open when I is pressed (modal swallows it)")
+	_check(not bool(hud.call("is_inventory_open")), "I does not open the inventory while the bench is open")
+	await _tap_key(KEY_ESCAPE)
+
+	# mutual exclusion with every other panel that can be opened from outside
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "I opens the inventory when the bench is closed")
+	hud.call("open_craft_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_craft_open")), "open_craft opens the bench over the inventory")
+	_check(not bool(hud.call("is_inventory_open")), "opening the bench closed the inventory")
+	hud.call("open_shop_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_shop_open")), "open_shop opens the shop over the bench")
+	_check(not bool(hud.call("is_craft_open")), "opening the shop closed the bench")
+	_check(gs.ui_blocking, "ui_blocking stays set when one modal hands over to another")
+	hud.call("open_craft_for_shot")
+	await process_frame
+	_check(bool(hud.call("is_craft_open")) and not bool(hud.call("is_shop_open")),
+		"the bench and the shop are never open at once")
+	await _tap_key(KEY_ESCAPE)
+	_check(not bool(hud.call("is_craft_open")), "Esc closes the bench after the hand-over")
+	_check(not gs.ui_blocking, "ui_blocking cleared after the last panel closed")
+
+	# leave no residue for later groups
+	if bool(hud.call("is_craft_open")):
+		hud.call("close_craft")
+	if bool(hud.call("is_shop_open")):
+		hud.call("close_shop")
+	if bool(hud.call("is_inventory_open")):
+		await _tap_key(KEY_I)
+	gs.ui_blocking = false
+	paused = false
+	scene.queue_free()
+	await process_frame
+	_clear_slot(2)
+	gs.reset()
+	qm.reset()
+	completed["craft"] = true
 
 
 ## Put a weapon into the equipment slot (or clear it with ""). Goes through the

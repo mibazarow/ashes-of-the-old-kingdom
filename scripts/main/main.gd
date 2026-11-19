@@ -70,6 +70,17 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_shop_for_shot")
+	elif ui_probe == "craft":
+		# Gold plus enough claws so both smith recipes read as affordable, and the
+		# tempering unlocked the way an NPC or a note would unlock it, so the
+		# capture shows the full §14.4 promise: fee, need/have materials and the
+		# permanent bonus line ("Атака +2") of the selected upgrade.
+		GameState.add_gold(120)
+		GameState.add_item("wolf_fang", 4)
+		GameState.set_flag("recipe_temper_known", true)
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_craft_for_shot")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
