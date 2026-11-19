@@ -64,6 +64,23 @@ class ResistTarget:
 		return resistance
 
 
+## Minimal enemy for the AOE radius test: a Node2D placed in the "enemy" group
+## with the two methods DamageResolver needs. No StatusComponent, so the status
+## payload is simply not applied (resolve_hit tolerates a missing component).
+class AoeTarget:
+	extends Node2D
+
+	var hits := 0
+	var last_damage := 0
+
+	func get_defense() -> int:
+		return 0
+
+	func receive_damage(amount: int, _info: Dictionary = {}) -> void:
+		hits += 1
+		last_damage = amount
+
+
 func _init() -> void:
 	_run.call_deferred()
 
@@ -134,6 +151,9 @@ func _run() -> void:
 	print("== ability ==")
 	await _test_ability()
 
+	print("== skills ==")
+	await _test_skills()
+
 	print("== bot quest target ==")
 	await _test_bot_quest_target()
 
@@ -154,7 +174,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 25, "every test group ran to completion (got %d/25)" % completed.size())
+	_check(completed.size() == 26, "every test group ran to completion (got %d/26)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -994,9 +1014,11 @@ func _test_map_panel() -> void:
 	completed["map"] = true
 
 
-## Placeholder ability (spec §6): right mouse button dashes toward the cursor,
-## costs mana and has its own cooldown. Driven through a real InputEventMouseButton
-## so the human input path is exercised, not the bot override.
+## Right mouse button casts the selected skill (spec §9). This group replaces the
+## old dash-ability group with the same human-input rigour (a real
+## InputEventMouseButton through Input, not the bot override): a mana-costing
+## cast with a per-skill cooldown, instead of a dash. The dash assertions were
+## rewritten to cast assertions, not deleted.
 func _test_ability() -> void:
 	gs.reset()
 	var packed: PackedScene = load("res://scenes/main/main.tscn")
@@ -1017,19 +1039,20 @@ func _test_ability() -> void:
 	if player == null:
 		scene.queue_free()
 		await process_frame
+		completed["ability"] = true
 		return
 
-	# Full mana: a real right-click spends exactly ABILITY_COST and enters DASH.
+	# Default selection is fire_bolt (8 mana). A real right-click spends exactly
+	# that and does NOT enter DASH — the dash placeholder is gone.
 	gs.mana = gs.max_mana
-	player.set("_ability_cooldown_left", 0.0)
+	gs.select_skill("fire_bolt")
 	await _settle_idle(player)
 	var mana_before: int = gs.mana
 	await _tap_rmb()
-	_check(gs.mana == mana_before - 10, "right-click spends exactly 10 mana (%d -> %d)" % [mana_before, gs.mana])
-	_check(int(player.get("state")) == 3, "right-click puts the player into DASH (state=%d)" % int(player.get("state")))
+	_check(gs.mana == mana_before - 8, "right-click casts fire_bolt and spends 8 mana (%d -> %d)" % [mana_before, gs.mana])
+	_check(int(player.get("state")) != 3, "right-click casts instead of dashing (state=%d)" % int(player.get("state")))
 
-	# Cooldown: wait out the dash, then tap again while the ability cooldown is
-	# still running; it must not spend more mana.
+	# Cooldown: the second press lands while fire_bolt is still cooling down.
 	var mana_after_first: int = gs.mana
 	await _settle_idle(player)
 	await _tap_rmb()
@@ -1038,23 +1061,209 @@ func _test_ability() -> void:
 	# Out of mana (cooldown forced expired): must not fire, mana stays 0.
 	await _settle_idle(player)
 	gs.mana = 0
-	player.set("_ability_cooldown_left", 0.0)
+	var cds: Dictionary = player.get("_skill_cooldowns")
+	cds["fire_bolt"] = 0.0
 	await _tap_rmb()
-	_check(gs.mana == 0, "no mana -> ability does not fire, mana stays 0")
+	_check(gs.mana == 0, "no mana -> cast does not fire, mana stays 0")
 
-	# Cooldown expired with mana restored: the ability works again.
+	# Cooldown expired with mana restored: the cast works again.
 	await _settle_idle(player)
 	gs.mana = gs.max_mana
-	player.set("_ability_cooldown_left", 0.0)
+	cds["fire_bolt"] = 0.0
 	var mana_before_recover: int = gs.mana
 	await _tap_rmb()
-	_check(gs.mana == mana_before_recover - 10, "ability works again after cooldown expires")
-	_check(int(player.get("state")) == 3, "ability after cooldown enters DASH again (state=%d)" % int(player.get("state")))
+	_check(gs.mana == mana_before_recover - 8, "cast works again after cooldown expires")
 
 	await _settle_idle(player)
 	scene.queue_free()
 	await process_frame
 	completed["ability"] = true
+
+
+## Data-driven skills (spec §9): the SkillDB schema, GameState selection/learn
+## persistence, and the four cast shapes through Player.try_ability. Uses a bare
+## arena (no walls, no real enemies) so the AOE radius and the projectile payload
+## are fully deterministic. GameState is reset at both ends so the learned
+## ice_barrier/fire_burst do not leak into later groups.
+func _test_skills() -> void:
+	DamageResolver.reset()
+	gs.reset()
+
+	# --- SkillDB schema --------------------------------------------------------
+	_check(SkillDB.all_skills().size() == 8, "SkillDB loads exactly 8 skills")
+	var school_list := SkillDB.schools()
+	_check(school_list.size() == 4, "SkillDB reports 4 schools")
+	_check(school_list.size() == 4 and school_list[0] == "fire" and school_list[1] == "ice" \
+			and school_list[2] == "lightning" and school_list[3] == "nature",
+		"schools are in the stable order fire, ice, lightning, nature")
+	var two_each := true
+	for school in school_list:
+		if SkillDB.skills_of_school(school).size() != 2:
+			two_each = false
+	_check(two_each, "every school has exactly 2 skills")
+	_check(SkillDB.is_shape("fire_bolt", "projectile"), "fire_bolt is a projectile")
+	_check(SkillDB.is_shape("fire_burst", "aoe"), "fire_burst is an aoe")
+	_check(SkillDB.is_shape("ice_barrier", "self"), "ice_barrier is self-target")
+	_check(not SkillDB.is_shape("fire_bolt", "aoe"), "is_shape is false for a wrong shape")
+
+	var required := ["name", "school", "shape", "mana", "cooldown", "damage", "status",
+		"status_duration", "radius", "range", "speed", "description", "heal", "barrier"]
+	# Godot's JSON parser yields float for every number, so the numeric fields are
+	# checked as "is a number" (int or float) rather than a strict int/float pin;
+	# the string fields are pinned to String.
+	var numeric := [TYPE_INT, TYPE_FLOAT]
+	var fields_ok := true
+	var types_ok := true
+	for id: String in SkillDB.all_skills().keys():
+		var s := SkillDB.get_skill(id)
+		for f in required:
+			if not s.has(f):
+				fields_ok = false
+		if not (s.get("name") is String and s.get("school") is String and s.get("shape") is String \
+				and s.get("status") is String and s.get("description") is String):
+			types_ok = false
+		for n in ["mana", "cooldown", "damage", "status_duration", "radius", "range", "speed", "heal", "barrier"]:
+			if not (typeof(s.get(n)) in numeric):
+				types_ok = false
+	_check(fields_ok, "every skill carries all 14 required fields")
+	_check(types_ok, "every skill field has the expected type")
+
+	# --- GameState selection / learn / persistence -----------------------------
+	_check(gs.selected_skill == "fire_bolt", "default selection is fire_bolt")
+	_check(gs.known_skills.has("fire_bolt") and gs.known_skills.has("heal_impulse"),
+		"default known loadout has fire_bolt and heal_impulse")
+	_check(not gs.known_skills.has("fire_burst"), "fire_burst is not known by default")
+	_check(gs.select_skill("fire_bolt"), "select_skill accepts a known skill")
+	_check(not gs.select_skill("fire_burst"), "select_skill rejects an unlearned skill")
+	_check(not gs.select_skill("not_a_skill"), "select_skill rejects an unknown id")
+	_check(gs.selected_skill == "fire_bolt", "rejected selects left the selection unchanged")
+	_check(gs.learn_skill("fire_burst"), "learn_skill adds a known skill")
+	_check(gs.known_skills.has("fire_burst"), "fire_burst is now known")
+	_check(not gs.learn_skill("fire_burst"), "learn_skill is idempotent")
+	_check(not gs.learn_skill("not_a_skill"), "learn_skill rejects an unknown id")
+	_check(gs.select_skill("fire_burst"), "select_skill accepts the newly learned skill")
+
+	var roundtrip: Dictionary = gs.to_dict()
+	roundtrip["known_skills"].append("not_a_skill")
+	gs.from_dict(roundtrip)
+	_check(gs.selected_skill == "fire_burst", "round-trip keeps the selection")
+	_check(gs.known_skills.has("fire_burst"), "round-trip keeps the learned skill")
+	_check(not gs.known_skills.has("not_a_skill"), "round-trip drops an unknown id")
+
+	# --- casting rig: a bare arena with one player ------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	arena.add_child(player)
+	await process_frame
+	gs.reset()
+	gs.mana = gs.max_mana
+	var cds: Dictionary = player.get("_skill_cooldowns")
+
+	# fire_bolt: mana cost, projectile payload, per-skill cooldown.
+	gs.select_skill("fire_bolt")
+	cds["fire_bolt"] = 0.0
+	var mana_before: int = gs.mana
+	_check(player.try_ability(), "fire_bolt cast returns true")
+	_check(gs.mana == mana_before - 8, "fire_bolt spends exactly 8 mana (%d -> %d)" % [mana_before, gs.mana])
+	var proj: Node = null
+	for child in arena.get_children():
+		if child is SpellProjectile:
+			proj = child
+	_check(proj != null, "casting fire_bolt spawns a SpellProjectile")
+	_check(proj != null and int(proj.get("damage")) == 12, "spell projectile carries damage 12")
+	_check(proj != null and String(proj.get("status")) == "burn", "spell projectile carries status burn")
+	var mana_after_first: int = gs.mana
+	_check(not player.try_ability(), "recast during cooldown returns false")
+	_check(gs.mana == mana_after_first, "recast during cooldown spends no mana")
+	if proj != null:
+		proj.queue_free()
+
+	# Insufficient mana: nothing happens, mana unchanged.
+	cds["fire_bolt"] = 0.0
+	gs.mana = 4
+	var mana_low_before: int = gs.mana
+	_check(not player.try_ability(), "cast without enough mana returns false")
+	_check(gs.mana == mana_low_before, "failed cast leaves mana unchanged")
+
+	# heal_impulse: heals 25 and costs 12.
+	gs.mana = gs.max_mana
+	gs.hp = gs.max_hp - 40
+	gs.select_skill("heal_impulse")
+	var hp_before: int = gs.hp
+	var mana_heal_before: int = gs.mana
+	_check(player.try_ability(), "heal_impulse cast returns true")
+	_check(gs.hp == hp_before + 25, "heal_impulse heals 25 (hp %d -> %d)" % [hp_before, gs.hp])
+	_check(gs.mana == mana_heal_before - 12, "heal_impulse costs 12 mana")
+
+	# ice_barrier: a damage-reduction buff on the player (data barrier = percent).
+	gs.mana = gs.max_mana
+	gs.learn_skill("ice_barrier")
+	gs.select_skill("ice_barrier")
+	_check(player.try_ability(), "ice_barrier cast returns true")
+	_check(float(player.get("_barrier_left")) > 0.0, "ice_barrier starts the barrier timer")
+	_check(absf(float(player.get("_barrier_reduction")) - 8.0) < 0.001, "ice_barrier reduction is 8 percent")
+	player.set("_barrier_left", 0.0)
+	player.set("_barrier_reduction", 0.0)
+	player.set("_iframe_left", 0.0)
+	gs.hp = gs.max_hp
+	var plain_before: int = gs.hp
+	player.receive_damage(20)
+	var plain_loss: int = plain_before - gs.hp
+	player.set("_barrier_left", 4.0)
+	player.set("_barrier_reduction", 8.0)
+	player.set("_iframe_left", 0.0)
+	gs.hp = gs.max_hp
+	var guard_before: int = gs.hp
+	player.receive_damage(20)
+	var guard_loss: int = guard_before - gs.hp
+	_check(plain_loss == 20, "no barrier -> full 20 damage (got %d)" % plain_loss)
+	_check(guard_loss < plain_loss, "barrier reduces incoming damage (%d < %d)" % [guard_loss, plain_loss])
+	_check(guard_loss == 18, "8 percent barrier shaves 20 to 18 (got %d)" % guard_loss)
+	player.set("_barrier_left", 0.0)
+	player.set("_barrier_reduction", 0.0)
+
+	# aoe: fire_burst hits an enemy inside the radius and not one outside it.
+	gs.mana = gs.max_mana
+	gs.learn_skill("fire_burst")
+	gs.select_skill("fire_burst")
+	var burst := SkillDB.get_skill("fire_burst")
+	var aim := InputSource.aim_direction(player.global_position)
+	var dir: Vector2 = aim if aim.length() > 0.01 else (player.get("facing") as Vector2)
+	var aim_point: Vector2 = player.global_position + dir * float(burst.get("range", 0.0))
+	var radius := float(burst.get("radius", 0.0))
+	var inside := AoeTarget.new()
+	arena.add_child(inside)
+	inside.add_to_group("enemy")
+	inside.global_position = aim_point
+	var outside := AoeTarget.new()
+	arena.add_child(outside)
+	outside.add_to_group("enemy")
+	outside.global_position = aim_point + Vector2(radius + 40.0, 0.0)
+	_check(player.try_ability(), "fire_burst cast returns true")
+	_check(inside.hits == 1, "aoe damages the enemy inside the radius")
+	_check(outside.hits == 0, "aoe does not damage the enemy outside the radius")
+	inside.queue_free()
+	outside.queue_free()
+
+	# stun blocks casting entirely (no mana spent).
+	var psc := player.get_node_or_null("StatusComponent") as StatusComponent
+	_check(psc != null, "player has a StatusComponent for the stun test")
+	if psc != null:
+		gs.mana = gs.max_mana
+		gs.select_skill("fire_bolt")
+		cds["fire_bolt"] = 0.0
+		psc.apply_status("stun", 2.0)
+		var mana_stun_before: int = gs.mana
+		_check(not player.try_ability(), "casting while stunned does nothing")
+		_check(gs.mana == mana_stun_before, "stunned cast spends no mana")
+		psc.clear_all()
+
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	completed["skills"] = true
 
 
 ## Wait until the player leaves DASH/ATTACK and returns to a free state, so the

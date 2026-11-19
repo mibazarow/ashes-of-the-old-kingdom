@@ -15,6 +15,7 @@ var _mp_label: Label
 var _level_label: Label
 var _gold_label: Label
 var _quest_label: Label
+var _skill_label: Label
 var _prompt_label: Label
 var _toast_label: Label
 var _dialogue_panel: PanelContainer
@@ -146,6 +147,14 @@ func _build_ui() -> void:
 	_quest_label = _make_text("", Color(0.86, 0.88, 0.78))
 	_quest_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(_quest_label)
+
+	# Selected skill, one compact line under the tracker. Clipped with an
+	# ellipsis so a long skill name can never push past the 480 px viewport.
+	_skill_label = _make_text("", Color(0.62, 0.78, 0.92))
+	_skill_label.clip_text = true
+	_skill_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_skill_label.max_lines_visible = 1
+	column.add_child(_skill_label)
 
 	_hint_label = _make_text(
 		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · F5/F9",
@@ -364,6 +373,7 @@ func _connect_signals() -> void:
 	EventBus.quest_started.connect(func(_id): _refresh_quest())
 	EventBus.quest_progress.connect(func(_id, _c, _t): _refresh_quest())
 	EventBus.quest_completed.connect(func(_id): _refresh_quest())
+	EventBus.skill_selected.connect(func(_id): _refresh_skill())
 
 
 func _refresh_all() -> void:
@@ -373,6 +383,7 @@ func _refresh_all() -> void:
 	_on_gold(GameState.gold)
 	_refresh_inventory()
 	_refresh_quest()
+	_refresh_skill()
 
 
 func _on_health(current: int, maximum: int) -> void:
@@ -385,6 +396,7 @@ func _on_mana(current: int, maximum: int) -> void:
 	_mp_bar.max_value = maxi(1, maximum)
 	_mp_bar.value = current
 	_mp_label.text = "%d" % current
+	_refresh_skill()
 
 
 func _on_xp(current: int, needed: int, level: int) -> void:
@@ -446,6 +458,22 @@ func _refresh_quest() -> void:
 		else:
 			parts.append("%s: %d/%d" % [title, QuestManager.progress_of(quest_id), QuestManager.target_count(quest_id)])
 	_quest_label.text = "\n".join(parts)
+
+
+## One compact line for the skill the right mouse button casts. Refreshed on
+## selection change and on every mana change (so a cast refreshes it too).
+func _refresh_skill() -> void:
+	if _skill_label == null:
+		return
+	var skill := SkillDB.get_skill(GameState.selected_skill)
+	if skill.is_empty():
+		_skill_label.text = ""
+		return
+	_skill_label.text = "Умение: %s · %d маны · %s" % [
+		String(skill.get("name", GameState.selected_skill)),
+		int(skill.get("mana", 0)),
+		String(skill.get("school", "")),
+	]
 
 
 func _on_prompt(text: String) -> void:

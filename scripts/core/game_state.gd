@@ -23,6 +23,12 @@ var equipment: Dictionary = {"weapon": "", "armor": ""}
 ## Quick slots 1–4 (index 0..3); an empty string means the slot is unassigned.
 var quick_slots: Array[String] = ["health_potion", "mana_potion", "", ""]
 
+## Skills the player knows (spec §9). Default loadout: one projectile from each
+## damage school plus the nature heal. selected_skill is what the right mouse
+## button casts.
+var known_skills: Array[String] = ["fire_bolt", "ice_bolt", "shock", "heal_impulse"]
+var selected_skill: String = "fire_bolt"
+
 var flags: Dictionary = {}
 var kills: Dictionary = {}
 var play_time_ms: int = 0
@@ -58,6 +64,8 @@ func reset() -> void:
 	inventory = []
 	equipment = {"weapon": "", "armor": ""}
 	quick_slots = _default_quick_slots()
+	known_skills = _default_known_skills()
+	selected_skill = _default_selected_skill()
 	flags = {}
 	kills = {}
 	play_time_ms = 0
@@ -244,6 +252,39 @@ func quick_slot_item(index: int) -> String:
 	return quick_slots[index]
 
 
+# --- skills -------------------------------------------------------------------
+
+func _default_known_skills() -> Array[String]:
+	return ["fire_bolt", "ice_bolt", "shock", "heal_impulse"]
+
+
+func _default_selected_skill() -> String:
+	return "fire_bolt"
+
+
+## Selects the skill the right mouse button casts. Only a skill the player both
+## knows and that exists in the data can be selected.
+func select_skill(skill_id: String) -> bool:
+	if not known_skills.has(skill_id):
+		return false
+	if not SkillDB.has_skill(skill_id):
+		return false
+	selected_skill = skill_id
+	EventBus.skill_selected.emit(skill_id)
+	return true
+
+
+## Adds a skill to the known list. Rejects an id that is not in the data and a
+## skill already known (so the call is idempotent and never duplicates).
+func learn_skill(skill_id: String) -> bool:
+	if not SkillDB.has_skill(skill_id):
+		return false
+	if known_skills.has(skill_id):
+		return false
+	known_skills.append(skill_id)
+	return true
+
+
 # --- flags / counters ---------------------------------------------------------
 
 func set_flag(key: String, value: Variant = true) -> void:
@@ -279,6 +320,8 @@ func to_dict() -> Dictionary:
 		"inventory": inventory.duplicate(true),
 		"equipment": equipment.duplicate(true),
 		"quick_slots": quick_slots.duplicate(),
+		"known_skills": known_skills.duplicate(),
+		"selected_skill": selected_skill,
 		"flags": flags.duplicate(true),
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
@@ -302,6 +345,10 @@ func from_dict(d: Dictionary) -> void:
 			inventory.append({"id": String(slot["id"]), "amount": int(slot.get("amount", 1))})
 	equipment = d.get("equipment", {"weapon": "", "armor": ""}).duplicate(true)
 	quick_slots = _restore_quick_slots(d.get("quick_slots", null))
+	# Skills are tolerant of a missing key (saves written before spec §9) and of
+	# unknown ids (a skill removed from the data), so no schema bump is needed.
+	known_skills = _restore_known_skills(d.get("known_skills", null))
+	selected_skill = _restore_selected_skill(d.get("selected_skill", null), known_skills)
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
@@ -322,3 +369,29 @@ func _restore_quick_slots(raw: Variant) -> Array[String]:
 				restored.append(String(value))
 			return restored
 	return _default_quick_slots()
+
+
+## A save may list a skill id that no longer exists in the data, or hold a
+## hand-edited junk array. Anything that is not a known skill id is dropped; an
+## empty result falls back to the default loadout rather than a skill-less player.
+func _restore_known_skills(raw: Variant) -> Array[String]:
+	var restored: Array[String] = []
+	if raw is Array:
+		for value: Variant in (raw as Array):
+			if value is String:
+				var id := String(value)
+				if SkillDB.has_skill(id) and not restored.has(id):
+					restored.append(id)
+	if restored.is_empty():
+		return _default_known_skills()
+	return restored
+
+
+## The selection must point at a skill the restored player actually knows; an
+## unknown or unlearned selection falls back to the first known skill.
+func _restore_selected_skill(raw: Variant, known: Array[String]) -> String:
+	if raw is String:
+		var id := String(raw)
+		if known.has(id):
+			return id
+	return known[0] if not known.is_empty() else _default_selected_skill()
