@@ -210,6 +210,9 @@ func _run() -> void:
 	print("== bot quest target ==")
 	await _test_bot_quest_target()
 
+	print("== bot soak survival ==")
+	await _test_bot_soak_survival()
+
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
@@ -263,7 +266,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 41, "every test group ran to completion (got %d/41)" % completed.size())
+	_check(completed.size() == 42, "every test group ran to completion (got %d/42)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2197,6 +2200,238 @@ func _test_bot_quest_target() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["bot_quest_target"] = true
+
+
+## Read a script's source as text. The suite runs from source, so this is a stable
+## way to pin code that a behavioural test cannot reach without sitting through a
+## full 75 s bot scenario.
+func _read_script_source(path: String) -> String:
+	var text := FileAccess.get_file_as_string(path)
+	_check(text != "", "%s reads as source text" % path)
+	return text
+
+
+## Slice one top-level function out of GDScript source: from its `func` line up to
+## the next top-level `func`, or end of file. Scopes an assertion to a single
+## scenario instead of to the whole file, so a literal that legitimately appears in
+## one scenario cannot satisfy a check aimed at another.
+func _extract_gdscript_func(source: String, func_name: String) -> String:
+	var from := source.find("\nfunc %s(" % func_name)
+	if from < 0:
+		return ""
+	var rest := source.substr(from)
+	var next := rest.find("\nfunc ", 1)
+	return rest if next < 0 else rest.substr(0, next)
+
+
+func _find_named(name: String) -> Node2D:
+	for n in get_nodes_in_group("interactable"):
+		if n != null and String(n.name) == name:
+			return n as Node2D
+	return null
+
+
+## Soak (BOT-010) survival tuning, pinned without a 75 s bot run. The stage D boar
+## hits for 13 where the wolf managed 8, which left the old 0.35 heal threshold with
+## the bot ending runs within 1 HP of the heal trigger. Every value here is read off
+## the live bot — its script constants, its own heal predicate, its own retreat
+## helper — so neither the threshold nor the retreat bound can be quietly edited
+## without this group going red.
+func _test_bot_soak_survival() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var bot := scene.get_node_or_null("Bot")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(bot != null and player != null, "bot and player present for soak-survival test")
+	if bot == null or player == null:
+		scene.queue_free()
+		await process_frame
+		completed["bot_soak_survival"] = true
+		return
+
+	var consts: Dictionary = {}
+	var bot_script := bot.get_script() as GDScript
+	if bot_script != null:
+		consts = bot_script.get_script_constant_map()
+	_check(not consts.is_empty(), "the live bot exposes its constant map")
+
+	var source := _read_script_source("res://scripts/debug_bot/bot.gd")
+	var soak_body := _extract_gdscript_func(source, "_scenario_soak")
+	var heal_helper := _extract_gdscript_func(source, "_soak_needs_heal")
+	_check(soak_body.contains("func _scenario_soak("), "the soak scenario was located in the bot source")
+	_check(heal_helper.contains("func _soak_needs_heal("), "the soak heal predicate was located in the bot source")
+
+	# --- the heal threshold is 0.5 and the scenario really uses it --------------
+	var heal_at := float(consts.get("SOAK_HEAL_AT", -1.0))
+	_check(is_equal_approx(heal_at, 0.5), "soak heal threshold is 0.5 of max HP (got %.2f)" % heal_at)
+	# The loop consults the predicate and the predicate is the only reader of the
+	# constant, so the threshold reaches the scenario through exactly one door.
+	_check(soak_body.contains("_soak_needs_heal"), "the soak scenario consults the soak heal predicate")
+	_check(heal_helper.contains("SOAK_HEAL_AT"), "the soak heal predicate is the reader of SOAK_HEAL_AT")
+	_check(heal_helper.contains("GameState.max_hp"), "the soak heal predicate compares against max HP")
+	_check(not soak_body.contains("max_hp *"),
+		"the soak loop computes no HP threshold of its own")
+	# The exact expression the defect was made of, pinned across the whole file.
+	_check(not source.contains("GameState.max_hp * 0.35"),
+		"the old 0.35 heal comparison is gone from the bot entirely")
+	# Healing must lead the swing, not follow it: a tap after the attack is two
+	# physics frames of trading blows paid for with the HP the potion covers.
+	var heal_at_first_use := soak_body.find("_soak_needs_heal")
+	var first_attack := soak_body.find('_tap(&"attack")')
+	_check(heal_at_first_use >= 0 and first_attack >= 0 and heal_at_first_use < first_attack,
+		"the soak heals before it attacks, so crossing the threshold costs no extra frame")
+
+	# The predicate the loop calls is the only reader of the constant, so driving it
+	# is what proves the value is wired into the scenario and not merely declared.
+	# 40 % is the discriminating case: the old 0.35 rule refused to heal there.
+	gs.hp = int(gs.max_hp * 0.40)
+	_check(bool(bot.call("_soak_needs_heal")), "bot heals at 40 percent of max HP (the 0.35 rule refused)")
+	gs.hp = int(gs.max_hp * 0.5) - 1
+	_check(bool(bot.call("_soak_needs_heal")), "bot heals one HP below the threshold")
+	gs.hp = int(gs.max_hp * 0.5)
+	_check(not bool(bot.call("_soak_needs_heal")), "bot does not heal exactly at the threshold")
+	gs.hp = gs.max_hp
+	_check(not bool(bot.call("_soak_needs_heal")), "bot does not heal at full HP")
+
+	# --- the potion tap is gated on a potion that actually exists ---------------
+	# The map carries exactly one potion, so an ungated loop spends its whole
+	# low-HP phase hammering an empty slot while standing in melee range. The gate
+	# reads the same two facts the HUD reads before it heals, and the tap itself
+	# still goes through the real quick-slot action.
+	_check(soak_body.contains('_tap(&"quick_slot_1")'),
+		"the soak still heals through the quick-slot input action")
+	_check(soak_body.contains("_soak_has_potion"),
+		"the soak gates the potion tap on a potion that is actually in the bag")
+	gs.remove_item("health_potion", gs.count_item("health_potion"))
+	_check(gs.count_item("health_potion") == 0, "the potion gate test emptied the bag")
+	_check(not bool(bot.call("_soak_has_potion")), "an empty bag reports no potion to tap")
+	gs.add_item("health_potion", 1)
+	_check(bool(bot.call("_soak_has_potion")), "a potion in the bag re-arms the tap")
+
+	# --- the disengage is bounded in both directions ---------------------------
+	var burst := float(consts.get("SOAK_RETREAT_TIME", -1.0))
+	_check(is_equal_approx(burst, 0.6), "one disengage burst is capped at 0.6 s (got %.2f)" % burst)
+	_check(burst > 0.0 and burst <= 0.6, "the burst cap is a positive bound, not an open-ended flee")
+	var budget := float(consts.get("SOAK_RETREAT_BUDGET", -1.0))
+	_check(budget > 0.0, "the run-wide disengage budget is positive")
+	_check(budget <= 30.0, "the disengage budget stays a bounded slice of the 75 s scenario (got %.1f s)" % budget)
+	_check(soak_body.contains("SOAK_MELEE_RANGE"), "the disengage only triggers inside melee range")
+	_check(soak_body.contains("retreat_left"), "the soak loop spends a bounded retreat budget")
+	_check(soak_body.contains("_soak_retreat"), "the soak loop calls the retreat helper")
+	# The melee trigger must sit just past the enemy's own reach (18 px), or the bot
+	# would only disengage after the swing had already landed.
+	var melee := float(consts.get("SOAK_MELEE_RANGE", -1.0))
+	_check(melee > 18.0 and melee <= 32.0, "melee trigger range is just past the 18 px enemy reach (got %.0f)" % melee)
+	# The steer must outlast the burst trigger, or the bot quits running at 25 px and
+	# the enemy simply walks back into reach.
+	var disengage := float(consts.get("SOAK_DISENGAGE_RANGE", -1.0))
+	_check(disengage > melee, "the bot keeps running until clear, past the burst trigger (%.0f > %.0f px)" % [disengage, melee])
+	# The forest carries one potion and 75 s of random walking almost never crosses
+	# its tile, so the soak has to go and get it or the threshold has nothing to fire on.
+	_check(soak_body.contains('_find_node("pickup")'),
+		"the soak banks the map's only potion instead of wandering past it")
+
+	# Drive a real burst through the real input path. The threat is planted directly
+	# behind the player, on the side away from Edrik, so the burst walks the open
+	# road the quest bots already prove is walkable instead of pressing into a tree.
+	var npc := _find_named("Edrik") as Node2D
+	_check(npc != null, "Edrik is present to orient the retreat test")
+	if npc == null:
+		scene.queue_free()
+		await process_frame
+		completed["bot_soak_survival"] = true
+		return
+	var walk_dir := player.global_position.direction_to(npc.global_position)
+	var threat_point := player.global_position - walk_dir * 12.0
+	var start_pos := player.global_position
+	gs.hp = int(gs.max_hp * 0.2)
+
+	InputSource.set_override(bot.get("bot_input"))
+	_check(bool(InputSource.has_override()), "the retreat test drives the player through the real input override")
+	var started := Time.get_ticks_msec()
+	var spent: float = await bot.call("_soak_retreat", threat_point, 10.0)
+	var elapsed := float(Time.get_ticks_msec() - started) / 1000.0
+	InputSource.clear_override()
+	_check(not bool(InputSource.has_override()), "the retreat test left no input override behind")
+
+	# A budget far larger than the cap must still stop at the cap: that is the whole
+	# bound, measured rather than asserted from the constant alone.
+	_check(spent > 0.0, "a burst with budget left actually spends time (%.2fs)" % spent)
+	_check(spent <= burst + 0.05, "a full-budget burst never exceeds the cap (spent %.2fs)" % spent)
+	_check(elapsed <= burst + 0.25, "the awaited burst returns within the cap plus one frame (%.2fs)" % elapsed)
+	var drift := player.global_position - start_pos
+	_check(drift.length() > 1.0, "the burst really moved the player (%.1f px)" % drift.length())
+	_check(drift.dot(walk_dir) > 0.0, "the burst walked away from the threat, not toward it (%.1f px along the away axis)" % drift.dot(walk_dir))
+
+	# An exhausted budget must be a no-op that returns at once. That is what hands
+	# control back to the attack branch: an out-of-potions bot stays below the heal
+	# threshold for the rest of the run, so without this the soak could spend all
+	# 75 s walking backwards and never swing.
+	var pinned := player.global_position
+	var zero_spent: float = await bot.call("_soak_retreat", threat_point, 0.0)
+	_check(zero_spent == 0.0, "an exhausted budget spends nothing (%.2fs)" % zero_spent)
+	_check(player.global_position.distance_to(pinned) < 1.0, "an exhausted budget does not move the player")
+
+	# A partial budget is honoured too, so the run-wide cap is what ends the
+	# disengage phase rather than the per-burst cap alone.
+	var short_spent: float = await bot.call("_soak_retreat", threat_point, 0.15)
+	_check(short_spent <= 0.15 + 0.05, "a partial budget cuts the burst short (%.2fs)" % short_spent)
+
+	# --- the other scenarios are untouched by this change ----------------------
+	# Pinned from their own distinguishing constants and branch literals, so a edit
+	# that leaked out of the soak scenario into a neighbour shows up here.
+	_check(is_equal_approx(float(consts.get("SCENARIO_TIMEOUT", -1.0)), 75.0),
+		"the shared scenario timeout is still 75 s")
+	var profiles: Dictionary = consts.get("PROFILES", {})
+	_check(profiles.size() == 4, "the four behaviour profiles are still there")
+	_check(is_equal_approx(float((profiles.get("cautious", {}) as Dictionary).get("heal_at", -1.0)), 0.75),
+		"the cautious profile still heals at 0.75")
+	_check(is_equal_approx(float((profiles.get("aggressive", {}) as Dictionary).get("engage_range", -1.0)), 20.0),
+		"the aggressive profile still engages at 20 px")
+
+	var talk := _extract_gdscript_func(source, "_scenario_talk")
+	var kill := _extract_gdscript_func(source, "_scenario_kill")
+	var loop := _extract_gdscript_func(source, "_scenario_quest_loop")
+	var saveload := _extract_gdscript_func(source, "_scenario_save_load")
+	var damage := _extract_gdscript_func(source, "_scenario_take_damage")
+	for pair in [
+		["BOT-001 talk", talk], ["BOT-008 kill", kill], ["BOT-002 quest loop", loop],
+		["BOT-009 save/load", saveload], ["BOT-011 take damage", damage],
+	]:
+		_check((pair[1] as String).length() > 0, "%s scenario was located in the bot source" % String(pair[0]))
+
+	_check(talk.contains("_move_to(npc.global_position, 18.0, 30.0)") and talk.contains("STATE_ACTIVE"),
+		"BOT-001 still walks 18 px from Edrik on a 30 s budget and checks the active state")
+	_check(kill.contains("SCENARIO_TIMEOUT * 1000.0") and kill.contains('_profile["heal_at"]')
+		and kill.contains('kill_count("ash_wolf")'),
+		"BOT-008 still runs one timeout on the profile heal rule and asserts an ash_wolf kill")
+	_check(loop.contains("SCENARIO_TIMEOUT * 2.2 * 1000.0") and loop.contains("stalled > 120")
+		and loop.contains("quick_slot_1") and loop.contains("_nearest_quest_enemy"),
+		"BOT-002 still runs the 2.2x hunt budget with its stall rule and quest-aware targeting")
+	_check(saveload.contains("add_gold(7)") and saveload.contains("add_gold(100)")
+		and saveload.contains("take_damage(25)") and saveload.contains("_clear_save_slot(3)"),
+		"BOT-009 still does +7 gold, save, +100 gold and -25 HP, load, then clears slot 3")
+	_check(damage.contains("_move_step") and damage.contains("hp=%d->%d") and not damage.contains("_tap(&\"attack\")"),
+		"BOT-011 still walks into the wolf and never attacks")
+
+	# The change is confined to the soak: no neighbour may reference the new rules.
+	for pair in [
+		["BOT-001 talk", talk], ["BOT-008 kill", kill], ["BOT-002 quest loop", loop],
+		["BOT-009 save/load", saveload], ["BOT-011 take damage", damage],
+	]:
+		var body := pair[1] as String
+		_check(not body.contains("SOAK_") and not body.contains("_soak_"),
+			"%s is untouched by the soak heal and retreat rules" % String(pair[0]))
+
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	completed["bot_soak_survival"] = true
 
 
 ## Defect #2 regression: an enemy projectile must stop at walls and trees

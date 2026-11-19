@@ -63,6 +63,30 @@ const PROFILES := {
 	"explorer": {"heal_at": 0.6, "engage_range": 12.0, "dash_chance": 0.2, "detour": true},
 }
 
+## Soak (BOT-010) survival tuning, kept out of PROFILES because the soak ignores
+## the profile dict on purpose: it is a fixed 75 s endurance run, not a risk
+## appetite. Named constants so the test suite reads the values the scenario
+## actually uses instead of duplicating literals. The stage D boar hits for 13
+## (the wolf managed 8) and the soak target picker has no retreat of its own, so
+## the old 0.35 threshold left the bot one missed potion window from dead.
+const SOAK_HEAL_AT := 0.5
+## Distance at which an enemy counts as "already in melee" for the disengage
+## rule. Enemy melee reach is 18 px, so this breaks out just before the swing.
+const SOAK_MELEE_RANGE := 24.0
+## How far the bot keeps putting between itself and the enemy it has broken off
+## from, while it is still below the heal threshold. The burst only has to break
+## contact; without a wider steer the bot stops running at 25 px, the enemy walks
+## back into reach, and the whole disengage buys nothing.
+const SOAK_DISENGAGE_RANGE := 60.0
+## Longest single disengage burst, and the total the whole run may spend in those
+## bursts. Both caps are load-bearing: without the per-burst cap the bot could
+## drift through a whole attack cycle, and without the run-wide budget the bursts
+## could eat the entire window and turn the soak into a run that never swings.
+## Surviving does not depend on the budget, though — the free steering below is
+## what keeps the bot out of reach once the bursts are spent.
+const SOAK_RETREAT_TIME := 0.6
+const SOAK_RETREAT_BUDGET := 25.0
+
 var scenario: String = ""
 var profile: String = "normal"
 var _profile: Dictionary = {}
@@ -319,19 +343,88 @@ func _scenario_soak() -> void:
 	var stuck := 0
 	var travelled := 0.0
 	var attack_attempts := 0
+	var heals := 0
+	var retreats := 0
+	var retreat_left := SOAK_RETREAT_BUDGET
+	# Instance id of the enemy the bot has broken off from, or -1. Tracked by id so
+	# the bot stops running from a corpse the moment that enemy dies.
+	var fled_id := -1
+	# Bank the map's only potion before the wandering starts. The forest carries a
+	# single health_potion about 145 px east of the spawn, and 75 s of random walk
+	# almost never crosses its tile again: measured runs asked for a heal dozens of
+	# times and held a potion in none of them, so the raised threshold had nothing
+	# to fire on. Walking there is real movement through the real input path, and
+	# the pickup is taken by touching it, exactly as a player takes it.
+	var pickup := _find_node("pickup")
+	if pickup != null:
+		await _move_to(pickup.global_position, 10.0, 12.0)
+	_notes.append("potion_banked=%s" % str(_soak_has_potion()))
 	while Time.get_ticks_msec() < deadline:
+		# Heal the instant the threshold is crossed, ahead of the attack. Tapping
+		# the potion after the swing spends two physics frames trading blows, and
+		# that is exactly the window a 13-damage boar charge gets paid for out of
+		# the HP the potion was supposed to cover.
+		if _soak_needs_heal() and _soak_has_potion():
+			await _tap(&"quick_slot_1")
+			heals += 1
+
+		var enemy := _nearest_enemy()
+		var enemy_dist := INF if enemy == null else _player_pos().distance_to(enemy.global_position)
+
+		# The enemy this bot is avoiding, if it is still on the map.
+		var threat: Node2D = null
+		if fled_id != -1:
+			threat = instance_from_id(fled_id) as Node2D
+			if threat == null or not is_instance_valid(threat):
+				threat = null
+				fled_id = -1
+		# Falling below the threshold with something already in reach makes that
+		# something the fight to break off, whether or not one was picked before.
+		if threat == null and _soak_needs_heal() and enemy != null and enemy_dist < SOAK_MELEE_RANGE:
+			fled_id = enemy.get_instance_id()
+			threat = enemy
+
+		if threat != null and _soak_needs_heal():
+			# Bounded disengage: one capped burst to break contact. The player
+			# outpaces every melee enemy here, so 0.6 s of walking away is real
+			# safety bought with no teleport and no invulnerability.
+			if _player_pos().distance_to(threat.global_position) < SOAK_MELEE_RANGE and retreat_left > 0.0:
+				retreat_left -= await _soak_retreat(threat.global_position, retreat_left)
+				retreats += 1
+				# The burst awaited several frames and the bot has usually just swung
+				# at this enemy, so it may have died in the meantime. Re-resolve the
+				# id before touching it again: reading a freed instance aborts the
+				# scenario, and the run lands in `_finish` as a FAIL with no notes.
+				threat = instance_from_id(fled_id) as Node2D
+				if threat == null or not is_instance_valid(threat):
+					threat = null
+					fled_id = -1
+				if _soak_needs_heal() and _soak_has_potion():
+					await _tap(&"quick_slot_1")
+					heals += 1
+			# Keep pointing the wander heading away until the threat is well outside
+			# its reach, not merely past the burst trigger radius. Stopping at 25 px
+			# means the bot quits running, the enemy walks back into reach, and the
+			# disengage bought nothing. Steering is free, so surviving does not run
+			# out of budget the way the bursts do.
+			if threat != null and _player_pos().distance_to(threat.global_position) < SOAK_DISENGAGE_RANGE:
+				heading = (_player_pos() - threat.global_position).normalized()
+				stuck = 0
+
 		bot_input.hold(&"move_right", heading.x > 0.35)
 		bot_input.hold(&"move_left", heading.x < -0.35)
 		bot_input.hold(&"move_down", heading.y > 0.35)
 		bot_input.hold(&"move_up", heading.y < -0.35)
 		bot_input.set_aim(_player_pos() + heading * 20.0)
 
-		var enemy := _nearest_enemy()
-		if enemy != null and _player_pos().distance_to(enemy.global_position) < 22.0:
+		# Fight, unless the nearest thing in reach is the enemy this bot has broken
+		# away from and is still too hurt to trade with. Any other enemy that wanders
+		# into reach is still fair game, which is what keeps the run swinging instead
+		# of turning it into a permanent flee.
+		if enemy != null and enemy_dist < 22.0 \
+				and not (_soak_needs_heal() and enemy.get_instance_id() == fled_id):
 			await _tap(&"attack")
 			attack_attempts += 1
-		if GameState.hp < GameState.max_hp * 0.35:
-			await _tap(&"quick_slot_1")
 
 		await _wait(0.12)
 
@@ -356,16 +449,63 @@ func _scenario_soak() -> void:
 	_notes.append("segments=%d" % segments)
 	_notes.append("travelled=%.0fpx" % travelled)
 	_notes.append("attacks=%d" % attack_attempts)
+	_notes.append("heal_taps=%d" % heals)
+	_notes.append("retreats=%d" % retreats)
 	_notes.append("hp=%d/%d" % [GameState.hp, GameState.max_hp])
 	_notes.append("kills=%s" % str(GameState.kills))
 
 	# A soak run proves the game keeps running, not that the bot got lucky.
 	# Passing here means: the player survived, actually moved around the map,
-	# and the state stayed coherent for the whole window.
+	# actually swung at things, and the state stayed coherent for the whole
+	# window. The attack check is what stops the disengage rule above from being
+	# quietly traded for a run that walks away from everything and survives by
+	# never being hit.
 	var survived: bool = GameState.hp > 0 and GameState.hp <= GameState.max_hp
 	var moved_enough: bool = travelled > 300.0
+	var fought: bool = attack_attempts > 0
 	var state_coherent: bool = GameState.gold >= 0 and GameState.level >= 1
-	_result = "PASS" if survived and moved_enough and state_coherent else "FAIL"
+	_result = "PASS" if survived and moved_enough and fought and state_coherent else "FAIL"
+
+
+## The single place the soak heal threshold is evaluated, so the scenario and the
+## test suite cannot drift apart over a duplicated literal.
+func _soak_needs_heal() -> bool:
+	return GameState.hp < GameState.max_hp * SOAK_HEAL_AT
+
+
+## Whether the item the first quick slot points at is actually in the bag, which
+## is exactly the pair of checks the HUD makes before it heals anything. The map
+## carries a single potion, so without this the bot spends its whole low-HP phase
+## hammering an empty slot: three physics frames per loop, standing in melee, for
+## the rest of the run. The tap itself is unchanged — a real potion still goes
+## through the real quick-slot input path.
+func _soak_has_potion() -> bool:
+	var item_id := String(GameState.quick_slot_item(0))
+	return item_id != "" and GameState.count_item(item_id) > 0
+
+
+## Walk directly away from `threat` for at most `SOAK_RETREAT_TIME` seconds, or
+## for whatever is left of `budget`, and report the seconds actually spent.
+##
+## Real movement through the same input path the human uses: no teleport, no
+## invulnerability, and a wall or a corner cuts the burst short on its own. An
+## exhausted budget returns immediately without moving, which is what hands
+## control back to the attack loop instead of letting the bot stall out the run.
+func _soak_retreat(threat: Vector2, budget: float) -> float:
+	var away := _player_pos() - threat
+	away = away.normalized() if away != Vector2.ZERO else Vector2.UP
+	var cap_ms := int(minf(SOAK_RETREAT_TIME, maxf(budget, 0.0)) * 1000.0)
+	var started := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - started < cap_ms:
+		bot_input.hold(&"move_right", away.x > 0.35)
+		bot_input.hold(&"move_left", away.x < -0.35)
+		bot_input.hold(&"move_down", away.y > 0.35)
+		bot_input.hold(&"move_up", away.y < -0.35)
+		# Keep facing the threat so the first swing after the burst is aimed.
+		bot_input.set_aim(threat)
+		await get_tree().physics_frame
+	bot_input.release_all()
+	return float(Time.get_ticks_msec() - started) / 1000.0
 
 
 func _scenario_take_damage() -> void:
