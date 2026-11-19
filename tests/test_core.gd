@@ -194,6 +194,9 @@ func _run() -> void:
 	print("== map panel ==")
 	await _test_map_panel()
 
+	print("== world chests ==")
+	await _test_world_chests()
+
 	print("== ability ==")
 	await _test_ability()
 
@@ -232,7 +235,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 30, "every test group ran to completion (got %d/30)" % completed.size())
+	_check(completed.size() == 31, "every test group ran to completion (got %d/31)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1070,6 +1073,138 @@ func _test_map_panel() -> void:
 	scene.queue_free()
 	await process_frame
 	completed["map"] = true
+
+
+## The iron spear must be reachable in the world, not just defined in items.json.
+## Pins that the forest spawns exactly two chests with distinct ids and loot,
+## that the spear chest sits on a walkable tile, that both show on the map, and
+## that each chest is independently one-shot through its own GameState flag.
+## GameState is reset at both ends and the scene is freed so neither the opened
+## flags nor the loot leak into a later group or a bot run.
+func _test_world_chests() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var chests := _find_chests()
+	_check(chests.size() == 2, "world spawns exactly two chests (got %d)" % chests.size())
+	if chests.size() != 2 or world == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["world_chests"] = true
+		return
+
+	var ids: Array[String] = []
+	var items: Array[String] = []
+	for chest in chests:
+		ids.append(String(chest.get("chest_id")))
+		items.append(String(chest.get("item_id")))
+	_check(ids.size() == 2 and ids[0] != ids[1], "the two chests have distinct chest_ids (%s)" % ", ".join(ids))
+	_check(items.has("iron_sword") and items.has("iron_spear"),
+		"the chests carry iron_sword and iron_spear (%s)" % ", ".join(items))
+
+	var spear: Node = null
+	var sword: Node = null
+	for chest in chests:
+		if String(chest.get("item_id")) == "iron_spear":
+			spear = chest
+		elif String(chest.get("item_id")) == "iron_sword":
+			sword = chest
+	_check(spear != null and sword != null, "resolved both the spear and the sword chest by item")
+	if spear == null or sword == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["world_chests"] = true
+		return
+
+	_check(String(spear.get("chest_id")) == "chest_forest_02",
+		"the spear chest uses chest_forest_02 (got %s)" % String(spear.get("chest_id")))
+	_check(int(spear.get("gold")) == 0, "the spear chest carries no gold (got %d)" % int(spear.get("gold")))
+	_check(String(sword.get("chest_id")) == "chest_forest_01",
+		"the sword chest keeps chest_forest_01 (got %s)" % String(sword.get("chest_id")))
+	_check(int(sword.get("gold")) == 25, "the sword chest still carries 25 gold (got %d)" % int(sword.get("gold")))
+
+	# The spear chest must sit on a walkable tile derived from the generated grid.
+	var spear_tile := Vector2i(
+		floori(spear.global_position.x / 16.0),
+		floori(spear.global_position.y / 16.0)
+	)
+	var spear_cell := String(world.call("cell_at", spear_tile))
+	_check(spear_cell == "." or spear_cell == ",",
+		"spear chest sits on a walkable tile %s cell '%s'" % [str(spear_tile), spear_cell])
+
+	# Both chests appear as landmarks so the map can draw them.
+	var lms: Array = world.call("landmarks")
+	var chest_lm_ids: Array[String] = []
+	var spear_lm: Dictionary = {}
+	for lm in lms:
+		var entry: Dictionary = lm
+		if String(entry.get("kind", "")) == "chest":
+			chest_lm_ids.append(String(entry.get("id", "")))
+			if Vector2i(entry.get("tile", Vector2i(-9999, -9999))) == spear_tile:
+				spear_lm = entry
+	_check(chest_lm_ids.size() == 2 and chest_lm_ids.has("Chest") and chest_lm_ids.has("ChestSpear"),
+		"landmarks list both chests by id (%s)" % ", ".join(chest_lm_ids))
+	_check(not spear_lm.is_empty(), "landmarks include an entry on the spear chest tile")
+	_check(not spear_lm.is_empty()
+			and (String(world.call("cell_at", spear_lm.get("tile", Vector2i(-1, -1)))) == "."
+				or String(world.call("cell_at", spear_lm.get("tile", Vector2i(-1, -1)))) == ","),
+		"the spear landmark tile is walkable")
+
+	# --- opening the spear chest: one spear, no gold, only its own flag --------
+	gs.reset()
+	var gold_before: int = gs.gold
+	spear.call("interact", null)
+	_check(gs.count_item("iron_spear") == 1, "opening the spear chest adds exactly one iron_spear")
+	_check(gs.gold == gold_before, "opening the spear chest adds no gold")
+	_check(bool(gs.get_flag("chest_opened_chest_forest_02", false)), "spear chest sets its own flag")
+	_check(not bool(gs.get_flag("chest_opened_chest_forest_01", false)),
+		"opening the spear chest leaves the sword chest flag unset")
+
+	# --- one-shot: a second open adds nothing ----------------------------------
+	spear.call("interact", null)
+	_check(gs.count_item("iron_spear") == 1, "second open of the spear chest adds nothing")
+	_check(gs.gold == gold_before, "second open of the spear chest still adds no gold")
+
+	# --- the sword chest is independent and unaffected -------------------------
+	var spear_count_before_sword: int = gs.count_item("iron_spear")
+	var gold_before_sword: int = gs.gold
+	sword.call("interact", null)
+	_check(gs.count_item("iron_sword") == 1, "opening the sword chest adds the sword")
+	_check(gs.gold == gold_before_sword + 25, "opening the sword chest adds 25 gold")
+	_check(gs.count_item("iron_spear") == spear_count_before_sword,
+		"opening the sword chest does not touch the spear")
+	_check(bool(gs.get_flag("chest_opened_chest_forest_01", false)), "sword chest sets its own flag")
+
+	# --- after both: both flags set, both items held ---------------------------
+	_check(bool(gs.get_flag("chest_opened_chest_forest_01", false))
+			and bool(gs.get_flag("chest_opened_chest_forest_02", false)),
+		"both chest flags are set after opening both")
+	_check(gs.count_item("iron_sword") == 1 and gs.count_item("iron_spear") == 1,
+		"both weapons are in the inventory after opening both chests")
+
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	completed["world_chests"] = true
+
+
+## The two Chest nodes in the world, found through the interactable group and
+## narrowed by the chest-only chest_id property so the NPC and any pickup drop
+## out. Returns them in tree order.
+func _find_chests() -> Array[Node]:
+	var out: Array[Node] = []
+	for node in get_nodes_in_group("interactable"):
+		var chest_id: Variant = node.get("chest_id")
+		if chest_id != null and String(chest_id) != "":
+			out.append(node)
+	return out
 
 
 ## Right mouse button casts the selected skill (spec §9). This group replaces the

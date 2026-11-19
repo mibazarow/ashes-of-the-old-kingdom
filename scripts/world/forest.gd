@@ -40,7 +40,14 @@ var _last_visited_tile := Vector2i(-9999, -9999)
 ## without fragile path lookups. Populated in _spawn_actors.
 var _npc_node: Node2D
 var _chest_node: Node2D
+var _chest_spear_node: Node2D
 var _trap_node: Node2D
+
+## Fixed anchor for the spear chest, on the south-west side away from the sword
+## chest in the east clearing. The exact tile is derived from the generated grid
+## (see _find_walkable_near), so the spawn stays deterministic and never lands
+## inside a tree cluster.
+const SPEAR_CHEST_ANCHOR := Vector2i(12, 24)
 
 
 func _ready() -> void:
@@ -107,6 +114,7 @@ func landmarks() -> Array[Dictionary]:
 	for entry: Array in [
 		["Edrik", "npc", _npc_node],
 		["Chest", "chest", _chest_node],
+		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
 	]:
 		var node: Node2D = entry[2]
@@ -228,6 +236,20 @@ func _tile_center(x: int, y: int) -> Vector2:
 	return Vector2(x * TILE + TILE / 2.0, y * TILE + TILE / 2.0)
 
 
+## First walkable tile (grass "." or dirt ",") scanning row-major outward from
+## the anchor, so a prop never spawns inside a tree cluster or a wall. Falls
+## back to the anchor when nothing walkable is found in range. Deterministic:
+## the scan order depends only on the fixed seed and the fixed anchor.
+func _find_walkable_near(anchor: Vector2i, radius: int) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			var ch := cell_at(t)
+			if ch == "." or ch == ",":
+				return t
+	return anchor
+
+
 func _spawn_actors() -> void:
 	player = _instantiate(PLAYER_SCENE, _tile_center(4, 9), "Player")
 	player.name = "Player"
@@ -241,6 +263,20 @@ func _spawn_actors() -> void:
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"
 	_chest_node = chest
+
+	# Second chest, on the south-west side, holding the iron spear. The chest
+	# scene is reused (not a new scene); its loot is overridden before add_child
+	# so _ready() reads this chest's own opened flag, not the sword chest's.
+	var spear_tile := _find_walkable_near(SPEAR_CHEST_ANCHOR, 6)
+	var spear_packed: PackedScene = load(CHEST_SCENE)
+	var chest_spear := spear_packed.instantiate() as Node2D
+	chest_spear.name = "ChestSpear"
+	chest_spear.position = _tile_center(spear_tile.x, spear_tile.y)
+	chest_spear.set("chest_id", "chest_forest_02")
+	chest_spear.set("item_id", "iron_spear")
+	chest_spear.set("gold", 0)
+	add_child(chest_spear)
+	_chest_spear_node = chest_spear
 
 	var trap := _instantiate(TRAP_SCENE, _tile_center(24, 9), "Trap")
 	trap.name = "Trap"
