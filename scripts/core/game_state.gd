@@ -234,6 +234,8 @@ func equip(item_id: String) -> bool:
 ## The item stays in the inventory (equip never consumes it), so unequipping is
 ## always reversible.
 func unequip(slot: String) -> bool:
+	if not equipment.has(slot):
+		return false
 	var current: String = String(equipment.get(slot, ""))
 	if current == "":
 		return false
