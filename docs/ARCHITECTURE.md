@@ -181,6 +181,17 @@ payload `DamageResolver.resolve_hit` ключи `status` и `status_duration` �
 `TileSet` создаётся в рантайме, у камня и дерева есть коллизия. Спавны описаны
 в одном месте, координаты в тайлах.
 
+Помимо двух сундуков в мире лежат четыре подбираемых предмета (`PickupA`,
+`PickupHerb`, `PickupCoin`, `PickupFlask`) и завал `Breakable`
+(`scripts/world/breakable.gd`, `scenes/world/breakable.tscn`) на тайле
+`RUBBLE_TILE = (19, 28)`. Завал — `StaticBody2D` со `collision_layer = 5`:
+единица блокирует игрока, четвёрка подставляет его под `AttackHitbox`, у
+которого `collision_mask = 4`. Разрушаясь, он снимает коллизии в том же кадре
+(`queue_free` отвязал бы тело только в конце физического шага, и игрок, уже
+идущий в кучу, отбивался бы от неё) и ставит флаг
+`shortcut_forest_south_open`. Ниша `PickupFlask` в `(20, 30)` без завала — 41
+тайл в обход против 37 через пробитый проход.
+
 ### Время суток и расписания
 
 `DayClock` (`scripts/world/day_clock.gd`) — дочерний узел `Forest`, не autoload;

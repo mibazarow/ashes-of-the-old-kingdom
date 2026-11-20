@@ -15,6 +15,7 @@ const COLOR_TREE := Color(0.20, 0.16, 0.12)
 const COLOR_NPC := Color(0.95, 0.80, 0.35)
 const COLOR_CHEST := Color(0.98, 0.84, 0.30)
 const COLOR_TRAP := Color(0.85, 0.25, 0.22)
+const COLOR_SHORTCUT := Color(0.72, 0.62, 0.45)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -100,6 +101,10 @@ func _draw() -> void:
 					color = COLOR_CHEST
 				"trap":
 					color = COLOR_TRAP
+				# A blocked shortcut. The world drops the landmark once the pile
+				# is broken, so this marker only ever marks ground still to dig.
+				"shortcut":
+					color = COLOR_SHORTCUT
 				_:
 					continue
 			_draw_marker(tile, color)

@@ -16,6 +16,7 @@ const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 const PICKUP_SCENE := "res://scenes/items/pickup.tscn"
+const BREAKABLE_SCENE := "res://scenes/world/breakable.tscn"
 
 ## Map is generated once from a fixed seed so every run and every test sees the
 ## same layout, while staying readable instead of a 60-line string literal.
@@ -52,6 +53,7 @@ var _smith_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
+var _rubble_node: Node2D
 
 ## Fixed anchor for the spear chest, on the south-west side away from the sword
 ## chest in the east clearing. The exact tile is derived from the generated grid
@@ -99,6 +101,42 @@ const NEW_ENEMY_SCAN_RADIUS := 5
 ## the rectangle and the seed are all fixed.
 const FOREST_WARDEN_ANCHOR := Vector2i(MAP_W - 8, 7)
 const FOREST_WARDEN_SCAN_RADIUS := 1
+
+## The south-side shortcut (roadmap stage D). The generated grid leaves exactly
+## one tile of passage between the tree block at cols 12..15 rows 27..28 and the
+## block at cols 20..21 rows 27..28: the neck runs (19,27) -> (19,28) -> (19,29),
+## because (18,29) and (19,30) are trees on one side and (20,28), (21,28) are
+## trees on the other. (19,28) is the mouth of that neck, so a pile there closes
+## the direct line from the village down into the row-29 gully without cutting
+## anything off — the gully stays reachable the long way round, north of the
+## (20..21, 27..28) cluster and back down at col 22, which costs 4 extra tiles to
+## the nook at (20,30) and 6 to (19,29). Those are BFS numbers measured through
+## `cell_at`, asserted by the `breakable_shortcut` test group rather than
+## trusted from this comment.
+##
+## The tile is deliberately NOT an articulation point: with the pile standing,
+## every NPC, both chests and every enemy are still reachable at their original
+## distance, which is what keeps the bots on their existing routes. It is also
+## five rows clear of the road (rows 6..11), so it never blocks the main drag.
+const RUBBLE_TILE := Vector2i(19, 28)
+const RUBBLE_SHORTCUT_ID := "forest_south"
+
+## How far the walkable scan looks for a find. Two tiles is enough to step out of
+## a 2x2 cluster and small enough to keep each find inside the quarter of the map
+## its anchor names, which is what "three finds in different parts of the map"
+## means here: east, south-west and the gully behind the rubble.
+const FIND_SCAN_RADIUS := 2
+
+## Anchors for the three finds. The herb is on the east flank below the archer's
+## clearing, the coin purse in the south-west, and the flask in the nook at
+## (20,30) that the rubble seals — so the shortcut pays for itself in a potion.
+## The flask uses radius 0 on purpose: its tile is chosen by the shortcut
+## geometry, not by the scan, so the call is a walkability check on that exact
+## tile, and the test group asserts every find (this one included) ends up on
+## ground a player can stand on.
+const PICKUP_HERB_ANCHOR := Vector2i(46, 13)
+const PICKUP_COIN_ANCHOR := Vector2i(9, 26)
+const PICKUP_FLASK_TILE := Vector2i(20, 30)
 
 
 func _ready() -> void:
@@ -170,9 +208,18 @@ func landmarks() -> Array[Dictionary]:
 		["Chest", "chest", _chest_node],
 		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
+		# The shortcut marker disappears on its own once the pile is broken: the
+		# loop below drops a node that has been freed. The validity check has to
+		# come before the typed binding, not after it — assigning a freed instance
+		# to `var node: Node2D` is itself a script error, and the rubble is the
+		# first landmark that ever frees itself, so every map open after it broke
+		# used to log one.
+		["Rubble", "shortcut", _rubble_node],
 	]:
+		if not is_instance_valid(entry[2]):
+			continue
 		var node: Node2D = entry[2]
-		if node == null or not is_instance_valid(node):
+		if node == null:
 			continue
 		out.append({
 			"id": String(entry[0]),
@@ -414,6 +461,56 @@ func _spawn_actors() -> void:
 		FOREST_WARDEN_SCAN_RADIUS)
 
 	_instantiate(PICKUP_SCENE, _tile_center(13, 10), "PickupA")
+
+	# Three more finds for roadmap stage D, one per quarter of the map that did
+	# not already hold one. Each tile comes from the same deterministic outward
+	# scan the chests and the new enemies use, so a cluster from the fixed seed
+	# can never swallow a find. They are appended AFTER PickupA on purpose: the
+	# soak bot walks to the FIRST node of the `pickup` group, and that has to
+	# stay the potion it banks a few tiles east of the spawn.
+	_spawn_pickup("PickupHerb", _find_walkable_near(PICKUP_HERB_ANCHOR, FIND_SCAN_RADIUS),
+		"wolf_fang", 2, 0)
+	_spawn_pickup("PickupCoin", _find_walkable_near(PICKUP_COIN_ANCHOR, FIND_SCAN_RADIUS),
+		"", 0, 35)
+	_spawn_pickup("PickupFlask", _find_walkable_near(PICKUP_FLASK_TILE, 0),
+		"health_potion", 1, 0)
+
+	_spawn_rubble()
+
+
+## Places one `Pickup` on a tile this function is handed, with its payload set
+## before `add_child` so the pickup's own `_ready` reads this instance's values.
+## `item_id = ""` is a valid find: the pickup then carries gold only, which is
+## how the coin purse works.
+func _spawn_pickup(node_name: String, tile: Vector2i, item: String, count: int, coins: int) -> void:
+	var packed: PackedScene = load(PICKUP_SCENE)
+	if packed == null:
+		push_error("Forest: cannot load %s" % PICKUP_SCENE)
+		return
+	var pickup := packed.instantiate() as Node2D
+	pickup.name = node_name
+	pickup.position = _tile_center(tile.x, tile.y)
+	pickup.set("item_id", item)
+	pickup.set("amount", count)
+	pickup.set("gold", coins)
+	add_child(pickup)
+
+
+## The south shortcut obstacle. Its tile is a fixed constant rather than a scan
+## result on purpose: the whole point of the pile is that it sits in the one
+## natural neck on the south side, and a scan that "improved" the position would
+## silently invalidate the BFS detour the test group measures.
+func _spawn_rubble() -> void:
+	var packed: PackedScene = load(BREAKABLE_SCENE)
+	if packed == null:
+		push_error("Forest: cannot load %s" % BREAKABLE_SCENE)
+		return
+	var rubble := packed.instantiate() as Node2D
+	rubble.name = "Rubble"
+	rubble.position = _tile_center(RUBBLE_TILE.x, RUBBLE_TILE.y)
+	rubble.set("blocks_shortcut_id", RUBBLE_SHORTCUT_ID)
+	add_child(rubble)
+	_rubble_node = rubble
 
 
 func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> void:

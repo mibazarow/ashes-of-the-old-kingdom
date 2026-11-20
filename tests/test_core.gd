@@ -16,6 +16,15 @@ var sm: Node
 var bus: Node
 var completed: Dictionary = {}
 
+## Toasts seen on EventBus since the counter was last read. A GDScript lambda
+## captures its locals by value, so a group that counts signals needs a member
+## the connected method can actually write to.
+var _toast_count := 0
+
+
+func _count_toast(_message: String) -> void:
+	_toast_count += 1
+
 
 class DummyTarget:
 	extends Node
@@ -201,6 +210,9 @@ func _run() -> void:
 	print("== world chests ==")
 	await _test_world_chests()
 
+	print("== finds and shortcut ==")
+	await _test_breakable_shortcut()
+
 	print("== ability ==")
 	await _test_ability()
 
@@ -269,7 +281,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 43, "every test group ran to completion (got %d/43)" % completed.size())
+	_check(completed.size() == 44, "every test group ran to completion (got %d/44)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -1860,6 +1872,333 @@ func _find_chests() -> Array[Node]:
 		if chest_id != null and String(chest_id) != "":
 			out.append(node)
 	return out
+
+
+## Every ground find in the world, found through the group the pickup joins
+## rather than by name, so a renamed node still counts and a stray node still
+## fails the "exactly four" assertion instead of hiding.
+func _find_pickups() -> Array[Node]:
+	var out: Array[Node] = []
+	for node in get_nodes_in_group("pickup"):
+		out.append(node)
+	return out
+
+
+## Tile a world node occupies, using the same 16 px grid the Forest exposes.
+func _tile_of_node(node: Node2D) -> Vector2i:
+	if node == null:
+		return Vector2i(-9999, -9999)
+	return Vector2i(
+		floori(node.global_position.x / 16.0),
+		floori(node.global_position.y / 16.0)
+	)
+
+
+## Four-way BFS over the map through the public Forest `cell_at` only, treating
+## "#" and "T" as solid and anything in `blocked` as solid too. Returns
+## tile -> step count. The shortcut tests must measure the route the player
+## would actually walk, so nothing here may know the grid any other way.
+func _bfs_reachable(world: Node, start: Vector2i, blocked: Dictionary) -> Dictionary:
+	if not _route_walkable(world, start, blocked):
+		return {}
+	var dist := {start: 0}
+	var queue: Array[Vector2i] = [start]
+	var head := 0
+	while head < queue.size():
+		var cur: Vector2i = queue[head]
+		head += 1
+		for d in [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
+			var next: Vector2i = cur + d
+			if not _route_walkable(world, next, blocked) or dist.has(next):
+				continue
+			dist[next] = int(dist[cur]) + 1
+			queue.append(next)
+	return dist
+
+
+func _route_walkable(world: Node, tile: Vector2i, blocked: Dictionary) -> bool:
+	if blocked.has(tile):
+		return false
+	var ch := String(world.call("cell_at", tile))
+	return ch == "." or ch == ","
+
+
+func _bfs_distance(world: Node, start: Vector2i, target: Vector2i, blocked: Dictionary) -> int:
+	return int(_bfs_reachable(world, start, blocked).get(target, -1))
+
+
+## Input override that answers the aim query and nothing else, so a scripted
+## melee swing points where the rig wants. InputSource falls through to the real
+## Input singleton for every method the override does not implement, which is
+## what keeps movement, attack and interact on the human path. In a headless run
+## the mouse sits at the origin, so without this the swing would aim at (0, 0).
+class AimAt:
+	extends RefCounted
+
+	var direction := Vector2.RIGHT
+
+	func _init(dir: Vector2) -> void:
+		direction = dir
+
+	func aim_direction(_from: Vector2) -> Vector2:
+		return direction
+
+
+## Roadmap stage D: three finds and a shortcut the player digs open.
+##
+## The group runs against the real generated world rather than a fixture,
+## because every claim it makes is a claim about that map: the finds sit in
+## different quarters on ground a player can stand on, the pile really blocks
+## movement, and breaking it measurably shortens the walk to the nook behind it.
+## The route numbers come from a BFS over the public `cell_at`, never from a
+## literal, so a future change to the map seed moves the assertions with the map
+## instead of quietly passing.
+func _test_breakable_shortcut() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Engine.time_scale = 1.0
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(world != null and player != null, "world and player present for breakable-shortcut test")
+	if world == null or player == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["breakable_shortcut"] = true
+		return
+
+	var spawn_tile: Vector2i = world.call("player_tile")
+
+	# --- the four finds and their payloads ------------------------------------
+	var pickups := _find_pickups()
+	_check(pickups.size() == 4, "world spawns exactly 4 pickups (got %d)" % pickups.size())
+	var by_name: Dictionary = {}
+	for p in pickups:
+		by_name[String(p.name)] = p
+	var payloads := {
+		"PickupA": ["health_potion", 1, 0],
+		"PickupHerb": ["wolf_fang", 2, 0],
+		"PickupCoin": ["", 0, 35],
+		"PickupFlask": ["health_potion", 1, 0],
+	}
+	var names_ok := true
+	var payloads_ok := true
+	for want: String in payloads.keys():
+		var node: Node = by_name.get(want)
+		if node == null:
+			names_ok = false
+			payloads_ok = false
+			continue
+		var spec: Array = payloads[want]
+		if String(node.get("item_id")) != String(spec[0]) \
+				or int(node.get("amount")) != int(spec[1]) \
+				or int(node.get("gold")) != int(spec[2]):
+			payloads_ok = false
+			print("      %s carries %s x%d %dg" % [
+				String(node.name), String(node.get("item_id")),
+				int(node.get("amount")), int(node.get("gold"))])
+	_check(names_ok, "the finds are PickupA, PickupHerb, PickupCoin and PickupFlask")
+	_check(payloads_ok,
+		"each find carries its payload (herb wolf_fang x2, coin 35g with no item, flask potion x1)")
+
+	# --- every find stands on ground a player can walk on ----------------------
+	var on_solid := 0
+	for p: Node in pickups:
+		var p_tile := _tile_of_node(p as Node2D)
+		var p_cell := String(world.call("cell_at", p_tile))
+		if p_cell != "." and p_cell != ",":
+			on_solid += 1
+			print("      %s stands on %s = '%s'" % [String(p.name), str(p_tile), p_cell])
+	_check(pickups.size() == 4 and on_solid == 0,
+		"every pickup stands on a walkable tile (%d on solid)" % on_solid)
+
+	# --- the pile: solid, on the melee layer, on a walkable tile underneath ----
+	var rubble := get_first_node_in_group("breakable") as StaticBody2D
+	_check(rubble != null, "the world spawns a breakable obstacle")
+	if rubble == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["breakable_shortcut"] = true
+		return
+	var rubble_tile := _tile_of_node(rubble)
+	var rubble_cell := String(world.call("cell_at", rubble_tile))
+	_check(rubble_cell == "." or rubble_cell == ",",
+		"the pile sits on a tile that is walkable underneath it ('%s' at %s)" % [rubble_cell, str(rubble_tile)])
+	_check(rubble.collision_layer & 1 != 0, "the pile is solid on the movement layer")
+	_check(rubble.collision_layer & 4 != 0,
+		"the pile is on the layer the player's AttackHitbox masks (hitbox mask is 4)")
+	_check(String(rubble.get("blocks_shortcut_id")) == "forest_south",
+		"the pile guards the forest_south shortcut")
+	# The map panel draws exactly what landmarks() hands it, so the marker a
+	# player uses to hunt the pile down has to be in that list while it stands.
+	var marker_tiles: Array[String] = []
+	for lm: Dictionary in world.call("landmarks"):
+		if String(lm.get("kind", "")) == "shortcut":
+			marker_tiles.append(str(lm.get("tile", Vector2i(-1, -1))))
+	_check(marker_tiles == [str(rubble_tile)],
+		"the map marks the pile and nothing else as a shortcut (got %s)" % ", ".join(marker_tiles))
+
+	# --- breaking it really shortens the walk ---------------------------------
+	# The flask's nook is the deepest point behind the neck, so the shortcut
+	# guards something a player actually wants rather than an empty tile.
+	var flask := by_name.get("PickupFlask") as Node2D
+	_check(flask != null, "the flask find is available as the shortcut target")
+	var beyond := _tile_of_node(flask)
+	var blocked_route := _bfs_distance(world, spawn_tile, beyond, {rubble_tile: true})
+	var open_route := _bfs_distance(world, spawn_tile, beyond, {})
+	print("      shortcut: %s -> %s is %d tiles with the pile, %d without" % [
+		str(spawn_tile), str(beyond), blocked_route, open_route])
+	_check(blocked_route > 0 and open_route > 0,
+		"the nook behind the pile is reachable both ways (%d with the pile, %d without)" % [
+			blocked_route, open_route])
+	_check(open_route > 0 and blocked_route > open_route,
+		"removing the pile makes the walk to the nook strictly shorter (%d -> %d tiles)" % [
+			blocked_route, open_route])
+
+	# --- and it cuts nothing off: the bots' routes are untouched ---------------
+	var reachable := _bfs_reachable(world, spawn_tile, {rubble_tile: true})
+	var cut_off: Array[String] = []
+	for lm: Dictionary in world.call("landmarks"):
+		if String(lm.get("kind", "")) == "shortcut":
+			continue
+		var lm_tile: Vector2i = lm.get("tile", Vector2i(-1, -1))
+		if not reachable.has(lm_tile):
+			cut_off.append("%s@%s" % [String(lm.get("id", "")), str(lm_tile)])
+	for node in get_nodes_in_group("enemy"):
+		var e_tile := _tile_of_node(node as Node2D)
+		if not reachable.has(e_tile):
+			cut_off.append("%s@%s" % [String(node.name), str(e_tile)])
+	_check(cut_off.is_empty(),
+		"with the pile standing every NPC, chest and enemy stays reachable (%s)" % ", ".join(cut_off))
+
+	# --- the player's own melee path chips it ----------------------------------
+	# Unarmed and crit-free keeps the arithmetic exact: with no weapon the swing
+	# is round(total_attack() * 1.0), and with the crit roll switched off that is
+	# total_attack() itself. The pile has no get_defense(), so DamageResolver
+	# subtracts nothing on top.
+	_equip_weapon("")
+	gs.set("_crit_chance", 0.0)
+	var per_swing := int(gs.total_attack())
+	var max_health := int(rubble.get("max_health"))
+	_check(per_swing > 0, "the unarmed player swings for a measurable %d" % per_swing)
+	_check(max_health > per_swing,
+		"the pile survives a single swing, so the per-swing delta is observable (%d > %d)" % [
+			max_health, per_swing])
+
+	# Stand the player on the free tile west of the pile and point the swing
+	# east. The swing is aim-driven, hence the aim-only override above.
+	player.global_position = rubble.global_position + Vector2(-16.0, 0.0)
+	player.set("velocity", Vector2.ZERO)
+	InputSource.set_override(AimAt.new(Vector2.RIGHT))
+	await physics_frame
+
+	var toasts_before := _toast_count
+	bus.toast.connect(_count_toast)
+
+	var swings := 0
+	var hp_before := int(rubble.call("current_health"))
+	player.call("_start_attack")
+	await _finish_swing(player, 150)
+	var hp_after := int(rubble.call("current_health"))
+	swings = 1
+	# One swing's worth and not two: the active window stays open for several
+	# physics frames and _apply_attack_hits runs every one of them, so a delta of
+	# exactly per_swing is the proof that both the per-swing guard and the
+	# DamageResolver hit_id dedupe held.
+	_check(hp_before - hp_after == per_swing,
+		"one swing removes exactly total_attack() and never twice (%d -> %d, delta %d)" % [
+			hp_before, hp_after, hp_before - hp_after])
+
+	while swings < 40 and is_instance_valid(rubble) and not bool(rubble.call("is_broken")):
+		player.call("_start_attack")
+		await _finish_swing(player, 150)
+		swings += 1
+
+	var expected_swings := int(ceil(float(max_health) / float(per_swing)))
+	_check(swings == expected_swings,
+		"max_health worth of hits took exactly %d swings (got %d)" % [expected_swings, swings])
+	_check(bool(rubble.call("is_broken")) if is_instance_valid(rubble) else true,
+		"the pile reports itself broken once its health is spent")
+	await process_frame
+	await process_frame
+	_check(not is_instance_valid(rubble), "the pile is freed after breaking")
+	_check(_toast_count - toasts_before >= 1,
+		"breaking the pile raised a toast (got %d)" % (_toast_count - toasts_before))
+	bus.toast.disconnect(_count_toast)
+	InputSource.clear_override()
+
+	_check(bool(gs.get_flag("shortcut_forest_south_open", false)),
+		"breaking the pile sets shortcut_forest_south_open")
+	# The same list, now without the entry: a marker on ground that is already
+	# open would send the player digging at nothing.
+	var stale_markers := 0
+	for lm: Dictionary in world.call("landmarks"):
+		if String(lm.get("kind", "")) == "shortcut":
+			stale_markers += 1
+	_check(stale_markers == 0,
+		"the shortcut marker goes away with the pile (got %d left)" % stale_markers)
+
+	# --- the flag is ordinary GameState state, so it saves and loads -----------
+	var saved: Dictionary = sm.save_game(1)
+	_check(bool(saved.get("ok", false)), "save slot 1 ok with the shortcut flag set")
+	gs.reset()
+	_check(not bool(gs.get_flag("shortcut_forest_south_open", false)),
+		"reset clears the shortcut flag, so the load below cannot pass by accident")
+	var loaded: Dictionary = sm.load_game(1)
+	_check(bool(loaded.get("ok", false)), "load slot 1 ok")
+	_check(bool(gs.get_flag("shortcut_forest_south_open", false)),
+		"the shortcut flag survives a save round-trip")
+
+	# --- the tile is passable again once the pile is gone ----------------------
+	var cleared := _bfs_distance(world, spawn_tile, beyond, {})
+	_check(cleared == open_route,
+		"with the pile gone the route is the measured open one (%d == %d)" % [cleared, open_route])
+
+	_clear_slot(1)
+	# --- the path with no HealthComponent child --------------------------------
+	# The shipped scene carries a HealthComponent, but the class also promises to
+	# run on its own counter when one is simply not there. A bare Breakable.new()
+	# is the only way to reach that branch, and the same hit_id must still land
+	# exactly once there too.
+	var bare := Breakable.new()
+	bare.max_health = 12
+	bare.blocks_shortcut_id = "bare_test"
+	root.add_child(bare)
+	await process_frame
+	DamageResolver.reset()
+	DamageResolver.resolve_hit(null, bare, {"damage": 5, "hit_id": "bare-1"})
+	DamageResolver.resolve_hit(null, bare, {"damage": 5, "hit_id": "bare-1"})
+	_check(int(bare.call("current_health")) == 7,
+		"a breakable with no HealthComponent still counts damage (%d)" % int(bare.call("current_health")))
+	DamageResolver.resolve_hit(null, bare, {"damage": 5, "hit_id": "bare-2"})
+	DamageResolver.resolve_hit(null, bare, {"damage": 5, "hit_id": "bare-3"})
+	var bare_broken := is_instance_valid(bare) and bool(bare.call("is_broken"))
+	_check(bare_broken, "the counter-only breakable dies once its own total is spent")
+	_check(bool(gs.get_flag("shortcut_bare_test_open", false)),
+		"the counter-only breakable raises its own shortcut flag")
+	await process_frame
+	_check(not is_instance_valid(bare), "the counter-only breakable is freed too")
+	DamageResolver.reset()
+
+	for i in range(150):
+		if Engine.time_scale == 1.0:
+			break
+		await process_frame
+	_check(Engine.time_scale == 1.0, "breakable group restored Engine.time_scale")
+	Engine.time_scale = 1.0
+	DamageResolver.reset()
+	gs.reset()
+	scene.queue_free()
+	await process_frame
+	completed["breakable_shortcut"] = true
 
 
 ## Right mouse button casts the selected skill (spec §9). This group replaces the
