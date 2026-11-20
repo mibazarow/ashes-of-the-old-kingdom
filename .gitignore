@@ -7,6 +7,14 @@ export.cfg
 build/
 dist/
 
+# Large local archives (never commit)
+assets.zip
+# Extracted asset packs (source archive lives in assets.zip)
+assets/assets/
+assets/assets 2/
+assets/assets 3/
+assets/assets4/
+
 # Editor / OS
 .DS_Store
 *.tmp
