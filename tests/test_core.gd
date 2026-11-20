@@ -313,6 +313,9 @@ func _run() -> void:
 	await _test_zone_travel()
 	await _test_zone_save_restore()
 
+	print("== ruins quests ==")
+	await _test_ruins_quests()
+
 	print("== ruins mechanics ==")
 	await _test_ruins_mechanics()
 
@@ -321,7 +324,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 52, "every test group ran to completion (got %d/52)" % completed.size())
+	_check(completed.size() == 53, "every test group ran to completion (got %d/53)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6340,7 +6343,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- the quest table ------------------------------------------------------
 	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
 	var table: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
-	_check(table.size() == 3, "data/quests.json defines 3 quests (got %d)" % table.size())
+	_check(table.size() == 5, "data/quests.json defines 5 quests (got %d)" % table.size())
 	_check(table.has("q01_ash_wolves") and table.has("q02_gather_fangs") and table.has("q03_clear_boars"),
 		"the quest table holds q01, q02 and q03")
 
@@ -7366,7 +7369,7 @@ func _test_zone_travel() -> void:
 			ruin_posts += 1
 	_check(ruin_posts == 6, "the ruins spawn six skeletons (got %d)" % ruin_posts)
 	var ruins_lms: Array = ruins.call("landmarks")
-	_check(ruins_lms.size() == 4, "the ruins list four landmarks (got %d)" % ruins_lms.size())
+	_check(ruins_lms.size() == 5, "the ruins list five landmarks (got %d)" % ruins_lms.size())
 	var gate_lm_found := false
 	for lm: Dictionary in ruins_lms:
 		if String(lm.get("id", "")) == "ForestGate" and String(lm.get("kind", "")) == "gate":
@@ -7490,6 +7493,366 @@ func _test_zone_save_restore() -> void:
 	gs.reset()
 	_check(String(gs.zone) == "forest", "the group leaves no zone behind")
 	completed["zone_save_restore"] = true
+
+
+## The ruins puzzle, end to end, on a live travel into the zone rather than on a
+## fixture, because every claim here is a claim about the built zone: the hall is
+## guarded and the guards stand where a player can reach them but not where they
+## ambush him, the slab really stops the walk into the hall, the lever refuses a
+## player with empty hands and spends exactly one key when he has one, the door
+## The ruins quest giver: a carved slab that hands out the zone's two quests and
+## takes them back through the real `QuestManager`, with no dialogue data and no
+## `Npc` anywhere near it. The group walks the loop a player walks — read the
+## stone, kill the four guards, read it again, find the key, read it a third and a
+## fourth time — and counts the gold, the xp, the potions and the bag at every
+## hand-over, because a quest that starts but never pays is exactly as broken as
+## one that never starts at all.
+##
+## It runs before the ruins-mechanics group rather than after it on purpose: that
+## group is the last one to start a sound and its shutdown comment counts on being
+## the last group in the suite. Nothing here depends on the order — the group opens
+## by resetting both autoloads and closes by resetting them again.
+func _test_ruins_quests() -> void:
+	gs.reset()
+	qm.reset()
+	DamageResolver.reset()
+	Engine.time_scale = 1.0
+
+	# --- the table the two new quests were added to -----------------------------
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
+	_check(raw is Dictionary, "data/quests.json parses as a JSON object")
+	var defs: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
+	var ids: Array[String] = []
+	for quest_id: String in defs.keys():
+		ids.append(quest_id)
+	ids.sort()
+	_check(defs.size() == 5, "data/quests.json declares five quests (got %d)" % defs.size())
+	_check(ids == ["q01_ash_wolves", "q02_gather_fangs", "q03_clear_boars",
+			"q04_bone_guard", "q05_ruin_key"],
+		"the two ruins quests sit beside the three forest ones (%s)" % ", ".join(ids))
+
+	var bone: Dictionary = defs.get("q04_bone_guard", {})
+	var keyq: Dictionary = defs.get("q05_ruin_key", {})
+	_check(not bone.is_empty() and not keyq.is_empty(), "both ruins quests are defined")
+
+	var bone_objective: Dictionary = bone.get("objective", {})
+	_check(String(bone.get("title", "")) == "Кости у врат"
+			and String(bone.get("giver", "")) == "ruins_tablet",
+		"q04_bone_guard is 'Кости у врат' and is given by ruins_tablet")
+	_check(String(bone_objective.get("type", "")) == "kill"
+			and String(bone_objective.get("target", "")) == "ruin_skeleton"
+			and int(bone_objective.get("count", 0)) == 4,
+		"q04_bone_guard asks for four ruin_skeleton")
+	var bone_reward: Dictionary = bone.get("reward", {})
+	var bone_items: Dictionary = bone_reward.get("items", {})
+	_check(int(bone_reward.get("gold", 0)) == 80 and int(bone_reward.get("xp", 0)) == 70
+			and bone_items.size() == 1 and int(bone_items.get("health_potion", 0)) == 2,
+		"q04_bone_guard pays 80 gold, 70 xp and two health_potion")
+	_check(String(bone.get("start_line", "")) != ""
+			and String(bone.get("turn_in_line", "")) != "",
+		"q04_bone_guard carries both of its carved lines")
+
+	var key_objective: Dictionary = keyq.get("objective", {})
+	_check(String(keyq.get("title", "")) == "Ключ от зала"
+			and String(keyq.get("giver", "")) == "ruins_tablet",
+		"q05_ruin_key is 'Ключ от зала' and is given by ruins_tablet")
+	_check(String(key_objective.get("type", "")) == "collect"
+			and String(key_objective.get("target", "")) == "ruin_key"
+			and int(key_objective.get("count", 0)) == 1,
+		"q05_ruin_key asks for one ruin_key out of the bag")
+	var key_reward: Dictionary = keyq.get("reward", {})
+	var key_items: Dictionary = key_reward.get("items", {})
+	_check(int(key_reward.get("gold", 0)) == 50 and int(key_reward.get("xp", 0)) == 40
+			and key_items.is_empty(),
+		"q05_ruin_key pays 50 gold, 40 xp and no items")
+	_check(String(keyq.get("start_line", "")) != ""
+			and String(keyq.get("turn_in_line", "")) != "",
+		"q05_ruin_key carries both of its carved lines")
+
+	# --- the slab itself --------------------------------------------------------
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	_check(manager != null, "the ruins-quest group has a zone manager to travel with")
+	if manager == null:
+		await _finish_ruins_quest_group(scene)
+		return
+
+	_check(bool(manager.call("travel", "ruins")), "the group travelled into the ruins")
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var player := world.get_node_or_null("Player") as Node2D if world != null else null
+	_check(world != null and player != null, "the ruins built a world with a player of its own")
+	if world == null or player == null:
+		await _finish_ruins_quest_group(scene)
+		return
+
+	var entry := Vector2i(3, 8)
+	var stones: Array[Node] = []
+	for node in get_nodes_in_group("interactable"):
+		if String(node.name) == "RuinTablet":
+			stones.append(node)
+	_check(stones.size() == 1, "the ruins place exactly one RuinTablet (got %d)" % stones.size())
+	if stones.is_empty():
+		await _finish_ruins_quest_group(scene)
+		return
+	var tablet := stones[0] as Node2D
+	_check(tablet != null, "the tablet is a node in the world")
+	if tablet == null:
+		await _finish_ruins_quest_group(scene)
+		return
+
+	_check(tablet.is_in_group("interactable"), "the tablet is an interactable")
+	_check(tablet.is_in_group("quest_stone"), "the tablet marks itself as a quest stone")
+	_check(String(tablet.get("stone_id")) == "ruins_tablet",
+		"the tablet answers to the giver id the quests name")
+	var offered: Array[String] = []
+	for quest_id: String in (tablet.get("quest_ids") as Array):
+		offered.append(quest_id)
+	_check(offered == ["q04_bone_guard", "q05_ruin_key"],
+		"the tablet offers q04 first and q05 after it (%s)" % ", ".join(offered))
+
+	# Where it stands is the part a player feels rather than reads: a giver behind
+	# the door would be a prize for the puzzle instead of a reason to start
+	# anything, and a giver under the arrival point would open its prompt the frame
+	# the zone finished building.
+	var tablet_tile := _tile_of_node(tablet)
+	var tablet_cell := String(world.call("cell_at", tablet_tile))
+	_check(tablet_tile == Vector2i(11, 14),
+		"the tablet stands on the tile the zone declares, (11, 14) (got %s)" % str(tablet_tile))
+	_check(tablet_cell == "." or tablet_cell == ",",
+		"the tablet stands on a walkable tile (%s='%s')" % [str(tablet_tile), tablet_cell])
+	_check(tablet_tile.x < 14,
+		"the tablet is on the near side of the doorway, in the room before it (%s)"
+			% str(tablet_tile))
+	var tablet_clear := maxi(absi(tablet_tile.x - entry.x), absi(tablet_tile.y - entry.y))
+	_check(tablet_clear >= 4,
+		"the tablet is %d tiles from the entry tile, at least 4" % tablet_clear)
+	_check(tablet_tile != Vector2i(14, 11) and tablet_tile != Vector2i(13, 11),
+		"the tablet is neither the door tile nor the lever tile")
+	var tablet_route := _bfs_distance(world, entry, tablet_tile, {})
+	_check(tablet_route > 0,
+		"the tablet is on ground reachable from the entry tile (%d tiles)" % tablet_route)
+
+	var tablet_lm: Dictionary = {}
+	for lm: Dictionary in world.call("landmarks"):
+		if String(lm.get("kind", "")) == "tablet":
+			tablet_lm = lm
+	_check(not tablet_lm.is_empty(), "the map marks the tablet with a landmark of kind 'tablet'")
+	_check(String(tablet_lm.get("id", "")) == "RuinTablet"
+			and tablet_lm.get("tile") == tablet_tile,
+		"the tablet landmark carries the node's own id and tile")
+
+	_check(String(tablet.call("prompt_text")) == "Прочесть скрижаль",
+		"an untouched tablet prompts 'Прочесть скрижаль'")
+
+	# --- first reading: the hunt starts ----------------------------------------
+	bus.toast.connect(_count_toast)
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q04_bone_guard") == qm.STATE_ACTIVE,
+		"the first reading started q04_bone_guard")
+	_check(_toast_count >= 1,
+		"the tablet answered the first reading with a toast (got %d)" % _toast_count)
+	_check(_last_toast == "Скрижаль: Кости у врат",
+		"the tablet named the task it just took on (got '%s')" % _last_toast)
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE,
+		"the second quest stays on offer while the first one runs")
+	_check(qm.progress_of("q04_bone_guard") == 0, "a fresh hunt starts at zero")
+
+	# A reading in the middle of the hunt must neither start the second quest nor
+	# stay silent: the stone has to say what it is still waiting for.
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q04_bone_guard") == qm.STATE_ACTIVE
+			and qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE,
+		"a reading mid-hunt started nothing new")
+	_check(_toast_count == 1 and _last_toast == "Скрижаль помнит: 0 из 4",
+		"the tablet reported the progress instead (got %d toast, '%s')"
+			% [_toast_count, _last_toast])
+
+	# --- four real kills, through the enemy's own death -------------------------
+	var guards: Array[Node] = []
+	for node in get_nodes_in_group("enemy"):
+		if String(node.get("enemy_type")) == "ruin_skeleton":
+			guards.append(node)
+	_check(guards.size() == 4, "the four guards are standing to be killed (got %d)" % guards.size())
+	for i in range(guards.size()):
+		guards[i].call("receive_damage", 9999, {"hit_id": "ruins-quest-%d" % i})
+	await process_frame
+	_check(qm.progress_of("q04_bone_guard") == 4,
+		"four dead guards moved the counter to 4 (got %d)" % qm.progress_of("q04_bone_guard"))
+	_check(qm.state_of("q04_bone_guard") == qm.STATE_READY, "four kills arm the quest")
+	_check(String(tablet.call("prompt_text")) == "Сдать задание",
+		"a finished task changes the prompt to 'Сдать задание'")
+
+	# The xp bar is pushed out of reach before the reward is counted: `add_xp`
+	# spends the bar when it crosses a level, so a level-up inside this window
+	# would take the 70 back out again and the check would measure progression
+	# rather than the payout.
+	gs.xp_to_next = gs.xp + 1000
+	var bone_gold: int = gs.gold
+	var bone_xp: int = gs.xp
+	var bone_potions: int = gs.count_item("health_potion")
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q04_bone_guard") == qm.STATE_DONE, "the second reading handed the hunt in")
+	_check(gs.gold == bone_gold + 80,
+		"the hunt paid 80 gold (got %d over %d)" % [gs.gold, bone_gold])
+	_check(gs.xp == bone_xp + 70, "the hunt paid 70 xp (got %d over %d)" % [gs.xp, bone_xp])
+	_check(gs.count_item("health_potion") == bone_potions + 2,
+		"the hunt paid two potions (got %d over %d)"
+			% [gs.count_item("health_potion"), bone_potions])
+	_check(_last_toast == "Сдано: Кости у врат",
+		"the tablet announced the hand-over (got '%s')" % _last_toast)
+
+	# --- a third reading pays nothing and opens the second quest ----------------
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(gs.gold == bone_gold + 80, "a third reading paid no gold")
+	_check(gs.count_item("health_potion") == bone_potions + 2, "a third reading paid no potion")
+	_check(not qm.turn_in("q04_bone_guard"), "the manager refuses a second turn-in of q04")
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_ACTIVE,
+		"the tablet moved on to q05 once q04 was paid for")
+	_check(_last_toast == "Скрижаль: Ключ от зала",
+		"the tablet named the second quest (got '%s')" % _last_toast)
+
+	# --- the key, taken the way a player takes it -------------------------------
+	_check(qm.progress_of("q05_ruin_key") == 0, "the key quest starts at zero")
+	_check(gs.count_item("ruin_key") == 0, "the player holds no key yet")
+	var ground_key := _find_pickup_by_name("RuinKey") as Node2D
+	_check(ground_key != null, "the key still lies in the passage")
+	if ground_key != null:
+		player.global_position = ground_key.global_position
+		var frames := 0
+		while gs.count_item("ruin_key") == 0 and frames < 10:
+			await physics_frame
+			frames += 1
+		await process_frame
+	_check(gs.count_item("ruin_key") == 1,
+		"walking over the key put exactly one in the bag (got %d)" % gs.count_item("ruin_key"))
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_READY,
+		"the collect objective reads the live bag rather than a stored counter")
+	_check(qm.progress_of("q05_ruin_key") == 1, "the collect quest reports the bag")
+	_check(String(tablet.call("prompt_text")) == "Сдать задание",
+		"a bag holding the key changes the prompt too")
+
+	# Two keys in the bag before the hand-over, so the check measures one item
+	# spent instead of noticing that the stack went to zero either way.
+	gs.add_item("ruin_key", 1)
+	_check(gs.count_item("ruin_key") == 2, "the bag holds two keys before the hand-over")
+	var key_gold: int = gs.gold
+	var key_xp: int = gs.xp
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_DONE, "the key was handed in")
+	_check(gs.gold == key_gold + 50, "the key paid 50 gold (got %d over %d)" % [gs.gold, key_gold])
+	_check(gs.xp == key_xp + 40, "the key paid 40 xp (got %d over %d)" % [gs.xp, key_xp])
+	_check(gs.count_item("ruin_key") == 1,
+		"the turn-in spent exactly one ruin_key (got %d left)" % gs.count_item("ruin_key"))
+	_check(_last_toast == "Сдано: Ключ от зала",
+		"the tablet announced the second hand-over (got '%s')" % _last_toast)
+
+	# --- a stone with nothing left to give still answers ------------------------
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(_toast_count == 1 and _last_toast == "Скрижаль молчит",
+		"a finished tablet says so once (got %d toast, '%s')" % [_toast_count, _last_toast])
+	_check(gs.gold == key_gold + 50, "a finished tablet pays nothing more")
+	_check(String(tablet.call("prompt_text")) == "Прочесть скрижаль",
+		"with nothing ready the prompt falls back to 'Прочесть скрижаль'")
+
+	# --- the forest quests are untouched by any of this -------------------------
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_AVAILABLE
+			and qm.state_of("q02_gather_fangs") == qm.STATE_AVAILABLE
+			and qm.state_of("q03_clear_boars") == qm.STATE_AVAILABLE,
+		"the two ruins quests left all three forest quests on the shelf")
+	var wolf: Dictionary = defs.get("q01_ash_wolves", {})
+	var fangs: Dictionary = defs.get("q02_gather_fangs", {})
+	var boars: Dictionary = defs.get("q03_clear_boars", {})
+	var wolf_objective: Dictionary = wolf.get("objective", {})
+	var fang_objective: Dictionary = fangs.get("objective", {})
+	var boar_objective: Dictionary = boars.get("objective", {})
+	_check(String(wolf_objective.get("type", "")) == "kill"
+			and String(wolf_objective.get("target", "")) == "ash_wolf"
+			and int(wolf_objective.get("count", 0)) == 3
+			and String(wolf.get("giver", "")) == "npc_edrik",
+		"q01_ash_wolves is still three ash_wolf for Edrik")
+	_check(String(fang_objective.get("type", "")) == "collect"
+			and String(fang_objective.get("target", "")) == "wolf_fang"
+			and int(fang_objective.get("count", 0)) == 4
+			and String(fangs.get("giver", "")) == "npc_mila",
+		"q02_gather_fangs is still four wolf_fang for Mila")
+	_check(String(boar_objective.get("type", "")) == "kill"
+			and String(boar_objective.get("target", "")) == "ash_boar"
+			and int(boar_objective.get("count", 0)) == 2
+			and String(boars.get("giver", "")) == "npc_mila",
+		"q03_clear_boars is still two ash_boar for Mila")
+
+	_toast_count = 0
+	bus.toast.disconnect(_count_toast)
+	_check(bool(manager.call("travel", "forest")), "the group travelled back to the forest")
+	await process_frame
+	await process_frame
+	var back := scene.get_node_or_null("World")
+	_check(back != null and String(back.call("zone_id")) == "forest",
+		"the way back rebuilt the forest")
+	_check(get_nodes_in_group("quest_stone").is_empty(),
+		"no tablet followed the player into the forest")
+	var edrik := back.get_node_or_null("Edrik") if back != null else null
+	var mila := back.get_node_or_null("Mila") if back != null else null
+	_check(edrik != null and String(edrik.get("quest_id")) == "q01_ash_wolves",
+		"Edrik still gives q01_ash_wolves")
+	_check(mila != null and (mila.get("quest_ids") as Array) == ["q02_gather_fangs", "q03_clear_boars"],
+		"Mila still gives q02 and q03 in that order (got %s)" % str(mila.get("quest_ids") if mila != null else null))
+
+	# The forest loop end to end, after the ruins quests exist: the kill counter is
+	# still keyed by enemy type, so the new ruin_skeleton quest cannot steal the
+	# wolf kills and the old reward is still the one that lands.
+	_check(qm.start("q01_ash_wolves"), "Edrik's quest still starts")
+	for i in range(3):
+		bus.enemy_died.emit(StringName("ruins-quest-wolf-%d" % i), &"ash_wolf", Vector2.ZERO)
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_READY, "the wolf kills still arm q01")
+	var forest_gold: int = gs.gold
+	_check(qm.turn_in("q01_ash_wolves"), "q01 still turns in")
+	_check(gs.gold == forest_gold + 60, "q01 still pays its own 60 gold")
+
+	await _finish_ruins_quest_group(scene)
+
+
+## Shared exit of the ruins-quest group: the toast listener, the world, both
+## autoloads and the zone the run is left in. Every early return goes through here
+## so a group that bailed out halfway cannot hand the next one a live tablet, an
+## armed quest or a player standing in the ruins.
+func _finish_ruins_quest_group(scene: Node) -> void:
+	if bus != null and bus.is_connected("toast", _count_toast):
+		bus.toast.disconnect(_count_toast)
+	if scene != null and is_instance_valid(scene):
+		scene.queue_free()
+	await process_frame
+	qm.reset()
+	gs.reset()
+	DamageResolver.reset()
+	_check(qm.state_of("q04_bone_guard") == qm.STATE_AVAILABLE
+			and qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE
+			and qm.state_of("q01_ash_wolves") == qm.STATE_AVAILABLE,
+		"the group left no quest state behind")
+	_check(gs.count_item("ruin_key") == 0, "the group left no key behind")
+	_check(get_nodes_in_group("quest_stone").is_empty(), "the group left no tablet in the tree")
+	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
+	completed["ruins_quests"] = true
 
 
 ## The ruins puzzle, end to end, on a live travel into the zone rather than on a
@@ -7688,8 +8051,9 @@ func _test_ruins_mechanics() -> void:
 	for lm: Dictionary in world.call("landmarks"):
 		landmark_kinds.append(String(lm.get("kind", "")))
 	landmark_kinds.sort()
-	_check(landmark_kinds == ["door", "gate", "key", "mechanism"],
-		"the map marks the gate, the door, the lever and the key (got %s)" % ", ".join(landmark_kinds))
+	_check(landmark_kinds == ["door", "gate", "key", "mechanism", "tablet"],
+		"the map marks the gate, the door, the lever, the key and the tablet (got %s)"
+			% ", ".join(landmark_kinds))
 
 	# --- empty hands: the refusal writes nothing at all ------------------------
 	bus.toast.connect(_count_toast)
@@ -7778,6 +8142,11 @@ func _test_ruins_mechanics() -> void:
 		for lm: Dictionary in world.call("landmarks"):
 			landmark_kinds2.append(String(lm.get("kind", "")))
 	_check(landmark_kinds2.has("key"), "the key is a landmark while it still lies there")
+	# Read the key's declared taken flag now, while the node is still in the tree:
+	# the walk-over below frees it, and reading a property off a freed instance is a
+	# script error. The flag is what tells a rebuilt zone to leave this find off the
+	# floor, so it is asserted against the value the live pickup actually carries.
+	var key_taken_flag := String(key2.get("taken_flag")) if key2 != null else ""
 
 	gs.reset()
 	_check(gs.count_item("ruin_key") == 0, "the inventory starts empty before the pickup")
@@ -7802,6 +8171,81 @@ func _test_ruins_mechanics() -> void:
 	_check(not kinds_after_pickup.has("key"), "the map drops the key marker once it is taken")
 	_check(kinds_after_pickup.has("door") and kinds_after_pickup.has("mechanism"),
 		"the doorway and the lever stay marked after the key is gone")
+
+	# --- taken_flag: a one-off find stays off the ground across a rebuild --------
+	# The ruins key is the zone's single copy: travel frees and rebuilds the whole
+	# world, so without a flag the key would lie in the passage again every time the
+	# player walked back in, and a hand-in quest item could be carried twice. The
+	# pickup records the flag as it is taken, and a rebuilt zone reads that flag and
+	# leaves the find off the floor.
+	_check(key_taken_flag == "ruins_key_taken",
+		"the ruins key carries the taken flag the zone declares (got '%s')" % key_taken_flag)
+	_check(bool(gs.get_flag("ruins_key_taken", false)),
+		"collecting the key raised the ruins_key_taken flag")
+
+	# A plain ground find has no flag, so it keeps respawning with its zone exactly
+	# as before: the flag is opt-in and an empty one changes nothing. Built from the
+	# real pickup scene, because the collision shape that lets a body be detected
+	# lives in the scene, not in the script — a bare `Pickup.new()` would never see
+	# the player walk over it.
+	var flagless_packed: PackedScene = load("res://scenes/items/pickup.tscn")
+	var flagless := flagless_packed.instantiate() as Node2D
+	flagless.name = "FlaglessPickup"
+	flagless.set("item_id", "health_potion")
+	flagless.set("amount", 1)
+	flagless.set("taken_flag", "")
+	flagless.position = player.global_position + Vector2(48.0, 0.0)
+	world.add_child(flagless)
+	var potions_before_flagless: int = gs.count_item("health_potion")
+	var key_flag_before_flagless: Variant = gs.get_flag("ruins_key_taken", false)
+	player.global_position = flagless.position
+	var flagless_frames := 0
+	while gs.count_item("health_potion") == potions_before_flagless and flagless_frames < 10:
+		await physics_frame
+		flagless_frames += 1
+	await process_frame
+	_check(gs.count_item("health_potion") == potions_before_flagless + 1,
+		"a pickup with an empty taken_flag still collects (got %d over %d)"
+			% [gs.count_item("health_potion"), potions_before_flagless])
+	_check(not is_instance_valid(flagless), "the flagless pickup freed itself once taken")
+	_check(gs.get_flag("ruins_key_taken", false) == key_flag_before_flagless,
+		"the flagless pickup wrote no flag (got %s over %s)"
+			% [str(gs.get_flag("ruins_key_taken", false)), str(key_flag_before_flagless)])
+
+	# With the flag raised, a full forest -> ruins rebuild must not hand out a
+	# second key: the node removes itself in _ready, so it is neither a walk-over
+	# target nor a map landmark.
+	_check(bool(manager.call("travel", "forest")), "left the ruins after the key was taken")
+	await process_frame
+	_check(bool(manager.call("travel", "ruins")), "rebuilt the ruins after the key was taken")
+	await process_frame
+	var world_taken := scene.get_node_or_null("World")
+	_check(_find_pickup_by_name("RuinKey") == null,
+		"a rebuilt ruins do not respawn a key that was already taken")
+	var taken_lands: Array[String] = []
+	if world_taken != null:
+		for lm: Dictionary in world_taken.call("landmarks"):
+			taken_lands.append(String(lm.get("kind", "")))
+	_check(not taken_lands.has("key"),
+		"the rebuilt ruins mark no key landmark once it is taken (got %s)"
+			% ", ".join(taken_lands))
+
+	# The flag is the only thing keeping the key off the floor: clear it and the
+	# same travel spawns the key again, so an untouched zone still offers the find.
+	gs.set_flag("ruins_key_taken", false)
+	_check(bool(manager.call("travel", "forest")), "left the ruins to test the not-taken path")
+	await process_frame
+	_check(bool(manager.call("travel", "ruins")), "rebuilt the ruins with the key not taken")
+	await process_frame
+	var world_fresh := scene.get_node_or_null("World")
+	_check(_find_pickup_by_name("RuinKey") != null,
+		"an untouched rebuild still spawns the key on the ground")
+	var fresh_lands: Array[String] = []
+	if world_fresh != null:
+		for lm: Dictionary in world_fresh.call("landmarks"):
+			fresh_lands.append(String(lm.get("kind", "")))
+	_check(fresh_lands.has("key"),
+		"the rebuilt ruins mark the key while it lies there (got %s)" % ", ".join(fresh_lands))
 
 	# --- the items behind the puzzle -------------------------------------------
 	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/items.json"))

@@ -20,6 +20,10 @@ const COLOR_GATE := Color(0.55, 0.46, 0.86)
 const COLOR_DOOR := Color(0.62, 0.40, 0.26)
 const COLOR_MECHANISM := Color(0.35, 0.75, 0.55)
 const COLOR_KEY := Color(0.95, 0.55, 0.20)
+## The quest slab. Pale carved stone: distinct from the violet gate it stands near
+## and from the green lever it shares the passage with, so the two props of the
+## ruins never read as one marker at four pixels to the tile.
+const COLOR_TABLET := Color(0.78, 0.80, 0.88)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -151,6 +155,10 @@ func _draw() -> void:
 				# world drops the landmark when the pickup frees itself.
 				"key":
 					color = COLOR_KEY
+				# The quest slab of the ruins. Stays marked once handed in: the
+				# stone outlives every task carved on it.
+				"tablet":
+					color = COLOR_TABLET
 				_:
 					continue
 			_draw_marker(tile, color)

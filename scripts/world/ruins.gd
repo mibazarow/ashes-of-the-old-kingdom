@@ -72,6 +72,12 @@ const DIRT_PATCHES: Array[Rect2i] = [
 const DOOR_OPEN_FLAG := "ruin_door_open"
 const KEY_ITEM := "ruin_key"
 
+## The flag the key's pickup raises when it leaves the ground, so a rebuilt ruins
+## leaves the key off the floor instead of handing out a second copy. It lives with
+## the other two puzzle flags so the prop and the zone cannot drift to different
+## strings.
+const KEY_TAKEN_FLAG := "ruins_key_taken"
+
 ## `INNER_WALLS` leaves exactly one way from the entry passage into the hall: the
 ## gap at column 14, rows 9..13. The door stands on the middle row of that gap and
 ## is as tall as the gap itself, because a slab one tile high in an opening five
@@ -100,11 +106,40 @@ const MECHANISM_TILE := Vector2i(13, 11)
 const KEY_ANCHOR := Vector2i(11, 23)
 const KEY_SCAN_RADIUS := 2
 
+## The quest giver of this zone, and the reason the ruins are no longer a courtyard
+## with a puzzle and nothing to do in it. It is a `QuestStone`, not an `Npc`: the
+## hall has no inhabitants, and a slab of granite that hands out tasks needs no
+## face, no schedule and no conversation.
+##
+## The two quests are deliberately in this order. `q04_bone_guard` names the four
+## guards in the hall, which is the half of the zone the player cannot reach yet,
+## so it is the one that tells him the hall exists; `q05_ruin_key` asks for the key
+## and is only offered once the first is paid for. The stone starts the first quest
+## on offer and offers nothing else while it is running, so the sequence is decided
+## by this list rather than by anything the stone knows.
+const TABLET_STONE_ID := "ruins_tablet"
+const TABLET_QUEST_IDS: Array[String] = ["q04_bone_guard", "q05_ruin_key"]
+
+## The tablet's tile: on the near side of the door, like the lever, because a
+## quest giver the player has to solve the puzzle to reach would be a reward for
+## the puzzle rather than a reason to start it. South of the doorway, on the far
+## side of the passage from the lever, so standing at the carving never puts the
+## lever inside the same 26 px reach — the two centres are 57 px apart. Eight
+## tiles east and six south of the entry tile, which is twice the four-tile minimum
+## the zone asks of a prop, so arriving is never standing in somebody's prompt.
+const TABLET_ANCHOR := Vector2i(11, 14)
+## Zero, like the gate's: the declared tile is checked for walkability rather than
+## snapped to the nearest free one, because a wide row-major scan would answer with
+## the top-left corner of its box and move the quest giver somewhere else. A prop
+## the map marks and the quests hang from has to stay where the zone says it is.
+const TABLET_SCAN_RADIUS := 0
+const TABLET_CLEAR_FROM_ENTRY := 4
+
 ## Skeleton posts, all of them in the hall behind the door: the door is what keeps
 ## them off the player until the puzzle is solved, and `Enemy._player_visible()`
 ## casts its sight ray against the world layer the door is on, so a closed slab
 ## really does cut the line of sight as well as the corridor. Every anchor is
-## snapped by `_find_spawn_tile`, so a pillar or a wall segment edited later moves
+## snapped by `_find_prop_tile`, so a pillar or a wall segment edited later moves
 ## the post with it instead of swallowing it.
 const SKELETON_A_ANCHOR := Vector2i(17, 9)
 const SKELETON_B_ANCHOR := Vector2i(24, 10)
@@ -128,6 +163,7 @@ var _gate_node: Node2D
 var _door_node: Node2D
 var _mechanism_node: Node2D
 var _key_node: Node2D
+var _tablet_node: Node2D
 
 
 func zone_id() -> String:
@@ -148,6 +184,10 @@ func landmarks() -> Array[Dictionary]:
 		# whole point of marking a find on the map: it tells the player the passage
 		# has something worth walking its length for.
 		["RuinKey", "key", _key_node],
+		# The quest giver stays marked for the whole life of the zone, unlike the
+		# key: a task you have already handed in is still a place worth walking
+		# back to, and the stone never frees itself.
+		["RuinTablet", "tablet", _tablet_node],
 	]:
 		# The validity check comes before the typed binding: assigning a freed
 		# instance to `var node: Node2D` is itself a script error.
@@ -243,9 +283,16 @@ func _spawn_actors() -> void:
 		key_tile: true,
 		gate_tile: true,
 	}
+	# The tablet is snapped against the same reserved set the props already took,
+	# and its own tile joins that set before the posts are placed, so a skeleton can
+	# never be parked on top of the quest giver.
+	var tablet_tile := _find_prop_tile(
+		TABLET_ANCHOR, TABLET_SCAN_RADIUS, spawn_tile, reserved, TABLET_CLEAR_FROM_ENTRY)
+	reserved[tablet_tile] = true
 	_spawn_door()
 	_spawn_mechanism()
 	_spawn_key(key_tile)
+	_spawn_tablet(tablet_tile)
 	_spawn_skeletons(spawn_tile, reserved)
 
 
@@ -293,11 +340,31 @@ func _spawn_key(tile: Vector2i) -> void:
 	pickup.set("item_id", KEY_ITEM)
 	pickup.set("amount", 1)
 	pickup.set("gold", 0)
+	# The key is a one-off find: once it is in the bag it must not lie in the
+	# passage again on the next rebuild of this zone, which travel does every time
+	# the player walks back through the forest gate.
+	pickup.set("taken_flag", KEY_TAKEN_FLAG)
 	var sprite := pickup.get_node_or_null("Sprite2D") as Sprite2D
 	if sprite != null:
 		sprite.modulate = Color(0.85, 0.62, 0.35)
 	add_child(pickup)
 	_key_node = pickup
+
+
+## The carved slab that hands out the zone's two quests. Built in code like the
+## door and the lever: a prop with no sprite of its own needs no scene file, and a
+## node assembled here cannot drift away from the tile constant that places it. The
+## quest list is handed over as a copy rather than the constant itself, because a
+## `const` array is read-only and an exported `Array[String]` is a live property a
+## later editor session could append to.
+func _spawn_tablet(tile: Vector2i) -> void:
+	var tablet := QuestStone.new()
+	tablet.name = "RuinTablet"
+	tablet.stone_id = TABLET_STONE_ID
+	tablet.quest_ids = TABLET_QUEST_IDS.duplicate()
+	tablet.position = _tile_center(tile.x, tile.y)
+	add_child(tablet)
+	_tablet_node = tablet
 
 
 ## Four guards and two bowmen on their own posts. Each tile is marked reserved as
@@ -312,23 +379,36 @@ func _spawn_skeletons(entry: Vector2i, reserved: Dictionary) -> void:
 		[SKELETON_ARCHER_SCENE, SKELETON_ARCHER_A_ANCHOR, "SkeletonArcherA"],
 		[SKELETON_ARCHER_SCENE, SKELETON_ARCHER_B_ANCHOR, "SkeletonArcherB"],
 	]:
-		var tile := _find_spawn_tile(post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved)
+		var tile := _find_prop_tile(
+			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
 		reserved[tile] = true
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules
 ## added: a tile a prop already stands on is not free, and neither is a tile
-## closer than `ENEMY_CLEAR_FROM_ENTRY` to the tile the player arrives on
-## (Chebyshev, so the diagonal counts as close too). Deterministic for the same
-## reason the base scan is — the order depends only on the anchor and the grid.
-func _find_spawn_tile(anchor: Vector2i, radius: int, entry: Vector2i, reserved: Dictionary) -> Vector2i:
+## closer than `clear_from_entry` to the tile the player arrives on (Chebyshev, so
+## the diagonal counts as close too). Deterministic for the same reason the base
+## scan is — the order depends only on the anchor and the grid.
+##
+## The clearance is a parameter rather than the one constant it was, because the
+## two callers ask for different things of the same rule: a skeleton has to stay
+## six tiles off the arrival point so nobody spawns inside a post's sight line,
+## while a stone tablet only has to stay out of the prompt that would open under
+## the player's feet.
+func _find_prop_tile(
+		anchor: Vector2i,
+		radius: int,
+		entry: Vector2i,
+		reserved: Dictionary,
+		clear_from_entry: int
+	) -> Vector2i:
 	for dy in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
 			var t := Vector2i(anchor.x + dx, anchor.y + dy)
 			if not _is_walkable(t) or reserved.has(t):
 				continue
-			if maxi(absi(t.x - entry.x), absi(t.y - entry.y)) < ENEMY_CLEAR_FROM_ENTRY:
+			if maxi(absi(t.x - entry.x), absi(t.y - entry.y)) < clear_from_entry:
 				continue
 			return t
 	return anchor
