@@ -38,7 +38,11 @@ const DEFAULT_PITCH_VARIATION := 0.06
 enum Bus { MUSIC, SFX, UI }
 
 const BUS_NAMES: Array[String] = ["Music", "SFX", "UI"]
-const DEFAULT_VOLUMES := {"Music": 0.6, "SFX": 0.8, "UI": 0.8}
+## The one source of truth for the shipped levels: `load_settings()` puts these
+## on the buses when there is no settings file, and the settings screen reads
+## them back through `settings_defaults()` for both its display and its `R` key,
+## so a fresh install cannot show one number and play another.
+const DEFAULT_VOLUMES := {"Music": 0.7, "SFX": 0.9, "UI": 0.8}
 
 ## name -> stream, filled on first use. `null` marks a name already found to be
 ## missing, so an unknown name does not hit the resource loader on every call.
@@ -209,18 +213,24 @@ func save_settings() -> Dictionary:
 	return {"ok": true, "error": ""}
 
 
-## Apply the stored volumes. A missing file keeps the defaults; a corrupt or
-## half-written file also keeps the defaults, with one diagnostic line.
+## Apply the stored volumes. A missing file is a fresh install, and a fresh
+## install gets `DEFAULT_VOLUMES` rather than the engine's silent 1.0, so the
+## buses, the settings screen and its `R` key agree before the player has ever
+## saved. A corrupt or half-written file lands on the same defaults, with one
+## diagnostic line, instead of keeping whatever a previous caller left there.
 func load_settings() -> void:
 	if not FileAccess.file_exists(SETTINGS_PATH):
+		_apply_default_volumes()
 		return
 	var parsed: Variant = _parse_json(FileAccess.get_file_as_string(SETTINGS_PATH))
 	if not parsed is Dictionary:
-		_warn("%s is not a JSON object, keeping defaults" % SETTINGS_PATH)
+		_warn("%s is not a JSON object, applying defaults" % SETTINGS_PATH)
+		_apply_default_volumes()
 		return
 	var raw_volumes: Variant = (parsed as Dictionary).get("volumes", {})
 	if not raw_volumes is Dictionary:
-		_warn("%s has no volumes block, keeping defaults" % SETTINGS_PATH)
+		_warn("%s has no volumes block, applying defaults" % SETTINGS_PATH)
+		_apply_default_volumes()
 		return
 	for bus in BUS_NAMES:
 		var value: Variant = (raw_volumes as Dictionary).get(bus, null)
@@ -228,6 +238,18 @@ func load_settings() -> void:
 			set_volume(bus, float(value))
 
 
+## Writes `DEFAULT_VOLUMES` to the three controllable buses. A bus the table does
+## not name is left alone, so the table stays the only thing that has to be kept
+## in step with the bus layout.
+func _apply_default_volumes() -> void:
+	for bus in BUS_NAMES:
+		var value: Variant = DEFAULT_VOLUMES.get(bus, null)
+		if value is float or value is int:
+			set_volume(bus, float(value))
+
+
+## The shipped levels, for a caller that has to show or restore them instead of
+## applying them — the settings screen is the only one.
 func settings_defaults() -> Dictionary:
 	return DEFAULT_VOLUMES.duplicate()
 

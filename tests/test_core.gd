@@ -29,9 +29,17 @@ var completed: Dictionary = {}
 ## the connected method can actually write to.
 var _toast_count := 0
 
+## How many times the settings panel asked to be closed, counted through its own
+## signal rather than by reading a private flag.
+var _sound_panel_closes := 0
+
 
 func _count_toast(_message: String) -> void:
 	_toast_count += 1
+
+
+func _on_sound_panel_closed() -> void:
+	_sound_panel_closes += 1
 
 
 class DummyTarget:
@@ -291,12 +299,15 @@ func _run() -> void:
 	print("== audio ==")
 	await _test_audio()
 
+	print("== settings sound ==")
+	await _test_settings_sound()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 46, "every test group ran to completion (got %d/46)" % completed.size())
+	_check(completed.size() == 47, "every test group ran to completion (got %d/47)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6832,3 +6843,234 @@ func _audio_u16(bytes: PackedByteArray, offset: int) -> int:
 func _audio_u32(bytes: PackedByteArray, offset: int) -> int:
 	return int(bytes[offset]) | (int(bytes[offset + 1]) << 8) \
 		| (int(bytes[offset + 2]) << 16) | (int(bytes[offset + 3]) << 24)
+
+
+# --- settings screen, sound section (spec §17.3) -----------------------------
+
+## The volume half of the settings screen, driven the way a human drives it: real
+## key events into the panel's own `_input`, and the audio autoload through
+## `call`. That combination is the point of the group — a row that only moves a
+## local number, and a number that never reaches the bus, both fail here.
+##
+## It runs last, right after the audio group, so its deliberate volume changes,
+## its settings file and its one rebind cannot leak into any other group, and it
+## cleans up the way both of those groups do. The panel is built on its own rather
+## than through the HUD: the HUD's open/close plumbing belongs to the pause menu
+## and is already covered by the modal-gate groups.
+##
+## The panel is loaded by path instead of named as a class. Its script reaches an
+## autoload identifier, and a class reference from this file would compile it
+## while the main-loop script is being loaded — before the autoloads are
+## registered — which fails the whole suite with "Identifier not found". Loading
+## it here compiles it after boot, the same way `load()` is used for the shop.
+func _test_settings_sound() -> void:
+	var am := root.get_node_or_null("AudioManager")
+	_check(am != null, "AudioManager present for the settings sound group")
+	if am == null:
+		completed["settings_sound"] = true
+		return
+
+	var panel_script: GDScript = load("res://scripts/ui/settings_panel.gd")
+	_check(panel_script != null and panel_script.can_instantiate(),
+		"settings panel script compiles and can be instantiated")
+	if panel_script == null:
+		completed["settings_sound"] = true
+		return
+
+	_audio_stop_all(am)
+	_delete_audio_settings()
+	_reset_input_to_known_state()
+
+	# --- a stored file still wins over the shipped defaults -------------------
+	am.call("set_volume", "Music", 0.2)
+	am.call("set_volume", "SFX", 0.3)
+	am.call("set_volume", "UI", 0.4)
+	var stored: Dictionary = am.call("save_settings")
+	_check(bool(stored.get("ok", false)), "audio settings fixture written for the override check")
+	_reset_buses_to_engine_default(am)
+	am.call("load_settings")
+	for stored_entry in [["Music", 0.2], ["SFX", 0.3], ["UI", 0.4]]:
+		var stored_bus := String(stored_entry[0])
+		var stored_level := float(stored_entry[1])
+		_check(absf(float(am.call("volume", stored_bus)) - stored_level) < 0.01,
+			"an existing settings file overrides the %s default" % stored_bus)
+
+	# --- a fresh install puts the shipped defaults on the buses ---------------
+	# With no file at all the autoload itself has to raise the buses off the
+	# engine's silent 1.0, otherwise the panel opens on 100 while its `R` key
+	# restores something else. Spelled out here instead of read from the
+	# autoload, so a silent change to `DEFAULT_VOLUMES` fails here rather than
+	# moving this group along with it.
+	_delete_audio_settings()
+	_reset_buses_to_engine_default(am)
+	am.call("load_settings")
+	for fresh_entry in [["Music", 0.7], ["SFX", 0.9], ["UI", 0.8]]:
+		var fresh_bus := String(fresh_entry[0])
+		var fresh_level := float(fresh_entry[1])
+		_check(absf(float(am.call("volume", fresh_bus)) - fresh_level) < 0.01,
+			"load_settings with no settings file sets %s to %.1f (got %.2f)" \
+			% [fresh_bus, fresh_level, float(am.call("volume", fresh_bus))])
+
+	_sound_panel_closes = 0
+	var panel = panel_script.new()
+	root.add_child(panel)
+	await process_frame
+	panel.closed.connect(_on_sound_panel_closed)
+	panel.open()
+
+	# --- the panel mirrors the buses it opens on top of ----------------------
+	_check(not bool(panel.sound_section()), "the settings panel opens on the controls section")
+	for entry in [["Music", 70], ["SFX", 90], ["UI", 80]]:
+		var bus := String(entry[0])
+		var expected := int(entry[1])
+		_check(int(panel.sound_value(bus)) == expected, "%s default is %d on the panel" % [bus, expected])
+		_check(absf(float(am.call("volume", bus)) * 100.0 - float(expected)) < 1.0,
+			"%s default is %d on the bus too" % [bus, expected])
+
+	# --- `R` agrees with the autoload on every row ---------------------------
+	# The panel keeps no copy of these levels of its own any more, so a reset has
+	# to land on the autoload's table for each bus, not on a literal that happens
+	# to match today. Each row is nudged off its default first, so a reset that
+	# writes nothing at all cannot pass.
+	var manager_defaults: Dictionary = am.call("settings_defaults")
+	for drift_bus in ["Music", "SFX", "UI"]:
+		panel.select_sound(drift_bus)
+		var before_reset := int(panel.sound_value(drift_bus))
+		await _tap_key(KEY_LEFT if before_reset >= 100 else KEY_RIGHT)
+		_check(int(panel.sound_value(drift_bus)) != before_reset,
+			"%s was moved off its default before the reset" % drift_bus)
+		await _tap_key(KEY_R)
+		var reset_level := int(round(float(manager_defaults[drift_bus]) * 100.0))
+		_check(int(panel.sound_value(drift_bus)) == reset_level,
+			"R restores %s to the autoload default %d (got %d)" \
+			% [drift_bus, reset_level, int(panel.sound_value(drift_bus))])
+		_check(absf(float(am.call("volume", drift_bus)) - float(manager_defaults[drift_bus])) < 0.01,
+			"the %s bus follows R to the autoload default too" % drift_bus)
+	# Every row is back on its default, so the section switch below still starts
+	# from the state `open()` left behind.
+	await _tap_key(KEY_TAB)
+	_check(not bool(panel.sound_section()), "Tab leaves the sound section after the reset sweep")
+
+	# --- Tab switches sections, the cursor lands on the first row ------------
+	await _tap_key(KEY_DOWN)
+	await _tap_key(KEY_DOWN)
+	_check(String(panel.selected_action()) == "move_left", "the arrows walk the rebind list (row 3)")
+	await _tap_key(KEY_TAB)
+	_check(bool(panel.sound_section()), "Tab switches to the sound section")
+	_check(String(panel.selected_bus()) == "Music", "Tab lands on the first row of the new section")
+	await _tap_key(KEY_TAB)
+	_check(not bool(panel.sound_section()), "Tab switches back to the controls section")
+	_check(String(panel.selected_action()) == "move_up", "the cursor reset to the first rebind row")
+	await _tap_key(KEY_TAB)
+	_check(bool(panel.sound_section()) and String(panel.selected_bus()) == "Music",
+		"Tab returns to the Music row")
+
+	# --- Right raises the selected volume and the bus follows ----------------
+	_check(int(panel.sound_value("Music")) == 70, "Music starts at 70")
+	await _tap_key(KEY_RIGHT)
+	_check(int(panel.sound_value("Music")) == 80,
+		"Right raises Music by 10 (got %d)" % int(panel.sound_value("Music")))
+	_check(absf(float(am.call("volume", "Music")) - 0.8) < 0.01,
+		"the Music bus follows the panel immediately (%.2f)" % float(am.call("volume", "Music")))
+
+	# --- the value clamps at both ends, on the panel and on the bus ----------
+	for i in 5:
+		await _tap_key(KEY_RIGHT)
+	_check(int(panel.sound_value("Music")) == 100,
+		"Music clamps at 100 (got %d)" % int(panel.sound_value("Music")))
+	_check(absf(float(am.call("volume", "Music")) - 1.0) < 0.01, "the Music bus clamps at 1.0 too")
+	for i in 12:
+		await _tap_key(KEY_LEFT)
+	_check(int(panel.sound_value("Music")) == 0,
+		"Music clamps at 0 (got %d)" % int(panel.sound_value("Music")))
+	_check(absf(float(am.call("volume", "Music"))) < 0.001, "the Music bus reaches the silence floor")
+
+	# --- Up/Down walk the three rows and clamp at the ends -------------------
+	await _tap_key(KEY_DOWN)
+	_check(String(panel.selected_bus()) == "SFX", "Down moves to the SFX row")
+	await _tap_key(KEY_DOWN)
+	await _tap_key(KEY_DOWN)
+	_check(String(panel.selected_bus()) == "UI", "Down clamps on the last row")
+	await _tap_key(KEY_UP)
+	_check(String(panel.selected_bus()) == "SFX", "Up moves back to the SFX row")
+
+	# --- R restores the selected bus only ------------------------------------
+	await _tap_key(KEY_LEFT)
+	_check(int(panel.sound_value("SFX")) == 80, "SFX trimmed to 80 (got %d)" % int(panel.sound_value("SFX")))
+	panel.select_sound("UI")
+	await _tap_key(KEY_RIGHT)
+	_check(int(panel.sound_value("UI")) == 90, "UI raised to 90 (got %d)" % int(panel.sound_value("UI")))
+	panel.select_sound("Music")
+	await _tap_key(KEY_R)
+	_check(int(panel.sound_value("Music")) == 70, "R restores the Music default")
+	_check(int(panel.sound_value("SFX")) == 80, "R leaves SFX where the player left it")
+	_check(int(panel.sound_value("UI")) == 90, "R leaves UI where the player left it")
+	_check(absf(float(am.call("volume", "SFX")) - 0.8) < 0.01, "the SFX bus kept its 0.8")
+
+	# --- the sound section owns the keys and rebinds nothing -----------------
+	_check(_action_has_key("move_up", KEY_W), "move_up is still on its default W")
+	await _tap_key(KEY_F)
+	_check(_action_has_key("move_up", KEY_W), "a key press in the sound section rebinds nothing")
+	await _tap_key(KEY_ENTER)
+	_check(bool(panel.sound_section()), "Enter does not leave the sound section")
+	_check(int(panel.sound_value("Music")) == 70, "Enter changes no volume")
+
+	# --- closing persists ----------------------------------------------------
+	panel.select_sound("Music")
+	for i in 4:
+		await _tap_key(KEY_LEFT)
+	_check(int(panel.sound_value("Music")) == 30,
+		"Music trimmed to 30 before closing (got %d)" % int(panel.sound_value("Music")))
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH), "no settings file while the panel is still open")
+	await _tap_key(KEY_ESCAPE)
+	_check(_sound_panel_closes == 1, "Esc closes the panel exactly once")
+	_check(FileAccess.file_exists(AUDIO_SETTINGS_PATH), "closing the panel wrote the audio settings file")
+	_check(not AUDIO_SETTINGS_PATH.begins_with("user://saves"), "volumes live outside the saves directory")
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH + ".tmp"), "the panel's save renamed its tmp file away")
+
+	_apply_audio_defaults(am)
+	_check(absf(float(am.call("volume", "Music")) - 0.7) < 0.01, "Music back at the autoload default")
+	am.call("load_settings")
+	_check(absf(float(am.call("volume", "Music")) - 0.3) < 0.01,
+		"Music is back at 30 after load_settings (%.2f)" % float(am.call("volume", "Music")))
+	_check(absf(float(am.call("volume", "UI")) - 0.9) < 0.01,
+		"UI is back at 90 after load_settings (%.2f)" % float(am.call("volume", "UI")))
+
+	# --- the rebind half still works after the refactor ----------------------
+	panel.open()
+	_check(not bool(panel.sound_section()), "open() returns the cursor to the controls section")
+	_check(String(panel.selected_action()) == "move_up", "the rebind cursor starts on the first action")
+	await _tap_key(KEY_F)
+	_check(_action_has_key("move_up", KEY_F), "a raw key press still rebinds the selected action")
+	_check(not _action_has_key("move_up", KEY_W), "the old binding is gone after the rebind")
+	_check(String(panel.status_text()).contains("→"), "the panel reports the new binding on its status line")
+	await _tap_key(KEY_R)
+	_check(_action_has_key("move_up", KEY_W), "R in the controls section still restores the default")
+	_check(not _action_has_key("move_up", KEY_F), "R drops the rebound key")
+
+	# --- leave no residue for the next run, a bot or the editor --------------
+	panel.queue_free()
+	await process_frame
+	_audio_stop_all(am)
+	# The clicks the panel played are still held by the audio server when they are
+	# stopped and quit from in the same frame, which the engine reports as leaked
+	# ObjectDB instances — the same shutdown noise the audio group waits out on a
+	# timer rather than on frames.
+	await create_timer(0.5).timeout
+	_apply_audio_defaults(am)
+	_delete_audio_settings()
+	_reset_input_to_known_state()
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH),
+		"settings sound group left no audio settings file behind")
+	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
+		"settings sound group left no controls file behind")
+	_check(absf(float(am.call("volume", "Music")) - 0.7) < 0.01, "the Music bus is back at its default")
+	completed["settings_sound"] = true
+
+
+## Puts every controllable bus back where the engine leaves a bus nobody has
+## touched. Used before a check about defaults, so such a check cannot pass by
+## accident on a value an earlier group happened to leave on the bus.
+func _reset_buses_to_engine_default(am: Node) -> void:
+	for bus in ["Music", "SFX", "UI"]:
+		am.call("set_volume", bus, 1.0)
