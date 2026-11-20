@@ -80,6 +80,12 @@ var _status_component: StatusComponent = null
 var _stagger_bonus := 0.0
 var _stagger_left := 0.0
 
+## The world node that owns the village safe zone (the `Forest`), resolved through
+## the `safe_zone_owner` group and cached. Null when no safe zone exists (a bare
+## test arena), in which case every safe-zone rule below is inert and the enemy
+## behaves exactly as it did before the village existed.
+var _safe_owner: Node = null
+
 
 func _ready() -> void:
 	add_to_group("enemy")
@@ -114,6 +120,80 @@ func _status() -> StatusComponent:
 func _blocks_actions() -> bool:
 	var sc := _status()
 	return sc != null and sc.blocks_actions()
+
+
+# --- village safe zone ---------------------------------------------------------
+# The village clearing is off limits to hostiles. Two rules, both keyed on the
+# tile the enemy would occupy next frame rather than the one it is on, so a fast
+# enemy cannot skip the boundary in a single step:
+#   * a step that would land inside the zone is refused (velocity zeroed) — the
+#     enemy stops dead at the edge and can never cross to chase or to strike;
+#   * an enemy that is already inside (spawned or pushed there) walks straight out
+#     toward its own post, ignoring the block rule so it can never deadlock.
+# Everything here is inert while no `safe_zone_owner` is in the tree, so the open
+# forest, the arena tests and every existing bot behave byte for byte as before.
+
+func _safe_zone_owner() -> Node:
+	if _safe_owner != null and is_instance_valid(_safe_owner):
+		return _safe_owner
+	_safe_owner = get_tree().get_first_node_in_group("safe_zone_owner")
+	return _safe_owner
+
+
+func _is_in_safe_zone(pos: Vector2) -> bool:
+	var owner := _safe_zone_owner()
+	if owner == null or not owner.has_method("is_in_safe_zone"):
+		return false
+	return bool(owner.call("is_in_safe_zone", Vector2i(floori(pos.x / 16.0), floori(pos.y / 16.0))))
+
+
+func _inside_safe_zone() -> bool:
+	return _is_in_safe_zone(global_position)
+
+
+## The nearest point of the safe zone this enemy must reach to leave it: its own
+## post when that lies outside (the honest "go back where you came from"), and
+## otherwise the closest edge of the zone, so an enemy whose post is itself inside
+## still has a deterministic way out instead of pressing against the border.
+func _safe_zone_escape_point() -> Vector2:
+	var owner := _safe_zone_owner()
+	if owner != null and owner.has_method("safe_zone_rect"):
+		var rect: Rect2i = owner.call("safe_zone_rect")
+		if not rect.has_point(Vector2i(floori(spawn_position.x / 16.0), floori(spawn_position.y / 16.0))):
+			return spawn_position
+		var cx := clampf(global_position.x, rect.position.x * 16.0 + 8.0, (rect.position.x + rect.size.x) * 16.0 - 8.0)
+		var cy := clampf(global_position.y, rect.position.y * 16.0 + 8.0, (rect.position.y + rect.size.y) * 16.0 - 8.0)
+		var inside := Vector2(cx, cy)
+		var out := inside
+		var best := INF
+		for cand: Vector2 in [
+			Vector2((rect.position.x - 1) * 16.0 + 8.0, cy),
+			Vector2((rect.position.x + rect.size.x) * 16.0 + 8.0, cy),
+			Vector2(cx, (rect.position.y - 1) * 16.0 + 8.0),
+			Vector2(cx, (rect.position.y + rect.size.y) * 16.0 + 8.0),
+		]:
+			var d := inside.distance_to(cand)
+			if d < best:
+				best = d
+				out = cand
+		return out
+	return spawn_position
+
+
+## Called after the state machine has set `velocity` but before the move. Returns
+## true when the frame's movement was overridden (walk-out) and the caller must not
+## apply the ordinary block check.
+func _apply_safe_zone_movement() -> bool:
+	if _inside_safe_zone():
+		var base_speed := MELEE_SPEED if kind == Kind.MELEE else RANGED_SPEED
+		var dir := global_position.direction_to(_safe_zone_escape_point())
+		velocity = dir * base_speed * speed_multiplier
+		_face(dir)
+		return true
+	if velocity.length() > 0.01 and _is_in_safe_zone(global_position + velocity * get_physics_process_delta_time()):
+		velocity = Vector2.ZERO
+	return false
+
 
 
 func get_defense() -> int:
@@ -221,6 +301,7 @@ func _physics_process(delta: float) -> void:
 		var mult := sc.move_multiplier()
 		if mult != 1.0:
 			velocity *= mult
+	_apply_safe_zone_movement()
 	move_and_slide()
 
 
@@ -351,7 +432,11 @@ func _process_chase(delta: float) -> void:
 	var min_range := MIN_RANGED_RANGE if (kind == Kind.RANGED and not charge_on_sight) else 0.0
 
 	# Turning stays allowed while rooted/stunned; only the attack itself is gated.
-	if not _blocks_actions() and _attack_cooldown_left <= 0.0:
+	# The safe zone also forbids striking from inside it: an enemy that is already
+	# walking out (or pressed at the border) must never land a hit on a villager or
+	# a player standing in the clearing, so the whole attack-initiation block below
+	# is skipped while this enemy is inside the zone.
+	if not _inside_safe_zone() and not _blocks_actions() and _attack_cooldown_left <= 0.0:
 		if kind == Kind.MELEE and dist <= ATTACK_RANGE_MELEE:
 			_start_attack()
 			return

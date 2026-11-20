@@ -11,6 +11,7 @@ collision_layer = 32
 collision_mask = 0
 script = ExtResource("1_npc")
 display_name = "Эдрик"
+quest_id = "q01_ash_wolves"
 sprite_texture = ExtResource("2_tex")
 
 [node name="Sprite2D" type="Sprite2D" parent="."]

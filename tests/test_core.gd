@@ -273,6 +273,10 @@ func _run() -> void:
 	print("== day cycle ==")
 	await _test_day_cycle()
 
+	print("== village ==")
+	_test_village_safe_zone_and_quests()
+	await _test_village_world_and_enemy()
+
 	print("== input bindings ==")
 	_test_input_bindings()
 
@@ -281,7 +285,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 44, "every test group ran to completion (got %d/44)" % completed.size())
+	_check(completed.size() == 45, "every test group ran to completion (got %d/45)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -5918,7 +5922,7 @@ func _test_day_cycle() -> void:
 	var phases: Array = data.get("phases", []) as Array
 	var npcs_data: Dictionary = data.get("npcs", {}) as Dictionary
 	_check(phases.size() == 4, "schedules data has 4 phases (got %d)" % phases.size())
-	_check(npcs_data.size() == 3, "schedules data has 3 npcs (got %d)" % npcs_data.size())
+	_check(npcs_data.size() == 4, "schedules data has 4 npcs (got %d)" % npcs_data.size())
 	_check(float(data.get("day_length_seconds", 0)) > 0.0, "day_length_seconds is positive")
 	_check(clock != null, "Forest creates a DayClock node")
 
@@ -5976,11 +5980,13 @@ func _test_day_cycle() -> void:
 	var edrik := _find_interactable_named("interactable", "Edrik")
 	var yorek := _find_interactable_named("interactable", "Yorek")
 	var bran := _find_interactable_named("interactable", "Bran")
+	var mila := _find_interactable_named("interactable", "Mila")
 	var scheduled: Array = []
-	for n in [edrik, yorek, bran]:
+	for n in [edrik, yorek, bran, mila]:
 		if n != null:
 			scheduled.append(n)
-	_check(edrik != null and yorek != null and bran != null, "Edrik, Yorek and Bran are all present")
+	_check(edrik != null and yorek != null and bran != null and mila != null,
+		"Edrik, Yorek, Bran and Mila are all present")
 	var have_components := not scheduled.is_empty()
 	for n in scheduled:
 		if n.get_node_or_null("ScheduleComponent") == null:
@@ -6284,4 +6290,263 @@ func _test_dialogues() -> void:
 	gs.reset()
 	qm.reset()
 	completed["dialogues"] = true
+
+
+## Village safe zone + the herbwife's two new quests (roadmap stage D). Data half:
+## the quest table, the `collect` objective type (progress follows the live bag,
+## turn-in consumes exactly the required amount and refuses when short), the
+## `kill` objective counting only its own type, and a save round-trip of a collect
+## quest. GameState and QuestManager are reset at both ends.
+func _test_village_safe_zone_and_quests() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- the quest table ------------------------------------------------------
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
+	var table: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
+	_check(table.size() == 3, "data/quests.json defines 3 quests (got %d)" % table.size())
+	_check(table.has("q01_ash_wolves") and table.has("q02_gather_fangs") and table.has("q03_clear_boars"),
+		"the quest table holds q01, q02 and q03")
+
+	var q2: Dictionary = table.get("q02_gather_fangs", {})
+	var q2obj: Dictionary = q2.get("objective", {})
+	_check(String(q2.get("title", "")) == "Клыки для настоя", "q02 title is Клыки для настоя")
+	_check(String(q2.get("giver", "")) == "npc_mila", "q02 is given by npc_mila")
+	_check(String(q2obj.get("type", "")) == "collect" and String(q2obj.get("target", "")) == "wolf_fang"
+			and int(q2obj.get("count", 0)) == 4, "q02 objective is collect 4 wolf_fang")
+	var q2rew: Dictionary = q2.get("reward", {})
+	_check(int(q2rew.get("gold", 0)) == 40 and int(q2rew.get("xp", 0)) == 30
+			and int((q2rew.get("items", {}) as Dictionary).get("health_potion", 0)) == 1,
+			"q02 reward is 40 gold, 30 xp, 1 health_potion")
+
+	var q3: Dictionary = table.get("q03_clear_boars", {})
+	var q3obj: Dictionary = q3.get("objective", {})
+	_check(String(q3.get("title", "")) == "Кабаны у южной тропы", "q03 title is Кабаны у южной тропы")
+	_check(String(q3.get("giver", "")) == "npc_mila", "q03 is given by npc_mila")
+	_check(String(q3obj.get("type", "")) == "kill" and String(q3obj.get("target", "")) == "ash_boar"
+			and int(q3obj.get("count", 0)) == 2, "q03 objective is kill 2 ash_boar")
+	var q3rew: Dictionary = q3.get("reward", {})
+	_check(int(q3rew.get("gold", 0)) == 70 and int(q3rew.get("xp", 0)) == 60,
+			"q03 reward is 70 gold, 60 xp")
+	_check((q3rew.get("items", {"x": 1}) as Dictionary).is_empty(),
+			"q03 carries no item reward (items is empty)")
+
+	# --- collect: progress follows the live inventory -------------------------
+	gs.reset()
+	qm.reset()
+	_check(qm.start("q02_gather_fangs"), "q02 starts")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 is active after start")
+	_check(qm.progress_of("q02_gather_fangs") == 0, "q02 progress is 0 with an empty bag")
+	gs.add_item("wolf_fang", 3)
+	_check(qm.progress_of("q02_gather_fangs") == 3, "q02 progress tracks 3 fangs in the bag")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 stays active below the target")
+	gs.add_item("wolf_fang", 1)
+	_check(qm.progress_of("q02_gather_fangs") == 4, "q02 progress reaches 4 at four fangs")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_READY, "q02 turns ready at four fangs")
+
+	# --- turn-in consumes exactly 4 fangs and pays the reward -----------------
+	var gold_before: int = gs.gold
+	var potion_before: int = gs.count_item("health_potion")
+	_check(qm.turn_in("q02_gather_fangs"), "q02 turn-in succeeds with four fangs")
+	_check(gs.count_item("wolf_fang") == 0, "q02 turn-in consumed exactly 4 fangs (left %d)" % gs.count_item("wolf_fang"))
+	_check(gs.gold == gold_before + 40, "q02 turn-in paid 40 gold")
+	_check(gs.count_item("health_potion") == potion_before + 1, "q02 turn-in paid 1 health_potion")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_DONE, "q02 is done after turn-in")
+	_check(not qm.turn_in("q02_gather_fangs"), "q02 second turn-in refused")
+
+	# --- turn-in refused when the bag is short --------------------------------
+	gs.reset()
+	qm.reset()
+	qm.start("q02_gather_fangs")
+	gs.add_item("wolf_fang", 4)
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_READY, "q02 ready with four fangs again")
+	gs.remove_item("wolf_fang", 1)
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE,
+			"q02 falls back to active when a fang is lost below the target")
+	_check(not qm.turn_in("q02_gather_fangs"), "q02 turn-in refused with only 3 fangs")
+	_check(gs.count_item("wolf_fang") == 3, "a refused q02 turn-in consumes nothing")
+	# The hard guard: a ready quest whose bag is short is refused and reverts.
+	qm.states["q02_gather_fangs"] = {"state": qm.STATE_READY, "progress": 4}
+	_check(not qm.turn_in("q02_gather_fangs"), "q02 turn-in refused when the bag cannot pay")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "a short q02 turn-in reverts the quest to active")
+
+	# --- a collect quest keeps its progress through a save round-trip ---------
+	gs.reset()
+	qm.reset()
+	qm.start("q02_gather_fangs")
+	gs.add_item("wolf_fang", 2)
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 is active (2 of 4) before the save")
+	var save_res: Dictionary = sm.save_game(2)
+	_check(bool(save_res.get("ok", false)), "save slot 2 ok for a collect quest")
+	gs.reset()
+	qm.reset()
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_AVAILABLE, "q02 back to available after reset")
+	var load_res: Dictionary = sm.load_game(2)
+	_check(bool(load_res.get("ok", false)), "load slot 2 ok for a collect quest")
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 state survived the round-trip")
+	_check(gs.count_item("wolf_fang") == 2, "the fangs survived the round-trip")
+	_check(qm.progress_of("q02_gather_fangs") == 2, "q02 progress survived the round-trip (got %d)" % qm.progress_of("q02_gather_fangs"))
+
+	# --- kill objective counts only its own type ------------------------------
+	gs.reset()
+	qm.reset()
+	_check(qm.start("q03_clear_boars"), "q03 starts")
+	bus.enemy_died.emit(&"e_wolf1", &"ash_wolf", Vector2.ZERO)
+	_check(qm.progress_of("q03_clear_boars") == 0, "a wolf kill does not advance the boar quest")
+	bus.enemy_died.emit(&"e_boar1", &"ash_boar", Vector2.ZERO)
+	_check(qm.progress_of("q03_clear_boars") == 1, "one boar kill advances q03 to 1")
+	_check(qm.state_of("q03_clear_boars") == qm.STATE_ACTIVE, "q03 still active after one boar")
+	bus.enemy_died.emit(&"e_boar2", &"ash_boar", Vector2.ZERO)
+	_check(qm.progress_of("q03_clear_boars") == 2, "two boar kills advance q03 to 2")
+	_check(qm.state_of("q03_clear_boars") == qm.STATE_READY, "q03 turns ready after two boars")
+	var g3: int = gs.gold
+	_check(qm.turn_in("q03_clear_boars"), "q03 turn-in succeeds")
+	_check(gs.gold == g3 + 70, "q03 turn-in paid 70 gold")
+
+	gs.reset()
+	qm.reset()
+	completed["village"] = true
+
+
+## Stub world exposing only the safe-zone contract `Enemy` consumes, so the
+## boundary and walk-out behaviour can be measured on a bare arena without the
+## full map. `is_in_safe_zone` answers from `rect` exactly like `Forest`.
+class StubSafeWorld:
+	extends Node2D
+
+	var rect := Rect2i(2, 5, 9, 8)
+
+	func _ready() -> void:
+		add_to_group("safe_zone_owner")
+
+	func safe_zone_rect() -> Rect2i:
+		return rect
+
+	func is_in_safe_zone(tile: Vector2i) -> bool:
+		return rect.has_point(tile)
+
+
+## Village safe zone + the herbwife in the live world (roadmap stage D). Loads the
+## real map to pin the safe-zone geometry, that Mila exists, is not the first
+## interactable (Edrik stays first for the bots) and stands on a walkable tile
+## inside the zone, and that Edrik still hands out q01. Then, on a bare arena with
+## a stub safe-zone owner, measures the two enemy rules: an enemy ordered to chase
+## a player standing inside the zone never crosses the boundary and never attacks,
+## and an enemy placed inside the zone walks straight out. The scene is freed and
+## the arena cleaned up so no safe-zone owner leaks into a later group.
+func _test_village_world_and_enemy() -> void:
+	gs.reset()
+	qm.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var world := scene.get_node_or_null("World")
+	_check(world != null, "world present for the village group")
+
+	if world != null:
+		# --- safe-zone geometry ----------------------------------------------
+		_check(bool(world.call("is_in_safe_zone", Vector2i(5, 8))),
+				"the clearing centre tile (5,8) is inside the safe zone")
+		_check(not bool(world.call("is_in_safe_zone", Vector2i(18, 14))),
+				"a wolf spawn tile (18,14) is outside the safe zone")
+		_check(not bool(world.call("is_in_safe_zone", Vector2i(11, 8))),
+				"the tile just east of the clearing (11,8) is outside the safe zone")
+
+		# --- the herbwife -----------------------------------------------------
+		var mila := _find_interactable_named("interactable", "Mila")
+		_check(mila != null, "Mila is spawned as an interactable")
+		var interactables := get_nodes_in_group("interactable")
+		_check(not interactables.is_empty() and String(interactables[0].name) == "Edrik",
+				"Edrik is still the first interactable")
+		_check(mila != null and interactables.find(mila) > 0,
+				"Mila is not the first interactable (index %d)" % (interactables.find(mila) if mila != null else -1))
+		var mila_tile := _npc_tile(mila) if mila != null else Vector2i(-9999, -9999)
+		var mila_cell := String(world.call("cell_at", mila_tile)) if mila != null else ""
+		_check(mila_cell == "." or mila_cell == ",",
+				"Mila stands on a walkable tile %s cell '%s'" % [str(mila_tile), mila_cell])
+		_check(bool(world.call("is_in_safe_zone", mila_tile)),
+				"Mila stands inside the safe zone (%s)" % str(mila_tile))
+		_check(mila != null and String(mila.get_script().resource_path).ends_with("villager.gd"),
+				"Mila is a Villager")
+		_check(mila != null and String(mila.call("prompt_text")) == "Поговорить",
+				"Mila's prompt is Поговорить")
+		var mila_quests: Variant = mila.get("quest_ids") if mila != null else null
+		_check(mila_quests != null and (mila_quests as PackedStringArray).has("q02_gather_fangs")
+				and (mila_quests as PackedStringArray).has("q03_clear_boars"),
+				"Mila offers both new quests")
+
+		# --- Edrik still gives the hunt quest -------------------------------
+		var edrik := _find_interactable_named("interactable", "Edrik")
+		_check(edrik != null and String(edrik.get("quest_id")) == "q01_ash_wolves",
+				"Edrik's per-instance quest_id is q01_ash_wolves")
+
+	scene.queue_free()
+	await process_frame
+	await process_frame
+
+	# --- chase blocked at the boundary (bare arena + stub owner) --------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var stub := StubSafeWorld.new()
+	arena.add_child(stub)
+	var player_scene: PackedScene = load("res://scenes/player/player.tscn")
+	var player := player_scene.instantiate() as Node2D
+	player.global_position = Vector2(5 * 16 + 8, 8 * 16 + 8)
+	arena.add_child(player)
+	await process_frame
+	var wolf_scene: PackedScene = load("res://scenes/enemies/wolf.tscn")
+	var wolf := wolf_scene.instantiate() as Node2D
+	wolf.global_position = Vector2(11 * 16 + 8, 8 * 16 + 8)
+	arena.add_child(wolf)
+	await process_frame
+	var rect: Rect2i = stub.rect
+	var crossed := false
+	var attacked := false
+	for i in range(120):
+		await physics_frame
+		var t := Vector2i(floori(wolf.global_position.x / 16.0), floori(wolf.global_position.y / 16.0))
+		if rect.has_point(t):
+			crossed = true
+		if int(wolf.get("state")) == 4:
+			attacked = true
+	_check(not crossed, "a wolf chasing a player inside the zone never crosses the boundary")
+	_check(not attacked, "a wolf outside the zone never attacks from across the boundary")
+	wolf.queue_free()
+	player.queue_free()
+	arena.queue_free()
+	await process_frame
+	await process_frame
+
+	# --- an enemy placed inside the zone walks straight out -------------------
+	var arena2 := Node2D.new()
+	root.add_child(arena2)
+	var stub2 := StubSafeWorld.new()
+	arena2.add_child(stub2)
+	var boar := (wolf_scene.instantiate()) as Node2D
+	boar.global_position = Vector2(6 * 16 + 8, 8 * 16 + 8)
+	arena2.add_child(boar)
+	boar.set("spawn_position", Vector2(12 * 16 + 8, 8 * 16 + 8))
+	await process_frame
+	var escaped := false
+	var attacked_inside := false
+	for i in range(240):
+		await physics_frame
+		var t2 := Vector2i(floori(boar.global_position.x / 16.0), floori(boar.global_position.y / 16.0))
+		if not stub2.rect.has_point(t2):
+			escaped = true
+		if int(boar.get("state")) == 4:
+			attacked_inside = true
+	_check(escaped, "an enemy spawned inside the safe zone walks out of it")
+	_check(not attacked_inside, "an enemy inside the zone does not attack from inside")
+	boar.queue_free()
+	arena2.queue_free()
+	await process_frame
+	await process_frame
+	_check(get_first_node_in_group("safe_zone_owner") == null,
+			"the village group left no safe-zone owner behind")
+
+	gs.reset()
+	qm.reset()
 

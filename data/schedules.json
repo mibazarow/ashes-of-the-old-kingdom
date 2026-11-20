@@ -33,6 +33,15 @@
         "evening": [13, 12],
         "night": [11, 8]
       }
+    },
+    "Mila": {
+      "home": [5, 7],
+      "spots": {
+        "morning": [5, 7],
+        "day": [7, 7],
+        "evening": [4, 10],
+        "night": [5, 7]
+      }
     }
   }
 }

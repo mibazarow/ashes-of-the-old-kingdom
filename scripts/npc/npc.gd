@@ -2,7 +2,11 @@ class_name Npc
 extends Area2D
 ## Quest giver. Turns the quest in exactly once through QuestManager.
 
-const QUEST_ID := "q01_ash_wolves"
+## The quest this instance hands out. Per-instance (set on `edrik.tscn`, and on
+## any code-built villager) rather than a hardcoded constant, so a second quest
+## giver can exist without subclassing the dialogue path. Edrik's scene sets
+## `q01_ash_wolves`; the default keeps a bare `Npc` working as the hunt giver.
+@export var quest_id: String = "q01_ash_wolves"
 
 @export var display_name: String = "Эдрик"
 ## Slug that names this character's dialogues in data/dialogue.json: the runner id
@@ -41,7 +45,7 @@ func interact(_player: Node) -> void:
 	# the after-hunt line once the hunt is over, the intro otherwise. The runner is
 	# built with the live state injected rather than reading the autoloads inside,
 	# so the same object the test constructs is the one the game uses.
-	var state: String = QuestManager.state_of(QUEST_ID)
+	var state: String = QuestManager.state_of(quest_id)
 	var context := "intro"
 	if state == QuestManager.STATE_READY or state == QuestManager.STATE_DONE:
 		context = "after_hunt"
@@ -56,27 +60,28 @@ func interact(_player: Node) -> void:
 	# to show it). The quest turn-in lives here on purpose — edrik_after_hunt is
 	# gated on `quest_done`, so while the quest is only `ready` the runner refuses
 	# and this path turns it in. This is the path the quest bot relies on.
-	var quest: Dictionary = QuestManager.get_quest(QUEST_ID)
+	var quest: Dictionary = QuestManager.get_quest(quest_id)
 	var lines: Array = []
 
 	if state == QuestManager.STATE_AVAILABLE:
 		lines.append({"speaker": display_name, "text": String(quest.get("start_line", "..."))})
 		EventBus.dialogue_requested.emit(lines)
-		QuestManager.start(QUEST_ID)
+		QuestManager.start(quest_id)
 		return
 	if state == QuestManager.STATE_ACTIVE:
-		var cur: int = QuestManager.progress_of(QUEST_ID)
-		var total: int = QuestManager.target_count(QUEST_ID)
+		var cur: int = QuestManager.progress_of(quest_id)
+		var total: int = QuestManager.target_count(quest_id)
+		var title := String(quest.get("title", "Задание"))
 		lines.append({
 			"speaker": display_name,
-			"text": "Волки ещё живы: %d из %d. Опушка ждёт." % [cur, total],
+			"text": "%s: %d из %d. Ещё не готово." % [title, cur, total],
 		})
 		EventBus.dialogue_requested.emit(lines)
 		return
 	if state == QuestManager.STATE_READY:
 		lines.append({"speaker": display_name, "text": String(quest.get("turn_in_line", "..."))})
 		EventBus.dialogue_requested.emit(lines)
-		QuestManager.turn_in(QUEST_ID)
+		QuestManager.turn_in(quest_id)
 		return
 
 	lines.append({"speaker": display_name, "text": "Деревня дышит ровнее. Спасибо."})
@@ -84,7 +89,7 @@ func interact(_player: Node) -> void:
 
 
 func _refresh_bubble() -> void:
-	var state: String = QuestManager.state_of(QUEST_ID)
+	var state: String = QuestManager.state_of(quest_id)
 	match state:
 		QuestManager.STATE_AVAILABLE:
 			_bubble.text = "!"

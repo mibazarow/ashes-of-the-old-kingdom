@@ -13,6 +13,7 @@ const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 const FOREST_WARDEN_SCENE := "res://scenes/enemies/forest_warden.tscn"
 const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
+const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 const PICKUP_SCENE := "res://scenes/items/pickup.tscn"
@@ -50,6 +51,7 @@ var _last_visited_tile := Vector2i(-9999, -9999)
 var _npc_node: Node2D
 var _merchant_node: Node2D
 var _smith_node: Node2D
+var _mila_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
@@ -72,6 +74,22 @@ const SMITH_ANCHOR := Vector2i(12, 12)
 ## spawn point. 4 tiles is 64 px against a 26 px interact radius and an 18 px bot
 ## stop tolerance, so standing at Edrik can never put the forge inside reach.
 const SMITH_MIN_SEPARATION := 4
+
+## The village safe zone, in tiles: the dirt clearing the west of the map is built
+## around (rows 6..11 x cols 2..9) plus a one-tile buffer on every side, so an
+## enemy is turned back before it can reach a villager rather than at their feet.
+## `Enemy` reads this through the `safe_zone_owner` group and refuses to step a
+## single frame's move inside it, and walks straight out if it is ever inside.
+const SAFE_ZONE_RECT := Rect2i(2, 5, 9, 8)
+
+## Anchor for the third villager, the herbwife. She sits on the clearing among the
+## other villagers but a few tiles from Edrik, the merchant and the spawn, so the
+## debug bot walking to the FIRST interactable (Edrik) never comes within the
+## interact radius of her and never has her dialogue stolen (see
+## `_find_walkable_away`). The tile is derived from the generated grid, so she is
+## never placed in a tree.
+const MILA_ANCHOR := Vector2i(5, 7)
+const MILA_MIN_SEPARATION := 3
 
 ## Anchors for the two new predator types (roadmap stage D), on the east/south
 ## half of the map: far enough from the wolf pack and the village that the BOT-008
@@ -140,6 +158,10 @@ const PICKUP_FLASK_TILE := Vector2i(20, 30)
 
 
 func _ready() -> void:
+	# Advertise the safe zone before any actor is spawned, so an enemy created in
+	# `_spawn_actors` can already resolve this world through the group and honour
+	# the boundary from its very first physics frame.
+	add_to_group("safe_zone_owner")
 	_generate_map()
 	_build_tileset_and_layer()
 	_spawn_actors()
@@ -199,12 +221,25 @@ func player_tile() -> Vector2i:
 	)
 
 
+## The village safe zone rectangle, exposed so `Enemy` and a test read the exact
+## same rect the world enforces rather than a copy of its numbers.
+func safe_zone_rect() -> Rect2i:
+	return SAFE_ZONE_RECT
+
+
+## True when `tile` falls inside the village safe zone. `Enemy` converts its own
+## world position to a tile and asks this each frame; the hostiles keep out.
+func is_in_safe_zone(tile: Vector2i) -> bool:
+	return SAFE_ZONE_RECT.has_point(tile)
+
+
 func landmarks() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for entry: Array in [
 		["Edrik", "npc", _npc_node],
 		["Yorek", "npc", _merchant_node],
 		["Bran", "npc", _smith_node],
+		["Mila", "npc", _mila_node],
 		["Chest", "chest", _chest_node],
 		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
@@ -412,6 +447,32 @@ func _spawn_actors() -> void:
 	add_child(smith)
 	_smith_node = smith
 
+	# The herbwife joins last among the village NPCs, after Edrik, Yorek and Bran,
+	# for the same reason they each joined after the one before: the debug bot picks
+	# the FIRST node of the `interactable` group, so Edrik must stay first. She is a
+	# `Villager` (a multi-quest giver) built in code like the merchant and the smith,
+	# given both of her quests and placed by `_find_walkable_away` a few tiles from
+	# Edrik, the merchant and the spawn, so standing at Edrik never reaches her.
+	var mila_script: GDScript = load(VILLAGER_SCRIPT)
+	var mila: Node2D = mila_script.new() as Node2D
+	mila.name = "Mila"
+	mila.set("display_name", "Травница Мила")
+	mila.set("speaker_id", "mila")
+	mila.set("sprite_texture", load("res://assets/sprites/npc.png"))
+	mila.set("quest_ids", PackedStringArray(["q02_gather_fangs", "q03_clear_boars"]))
+	# The base `Npc` scene carries a `Sprite2D` child that its `_ready` reaches for
+	# through an `@onready`; a code-built villager has no scene, so the sprite is
+	# added here, before `add_child`, so the lookup resolves on the first frame.
+	var mila_sprite := Sprite2D.new()
+	mila_sprite.name = "Sprite2D"
+	mila_sprite.texture = load("res://assets/sprites/npc.png")
+	mila.add_child(mila_sprite)
+	var mila_tile := _find_walkable_away(
+		MILA_ANCHOR, 3, [Vector2i(7, 9), Vector2i(3, 11), Vector2i(4, 9)], MILA_MIN_SEPARATION)
+	mila.position = _tile_center(mila_tile.x, mila_tile.y)
+	add_child(mila)
+	_mila_node = mila
+
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"
 	_chest_node = chest
@@ -568,6 +629,7 @@ func _setup_day_cycle() -> void:
 	_attach_schedule(_npc_node)
 	_attach_schedule(_merchant_node)
 	_attach_schedule(_smith_node)
+	_attach_schedule(_mila_node)
 
 
 func _attach_schedule(npc: Node2D) -> void:
