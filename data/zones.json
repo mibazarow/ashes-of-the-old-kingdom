@@ -9,6 +9,11 @@
 			"name": "Руины у опушки",
 			"script": "res://scripts/world/ruins.gd",
 			"entry_tile": [3, 8]
+		},
+		"dungeon": {
+			"name": "Подземелье под руинами",
+			"script": "res://scripts/world/dungeon.gd",
+			"entry_tile": [3, 12]
 		}
 	}
 }

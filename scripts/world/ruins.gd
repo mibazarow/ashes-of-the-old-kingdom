@@ -156,6 +156,23 @@ const SKELETON_ARCHER_B_ANCHOR := Vector2i(27, 13)
 const ENEMY_SCAN_RADIUS := 2
 const ENEMY_CLEAR_FROM_ENTRY := 6
 
+## The stair down into the undercroft, in the far south-east corner of the hall the
+## door was built to keep shut. Three things put it there rather than anywhere
+## else in the hall. It is behind the door, so the descent is gated by the same
+## key as the hall: the puzzle pays for the zone below, not only for a room. It is
+## twelve tiles from the nearest skeleton post and twenty-three from the slab, so
+## nobody walks off the stair into a fight they cannot see, and the prompt of the
+## stair never competes with the prompt of a post in the same 26 px reach. And it
+## is the far end of the longest walk the hall asks for, which is what a stair
+## hidden behind a locked door should be.
+##
+## Scan radius zero, like the forest gate and the tablet: the declared tile is
+## checked for walkability rather than snapped to the nearest free one, because a
+## wide row-major scan would answer with the top-left corner of its box and move
+## the descent somewhere the map and the tests no longer agree on.
+const DUNGEON_GATE_TILE := Vector2i(37, 22)
+const DUNGEON_GATE_SCAN_RADIUS := 0
+
 ## Points of interest kept as live node references, as in `Forest`. The key drops
 ## out of the list by itself once it is picked up: the pickup frees itself, and the
 ## loop below skips a node that is no longer there.
@@ -294,6 +311,13 @@ func _spawn_actors() -> void:
 	_spawn_key(key_tile)
 	_spawn_tablet(tablet_tile)
 	_spawn_skeletons(spawn_tile, reserved)
+	# Last, after every post has had its turn at the reserved set. The stair's tile
+	# is a fixed constant rather than a scan, so the order cannot move it, but the
+	# reserved set is the only thing here that knows which tiles the posts ended up
+	# on, and reading it after they are placed means an edit to a post anchor that
+	# walks a skeleton onto the stair shows up as a collision this function can see
+	# instead of two props sharing one tile in silence.
+	_spawn_dungeon_gate(spawn_tile, reserved)
 
 
 ## The slab across the doorway. Built in code the way `ZoneExit`, the merchant and
@@ -383,6 +407,24 @@ func _spawn_skeletons(entry: Vector2i, reserved: Dictionary) -> void:
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
 		reserved[tile] = true
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The stair down to the third zone, at the far end of the hall the door guards.
+## Built in code like the gate, the door and the lever: a `ZoneExit` has no sprite
+## of its own and draws itself, so a node assembled here cannot drift away from the
+## tile constant that places it, and the descent cannot be edited out of existence
+## by a scene edit. It is deliberately not a landmark: the map marks the four pieces
+## of the puzzle that opens this hall, and the stair is what the puzzle pays for, so
+## marking it on the map would hand the player the reward before the question.
+func _spawn_dungeon_gate(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		DUNGEON_GATE_TILE, DUNGEON_GATE_SCAN_RADIUS, entry, reserved, 0)
+	var gate := ZoneExit.new()
+	gate.name = "DungeonGate"
+	gate.target_zone = "dungeon"
+	gate.prompt = "Спуститься в подземелье"
+	gate.position = _tile_center(tile.x, tile.y)
+	add_child(gate)
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules

@@ -121,6 +121,15 @@ func _maybe_capture_screenshot() -> void:
 		var manager := get_node_or_null("ZoneManager")
 		if manager != null:
 			manager.call("travel", "ruins")
+	elif ui_probe == "dungeon":
+		# The third zone, reached the way a player reaches it: down through the
+		# ruins. Two travels rather than one, because the undercroft has no door to
+		# the forest — the stair is in the hall the ruins' key opens, so the capture
+		# walks the same route and lands on the same zone line the player would see.
+		var manager := get_node_or_null("ZoneManager")
+		if manager != null:
+			manager.call("travel", "ruins")
+			manager.call("travel", "dungeon")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

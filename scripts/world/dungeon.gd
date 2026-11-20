@@ -1,0 +1,374 @@
+class_name Dungeon
+extends ZoneBase
+## The third zone: the flooded undercroft beneath the ruins, reached down the
+## stair in the guarded hall. The ruins hand the player a door, a lever and a key;
+## what the key pays for is this place, so the zone below has to be a place worth
+## the walk rather than one more corridor.
+##
+## Like the ruins, the layout is written out as constants instead of rolled from a
+## seed: a fixed list of masonry blocks, columns, floor patches, chokepoint stubs
+## and alcoves is deterministic by construction, so there is no generator to keep
+## in step and no seed to pin. Unlike the ruins, this zone is not a hall. Spec §5.1
+## asks for corridors that loop back on themselves, so the grid is built as the
+## negative space of eight masonry blocks: three horizontal corridors (rows 1..3,
+## 12..14, 24..26) crossed by four vertical ones (columns 1..3, 12..14, 24..26,
+## 37..39), each three tiles wide. Every crossing is a way round, which is what
+## makes the map cyclic rather than a branchy dead-end tree, and the four stubs
+## that push off a block face into a corridor narrow it to two tiles without ever
+## closing it — those are the places the traps sit, on ground the player can see
+## the far side of before committing to it.
+##
+## The three alcoves are the other half of the shape: pockets carved into a block,
+## open on one side only, so the map has rooms to find as well as roads to walk.
+## They are carved after the masonry, which is why carving is a paint of its own
+## rather than an absence of wall.
+
+const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
+const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
+const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
+const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
+
+const MAP_W := 44
+const MAP_H := 28
+
+## The zone's own entry tile, used only as the fallback when the data table has
+## nothing usable for this zone. It is the same tile `data/zones.json` names, and
+## it sits in the west end of the middle corridor, where that corridor meets the
+## west one — the one spot in the zone from which all three horizontal and all
+## four vertical corridors are one turn away.
+const FALLBACK_ENTRY_TILE := Vector2i(3, 12)
+
+## How far the spawn scan widens when the entry tile named in the data turns out
+## to sit on something solid. Three tiles clears a single column or a one-tile
+## stub without wandering out of the crossing.
+const ENTRY_FALLBACK_SCAN_RADIUS := 3
+
+## The stair back up, in the west corridor two tiles north of the arrival tile:
+## close enough that a player who came down to look around can leave without
+## walking the zone, far enough that arriving never opens the prompt under his
+## feet. A radius-0 scan checks the declared tile rather than snapping it to the
+## nearest free one, because a wide row-major scan would answer with the top-left
+## corner of its box and move the only exit in the zone somewhere else.
+const RUINS_EXIT_TILE := Vector2i(2, 10)
+
+## The masonry. Eight blocks, each one the mass between two neighbouring
+## corridors, and each clamped to the interior when painted, so no block can ever
+## punch a hole in the border however these numbers are edited later. Together
+## they are the whole map: what is left of the floor between them is the corridor
+## network, which is why widening one block is the same edit as narrowing the
+## corridor beside it.
+const WALL_BLOCKS: Array[Rect2i] = [
+	Rect2i(4, 4, 8, 8),
+	Rect2i(15, 4, 9, 8),
+	Rect2i(27, 4, 10, 8),
+	Rect2i(40, 4, 3, 8),
+	Rect2i(4, 15, 8, 9),
+	Rect2i(15, 15, 9, 9),
+	Rect2i(27, 15, 10, 9),
+	Rect2i(40, 15, 3, 9),
+]
+
+## Standing columns, one in the middle of each crossing where two corridors meet.
+## A single tile in a three-by-three crossing leaves every arm of the crossing
+## reachable without squeezing, so the columns read as a colonnade and never as a
+## wall, and no column stands on the entry tile, on the stair or on a trap plate.
+const PILLARS: Array[Vector2i] = [
+	Vector2i(2, 2), Vector2i(13, 2), Vector2i(25, 2), Vector2i(38, 2),
+	Vector2i(2, 13), Vector2i(13, 13), Vector2i(25, 13), Vector2i(38, 13),
+	Vector2i(2, 25), Vector2i(13, 25), Vector2i(25, 25), Vector2i(38, 25),
+]
+
+## Worn and flooded floor, drawn as dirt: the undercroft is stone, so the only
+## ground texture this zone has is damp. Painted before the masonry so a patch can
+## only ever be covered by a wall, never the other way round.
+const DIRT_PATCHES: Array[Rect2i] = [
+	Rect2i(2, 1, 7, 3),
+	Rect2i(28, 1, 8, 3),
+	Rect2i(30, 12, 6, 3),
+	Rect2i(5, 24, 7, 3),
+	Rect2i(37, 16, 3, 6),
+]
+
+## Chokepoints. Each stub is one tile thick and grows off the face of a block into
+## the corridor beside it, which takes that corridor from three tiles wide to two
+## and never to one: a stub floating in the middle of a three-tile passage would
+## leave two one-tile slits, and a one-tile slit is a file, not a corridor. The
+## traps go on these stretches, where the player can see the far side of the
+## narrow part and step back, rather than in an alcove he has to walk into blind.
+const CHOKEPOINT_STUBS: Array[Rect2i] = [
+	Rect2i(16, 14, 2, 1),
+	Rect2i(26, 9, 1, 3),
+	Rect2i(12, 16, 1, 2),
+	Rect2i(37, 19, 1, 2),
+]
+
+## Dead-end pockets, carved into a block after the masonry is down and painted as
+## damp ground, so each reads as a room the water reached rather than a bend in a
+## road. Every one is open on exactly one side: the corridor it hangs off, with
+## the block closing it on the other three. They are the reason the map is not
+## only roads, and they are all reachable from a crossing, so none of them is a
+## place a player can be trapped in.
+const ALCOVES: Array[Rect2i] = [
+	Rect2i(16, 4, 2, 5),
+	Rect2i(30, 19, 2, 5),
+	Rect2i(4, 18, 5, 2),
+]
+
+## The two trap plates, one on each of the two chokepoints a player has to pass to
+## cross the zone end to end: the narrowed stretch of the middle corridor and the
+## narrowed stretch of the second vertical one. Both anchors are inside a
+## two-tile passage, so the plate covers one side of it and the other side stays
+## walkable — the trap is something to read and walk past, not a wall. Neither is
+## in an alcove, and neither is anywhere near the arrival tile.
+const TRAP_A_ANCHOR := Vector2i(17, 12)
+const TRAP_B_ANCHOR := Vector2i(24, 10)
+const TRAP_SCAN_RADIUS := 1
+const TRAP_CLEAR_FROM_ENTRY := 5
+
+## Posts. Every one of them is down a corridor and away from the crossing the
+## player arrives on, so the undercroft announces itself by what is further in
+## rather than by something standing on the stair. The three guards hold the
+## long reaches, the two bowmen the lit ends of the north and east corridors, and
+## the two wisps the middle of the zone, where a caster that kites has room to
+## keep its distance. Each tile is snapped by `_find_prop_tile`, so a block or a
+## column edited later moves the post with it instead of swallowing it.
+const SKELETON_A_ANCHOR := Vector2i(19, 25)
+const SKELETON_B_ANCHOR := Vector2i(32, 2)
+const SKELETON_C_ANCHOR := Vector2i(38, 13)
+const SKELETON_ARCHER_A_ANCHOR := Vector2i(8, 2)
+const SKELETON_ARCHER_B_ANCHOR := Vector2i(38, 25)
+const WISP_A_ANCHOR := Vector2i(13, 7)
+const WISP_B_ANCHOR := Vector2i(25, 20)
+
+## How wide each post scans for a free tile, and how far every one of them has to
+## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
+## sight line of a plain enemy: at that Chebyshev distance a post can see the
+## arrival crossing but cannot have been standing close enough to be on top of the
+## player the frame the zone finished building. Same rule the ruins spawn with.
+const ENEMY_SCAN_RADIUS := 2
+const ENEMY_CLEAR_FROM_ENTRY := 6
+
+## Points of interest kept as live node references, as in `Forest` and `Ruins`.
+## The stair and the two plates all outlive everything else in the zone: none of
+## them frees itself, so all three stay marked for the life of the zone.
+var _exit_node: Node2D
+var _trap_a_node: Node2D
+var _trap_b_node: Node2D
+
+
+func zone_id() -> String:
+	return "dungeon"
+
+
+func zone_name() -> String:
+	return "Подземелье под руинами"
+
+
+func landmarks() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for entry: Array in [
+		# The stair back up. Marked like any other gate so the way out is findable
+		# on the map once the player has walked near it, which is the whole point of
+		# marking it: a one-tile exit in a dark undercroft is otherwise easy to walk
+		# past on the way back.
+		["RuinsExit", "gate", _exit_node],
+		# Both plates stay marked. A trap the player sprang is still a trap on the
+		# road back, and the map is where he will look for it.
+		["TrapA", "trap", _trap_a_node],
+		["TrapB", "trap", _trap_b_node],
+	]:
+		# The validity check comes before the typed binding: assigning a freed
+		# instance to `var node: Node2D` is itself a script error.
+		if not is_instance_valid(entry[2]):
+			continue
+		var node: Node2D = entry[2]
+		if node == null:
+			continue
+		out.append({
+			"id": String(entry[0]),
+			"kind": String(entry[1]),
+			"tile": Vector2i(
+				floori(node.global_position.x / float(TILE)),
+				floori(node.global_position.y / float(TILE))
+			),
+		})
+	return out
+
+
+func _generate_map() -> void:
+	_map_width = MAP_W
+	_map_height = MAP_H
+	var grid: Array = []
+	for y in range(MAP_H):
+		var row: Array = []
+		for x in range(MAP_W):
+			var edge := x == 0 or y == 0 or x == MAP_W - 1 or y == MAP_H - 1
+			row.append("#" if edge else ".")
+		grid.append(row)
+
+	# The order is the layout: damp ground first, then the masonry that buries it,
+	# then the columns, then the stubs that narrow the roads, then the pockets
+	# carved back out of the masonry. Reversing the last two would erase the
+	# alcoves rather than open them.
+	for patch: Rect2i in DIRT_PATCHES:
+		_paint_rect(grid, patch, ",")
+	for block: Rect2i in WALL_BLOCKS:
+		_paint_rect(grid, block, "#")
+	for pillar: Vector2i in PILLARS:
+		if _is_interior(pillar):
+			grid[pillar.y][pillar.x] = "#"
+	for stub: Rect2i in CHOKEPOINT_STUBS:
+		_paint_rect(grid, stub, "#")
+	for alcove: Rect2i in ALCOVES:
+		_paint_rect(grid, alcove, ",")
+
+	_map.clear()
+	for y in range(MAP_H):
+		_map.append("".join(PackedStringArray(grid[y])))
+
+
+## Paints one rect with a character, clipped to the interior so the border wall
+## stays solid no matter how the constants are edited later. Used for both the
+## walls and the floor, which is what lets an alcove be carved by painting it.
+func _paint_rect(grid: Array, rect: Rect2i, ch: String) -> void:
+	for y in range(rect.position.y, rect.position.y + rect.size.y):
+		for x in range(rect.position.x, rect.position.x + rect.size.x):
+			if not _is_interior(Vector2i(x, y)):
+				continue
+			grid[y][x] = ch
+
+
+func _is_interior(tile: Vector2i) -> bool:
+	return tile.x > 0 and tile.y > 0 and tile.x < MAP_W - 1 and tile.y < MAP_H - 1
+
+
+func _spawn_actors() -> void:
+	# The entry tile comes from the data table, snapped to the nearest walkable
+	# cell so a hand-edited `entry_tile` that lands on a column still spawns a
+	# player standing on floor.
+	var entry := ZoneManager.entry_tile(zone_id())
+	if entry == Vector2i.ZERO:
+		entry = FALLBACK_ENTRY_TILE
+	var spawn_tile := _entry_spawn_tile(entry)
+	player = _instantiate(PLAYER_SCENE, _tile_center(spawn_tile.x, spawn_tile.y), "Player")
+	player.name = "Player"
+	player.add_to_group("player")
+	player.set("spawn_point", player.global_position)
+
+	# The way back is placed first, so its tile is already reserved while the
+	# plates and the posts are still being snapped and nothing can be parked on
+	# the stair.
+	var exit_tile := _find_walkable_near(RUINS_EXIT_TILE, 0)
+	var exit := ZoneExit.new()
+	exit.name = "RuinsExit"
+	exit.target_zone = "ruins"
+	exit.prompt = "Вернуться в руины"
+	exit.position = _tile_center(exit_tile.x, exit_tile.y)
+	add_child(exit)
+	_exit_node = exit
+
+	var reserved := {spawn_tile: true, exit_tile: true}
+	_spawn_traps(spawn_tile, reserved)
+	_spawn_enemies(spawn_tile, reserved)
+
+
+## Two plates on the two narrowed stretches. Each takes the first free tile of its
+## own little scan, marks it reserved, and so hands the second plate a map that
+## already knows the first one is there. The scene is the forest's own
+## `SpikeTrap`, reused rather than duplicated: the telegraph, the hit window and
+## the cooldown are the same promise here, and a trap that warns before it hits is
+## the only kind of hazard this zone should have had.
+func _spawn_traps(entry: Vector2i, reserved: Dictionary) -> void:
+	for post: Array in [
+		[TRAP_A_ANCHOR, "TrapA"],
+		[TRAP_B_ANCHOR, "TrapB"],
+	]:
+		var tile := _find_prop_tile(
+			post[0] as Vector2i, TRAP_SCAN_RADIUS, entry, reserved, TRAP_CLEAR_FROM_ENTRY)
+		reserved[tile] = true
+		var trap := _instantiate(TRAP_SCENE, _tile_center(tile.x, tile.y), String(post[1]))
+		trap.name = String(post[1])
+		if String(post[1]) == "TrapA":
+			_trap_a_node = trap
+		else:
+			_trap_b_node = trap
+
+
+## Three guards, two bowmen and two wisps. Each tile is marked reserved as it is
+## taken, so two posts whose anchors are close can never collapse onto the same
+## tile once the grid nudges them, and none of them can land on the stair or on a
+## plate.
+func _spawn_enemies(entry: Vector2i, reserved: Dictionary) -> void:
+	for post: Array in [
+		[SKELETON_SCENE, SKELETON_A_ANCHOR, "SkeletonA"],
+		[SKELETON_SCENE, SKELETON_B_ANCHOR, "SkeletonB"],
+		[SKELETON_SCENE, SKELETON_C_ANCHOR, "SkeletonC"],
+		[SKELETON_ARCHER_SCENE, SKELETON_ARCHER_A_ANCHOR, "SkeletonArcherA"],
+		[SKELETON_ARCHER_SCENE, SKELETON_ARCHER_B_ANCHOR, "SkeletonArcherB"],
+		[WISP_SCENE, WISP_A_ANCHOR, "WispA"],
+		[WISP_SCENE, WISP_B_ANCHOR, "WispB"],
+	]:
+		var tile := _find_prop_tile(
+			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
+		reserved[tile] = true
+		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules
+## added: a tile a prop already stands on is not free, and neither is a tile
+## closer than `clear_from_entry` to the tile the player arrives on (Chebyshev, so
+## the diagonal counts as close too). Deterministic for the same reason the base
+## scan is — the order depends only on the anchor and the grid. Same rule the
+## ruins use; the two zones keep their own copy rather than sharing one, because
+## the base class owns the shared plumbing and this is content.
+func _find_prop_tile(
+		anchor: Vector2i,
+		radius: int,
+		entry: Vector2i,
+		reserved: Dictionary,
+		clear_from_entry: int
+	) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			if not _is_walkable(t) or reserved.has(t):
+				continue
+			if maxi(absi(t.x - entry.x), absi(t.y - entry.y)) < clear_from_entry:
+				continue
+			return t
+	return anchor
+
+
+func _is_walkable(tile: Vector2i) -> bool:
+	var ch := cell_at(tile)
+	return ch == "." or ch == ","
+
+
+## The tile the player arrives on: the entry point named in `data/zones.json`,
+## unless that cell turns out to be solid, in which case the nearest walkable one.
+##
+## `ZoneBase._find_walkable_near` cannot simply be handed the entry tile with a
+## radius, because it returns the first walkable cell of its scan box in
+## row-major order rather than preferring the anchor. The declared tile is where
+## the player is meant to arrive, so it is used whenever it is walkable, and the
+## base scan is only reached as the fallback for data that put an entry point
+## inside a column.
+func _entry_spawn_tile(entry: Vector2i) -> Vector2i:
+	if _is_walkable(entry):
+		return entry
+	for radius in range(1, ENTRY_FALLBACK_SCAN_RADIUS + 1):
+		var candidate := _find_walkable_near(entry, radius)
+		if _is_walkable(candidate):
+			return candidate
+	return entry
+
+
+## The undercroft has no villagers and therefore no schedule to serve, but the day
+## cycle is world-owned state the HUD reads through the `day_clock` group, so the
+## zone runs its own clock. There is no sky down here, and the clock line is not
+## the sky: without a clock it would simply go blank for as long as the player
+## stood in this zone.
+func _setup_day_cycle() -> void:
+	day_clock = DayClock.new()
+	day_clock.name = "DayClock"
+	add_child(day_clock)
