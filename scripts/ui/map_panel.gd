@@ -17,6 +17,9 @@ const COLOR_CHEST := Color(0.98, 0.84, 0.30)
 const COLOR_TRAP := Color(0.85, 0.25, 0.22)
 const COLOR_SHORTCUT := Color(0.72, 0.62, 0.45)
 const COLOR_GATE := Color(0.55, 0.46, 0.86)
+const COLOR_DOOR := Color(0.62, 0.40, 0.26)
+const COLOR_MECHANISM := Color(0.35, 0.75, 0.55)
+const COLOR_KEY := Color(0.95, 0.55, 0.20)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -136,6 +139,18 @@ func _draw() -> void:
 				# findable on the map once the player has walked near it.
 				"gate":
 					color = COLOR_GATE
+				# The three pieces of the ruins puzzle: the slab that stops the
+				# player, the lever that opens it, and the key the lever wants.
+				# All three stay marked after they are used — a doorway you have
+				# already opened is still a doorway worth finding again.
+				"door":
+					color = COLOR_DOOR
+				"mechanism":
+					color = COLOR_MECHANISM
+				# The key is marked only while it still lies on the ground: the
+				# world drops the landmark when the pickup frees itself.
+				"key":
+					color = COLOR_KEY
 				_:
 					continue
 			_draw_marker(tile, color)

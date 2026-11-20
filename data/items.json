@@ -184,6 +184,24 @@
       "source": "награда за задание",
       "price": 0,
       "description": "Обломок королевской печати. Не продаётся."
+    },
+    "ruin_key": {
+      "name": "Ржавый ключ",
+      "type": "quest",
+      "rarity": "rare",
+      "icon": "⚷",
+      "source": "руины",
+      "price": 0,
+      "description": "Отпирает каменную дверь в глубине руин. Не продаётся."
+    },
+    "bone_shard": {
+      "name": "Обломок кости",
+      "type": "material",
+      "rarity": "common",
+      "icon": "☠",
+      "source": "скелет",
+      "price": 6,
+      "description": "Материал для ремесла."
     }
   }
 }

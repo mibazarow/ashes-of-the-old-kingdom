@@ -29,13 +29,18 @@ var completed: Dictionary = {}
 ## the connected method can actually write to.
 var _toast_count := 0
 
+## The text of the last toast, for a group that has to check the wording of a
+## refusal rather than only that the world said something at all.
+var _last_toast := ""
+
 ## How many times the settings panel asked to be closed, counted through its own
 ## signal rather than by reading a private flag.
 var _sound_panel_closes := 0
 
 
-func _count_toast(_message: String) -> void:
+func _count_toast(message: String) -> void:
 	_toast_count += 1
+	_last_toast = message
 
 
 func _on_sound_panel_closed() -> void:
@@ -308,12 +313,15 @@ func _run() -> void:
 	await _test_zone_travel()
 	await _test_zone_save_restore()
 
+	print("== ruins mechanics ==")
+	await _test_ruins_mechanics()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 51, "every test group ran to completion (got %d/51)" % completed.size())
+	_check(completed.size() == 52, "every test group ran to completion (got %d/52)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -7338,7 +7346,12 @@ func _test_zone_travel() -> void:
 	_check(String(hud.call("zone_line_text")) == "Зона: Руины у опушки",
 		"the zone line follows the travel (got '%s')" % String(hud.call("zone_line_text")))
 
-	# --- the ruins are a real, deterministic, empty-but-playable zone ----------
+	# --- the ruins are a real, deterministic, playable zone --------------------
+	# The zone is no longer the empty hall it was when travel first landed here:
+	# the hall behind its door is guarded, and the map marks the puzzle as well as
+	# the way out. Which tiles, which counts and which behaviour belong to the
+	# `ruins mechanics` group; what belongs here is that travel raised a populated
+	# zone rather than a different one or a broken one.
 	_check(String(ruins.call("cell_at", Vector2i(0, 0))) == "#", "the ruins have a border wall")
 	_check(String(ruins.call("cell_at", Vector2i(3, 8))) in [".", ","],
 		"the ruins entry tile is walkable")
@@ -7346,9 +7359,14 @@ func _test_zone_travel() -> void:
 	_check(ruins.get_node_or_null("ForestGate") != null
 			and String((ruins.get_node_or_null("ForestGate") as Node).get("target_zone")) == "forest",
 		"the ruins gate leads back to the forest")
-	_check(get_nodes_in_group("enemy").is_empty(), "the ruins spawn no enemies yet")
+	var ruin_posts := 0
+	for node in get_nodes_in_group("enemy"):
+		var enemy_type := String(node.get("enemy_type"))
+		if enemy_type == "ruin_skeleton" or enemy_type == "ruin_skeleton_archer":
+			ruin_posts += 1
+	_check(ruin_posts == 6, "the ruins spawn six skeletons (got %d)" % ruin_posts)
 	var ruins_lms: Array = ruins.call("landmarks")
-	_check(ruins_lms.size() == 1, "the ruins list exactly one landmark (got %d)" % ruins_lms.size())
+	_check(ruins_lms.size() == 4, "the ruins list four landmarks (got %d)" % ruins_lms.size())
 	var gate_lm_found := false
 	for lm: Dictionary in ruins_lms:
 		if String(lm.get("id", "")) == "ForestGate" and String(lm.get("kind", "")) == "gate":
@@ -7472,3 +7490,437 @@ func _test_zone_save_restore() -> void:
 	gs.reset()
 	_check(String(gs.zone) == "forest", "the group leaves no zone behind")
 	completed["zone_save_restore"] = true
+
+
+## The ruins puzzle, end to end, on a live travel into the zone rather than on a
+## fixture, because every claim here is a claim about the built zone: the hall is
+## guarded and the guards stand where a player can reach them but not where they
+## ambush him, the slab really stops the walk into the hall, the lever refuses a
+## player with empty hands and spends exactly one key when he has one, the door
+## stops blocking in the same frame the flag goes up and says it once, a save that
+## already has the flag spawns the door open without anyone calling `open()`, and
+## the key that pays for all of it lies on ground the player can walk to and adds
+## exactly one item when he walks over it.
+##
+## The blocking claim is measured with the same BFS the shortcut group uses, which
+## reads only the zone's public `cell_at`: the slab is handed to it as an extra
+## solid tile, which is exactly what the player's own body sees.
+##
+## The group ends in the forest with GameState reset and slot 2 cleared, so no
+## later group inherits a world, a flag, an inventory or a save file.
+func _test_ruins_mechanics() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Engine.time_scale = 1.0
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	_check(manager != null, "the ruins-mechanics group has a zone manager to travel with")
+	if manager == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["ruins_mechanics"] = true
+		return
+
+	_check(bool(manager.call("travel", "ruins")), "the group travelled into the ruins")
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var player := world.get_node_or_null("Player") as Node2D if world != null else null
+	_check(world != null and player != null, "the ruins built a world with a player of its own")
+	if world == null or player == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["ruins_mechanics"] = true
+		return
+
+	var entry := Vector2i(3, 8)
+	_check(_tile_of_node(player) == entry,
+		"the player still spawns on the ruins entry tile (got %s)" % str(_tile_of_node(player)))
+
+	# --- the hall is guarded ---------------------------------------------------
+	var guards: Array[Node] = []
+	var bowmen: Array[Node] = []
+	for node in get_nodes_in_group("enemy"):
+		var enemy_type := String(node.get("enemy_type"))
+		if enemy_type == "ruin_skeleton":
+			guards.append(node)
+		elif enemy_type == "ruin_skeleton_archer":
+			bowmen.append(node)
+	_check(guards.size() == 4, "the ruins hold exactly 4 ruin_skeleton (got %d)" % guards.size())
+	_check(bowmen.size() == 2, "the ruins hold exactly 2 ruin_skeleton_archer (got %d)" % bowmen.size())
+
+	var posts: Array[Node] = []
+	posts.append_array(guards)
+	posts.append_array(bowmen)
+	var want_names: Array[String] = [
+		"SkeletonA", "SkeletonB", "SkeletonC", "SkeletonD", "SkeletonArcherA", "SkeletonArcherB",
+	]
+	var got_names: Array[String] = []
+	for node: Node in posts:
+		got_names.append(String(node.name))
+	var named_ok := got_names.size() == want_names.size()
+	for want: String in want_names:
+		if not got_names.has(want):
+			named_ok = false
+	_check(named_ok, "the posts are SkeletonA..D and SkeletonArcherA..B (got %s)" % ", ".join(got_names))
+
+	# Every post has to stand on ground it can be fought on, and far enough from
+	# the tile the player arrives on that arriving is not ambushed. Chebyshev, so a
+	# diagonal counts as close too — the same measure the zone spawns with.
+	var off_ground: Array[String] = []
+	var too_close: Array[String] = []
+	for node: Node in posts:
+		var tile := _tile_of_node(node as Node2D)
+		var cell := String(world.call("cell_at", tile))
+		if cell != "." and cell != ",":
+			off_ground.append("%s@%s='%s'" % [String(node.name), str(tile), cell])
+		var clear := maxi(absi(tile.x - entry.x), absi(tile.y - entry.y))
+		if clear < 6:
+			too_close.append("%s@%s=%d" % [String(node.name), str(tile), clear])
+	_check(off_ground.is_empty(), "every skeleton stands on a walkable tile (%s)" % ", ".join(off_ground))
+	_check(too_close.is_empty(),
+		"every skeleton is at least 6 tiles from the entry tile (%s)" % ", ".join(too_close))
+
+	var behaviour_ok := true
+	for node: Node in guards:
+		if int(node.get("kind")) != 0 or String(node.get("loot_item")) != "bone_shard":
+			behaviour_ok = false
+	for node: Node in bowmen:
+		if int(node.get("kind")) != 1 or node.get("projectile_scene") == null \
+				or String(node.get("loot_item")) != "bone_shard":
+			behaviour_ok = false
+	_check(behaviour_ok, "the guards swing melee, the bowmen carry a projectile, all six drop bone_shard")
+
+	# --- the door, and the walk it stops ---------------------------------------
+	var door := get_first_node_in_group("ruin_door")
+	var door_body := door as StaticBody2D
+	_check(door_body != null, "the ruins place a RuinDoor")
+	if door_body == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["ruins_mechanics"] = true
+		return
+	var door_tile := _tile_of_node(door_body)
+	var door_shape := door_body.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	_check(door_tile == Vector2i(14, 11),
+		"the door stands in the middle of the doorway at (14, 11) (got %s)" % str(door_tile))
+	_check(String(world.call("cell_at", door_tile)) == ".",
+		"the doorway is floor under the slab, so it is the body that blocks it ('%s')"
+			% String(world.call("cell_at", door_tile)))
+	_check(door_body.collision_layer & 1 != 0, "the closed door is solid on the world movement layer")
+	_check(door_shape != null and not door_shape.disabled, "the closed door's shape is enabled")
+	_check(door_body.is_in_group("interactable"), "the door is an interactable")
+	_check(String(door.call("prompt_text")) == "Заперто", "the closed door prompts 'Заперто'")
+	_check(not bool(door.call("is_open")), "the closed door reports itself closed")
+
+	# A slab one tile high in an opening five tiles tall is a pillar, not a door:
+	# the player walks past it on either side and the hall is open before anyone has
+	# solved anything. The gap is read out of the wall itself — the tiles of column
+	# 14 that are not solid — and the slab is measured against it, so widening the
+	# doorway without telling the door leaves this check failing rather than the
+	# puzzle trivial.
+	var gap: Array[Vector2i] = []
+	var map_rows := int((world.call("map_size") as Vector2i).y)
+	for row in range(0, map_rows):
+		var cell := String(world.call("cell_at", Vector2i(14, row)))
+		if cell == "." or cell == ",":
+			gap.append(Vector2i(14, row))
+	_check(gap.size() == 5, "the wall leaves a doorway five tiles tall in column 14 (got %d)" % gap.size())
+	var slab := _slab_footprint(door_body, door_shape)
+	var uncovered: Array[String] = []
+	for tile in gap:
+		if not slab.has(tile):
+			uncovered.append(str(tile))
+	_check(uncovered.is_empty(),
+		"the slab covers every tile of the doorway it stands in (%s left open)" % ", ".join(uncovered))
+
+	# Column 14 is solid from the top border to the bottom one except that gap, so
+	# the doorway is the only road into the hall and the BFS below can only fail to
+	# reach it one way: through the slab, tile by tile, exactly as the player's body
+	# meets it.
+	var hall := Vector2i(20, 11)
+	_check(_bfs_distance(world, entry, hall, slab) < 0,
+		"with the door solid, the hall behind it is unreachable from the entry tile")
+	var open_route := _bfs_distance(world, entry, hall, {})
+	_check(open_route > 0,
+		"with the door lifted the same tile is %d tiles from the entry tile" % open_route)
+
+	# --- the lever, and what it refuses ----------------------------------------
+	var lever := get_first_node_in_group("mechanism")
+	_check(lever != null, "the ruins place a Mechanism")
+	if lever == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["ruins_mechanics"] = true
+		return
+	var lever_tile := _tile_of_node(lever as Node2D)
+	_check(lever_tile == Vector2i(13, 11),
+		"the lever sits on the near side of the door at (13, 11) (got %s)" % str(lever_tile))
+	_check(lever_tile.x < door_tile.x and lever_tile.y == door_tile.y,
+		"the lever is on the side of the door the player arrives from")
+	_check(lever.is_in_group("interactable"), "the lever is an interactable")
+	_check(String(lever.call("prompt_text")) == "Механизм", "an untouched lever prompts 'Механизм'")
+
+	# The key has to be reachable while the door is still shut, or the door would
+	# be a wall rather than a puzzle.
+	var key := _find_pickup_by_name("RuinKey")
+	var key_node := key as Node2D
+	_check(key_node != null, "the ruins place the key as a pickup")
+	var key_tile := _tile_of_node(key_node)
+	var key_route := _bfs_distance(world, entry, key_tile, slab)
+	_check(key_route > 0,
+		"the key lies on ground reachable from the entry tile with the door shut (%d tiles)" % key_route)
+	_check(String(key_node.get("item_id")) == "ruin_key", "the pickup carries ruin_key")
+	_check(key_tile != door_tile and key_tile != lever_tile, "the key does not lie on the props")
+
+	var landmark_kinds: Array[String] = []
+	for lm: Dictionary in world.call("landmarks"):
+		landmark_kinds.append(String(lm.get("kind", "")))
+	landmark_kinds.sort()
+	_check(landmark_kinds == ["door", "gate", "key", "mechanism"],
+		"the map marks the gate, the door, the lever and the key (got %s)" % ", ".join(landmark_kinds))
+
+	# --- empty hands: the refusal writes nothing at all ------------------------
+	bus.toast.connect(_count_toast)
+	_toast_count = 0
+	_last_toast = ""
+	lever.call("interact", player)
+	_check(_toast_count == 1, "the lever answered empty hands with exactly one toast (got %d)" % _toast_count)
+	_check(_last_toast == "Нужен ржавый ключ", "the refusal names the key it wants (got '%s')" % _last_toast)
+	_check(not bool(gs.get_flag("ruin_door_open", false)), "the refusal raised no flag")
+	_check(gs.count_item("ruin_key") == 0, "the refusal spent no key the player never had")
+	_check(door_body.collision_layer & 1 != 0, "the refusal left the door solid")
+	_check(String(door.call("prompt_text")) == "Заперто", "the refusal left the door closed")
+	_check(String(lever.call("prompt_text")) == "Механизм", "the refusal left the lever untouched")
+
+	_toast_count = 0
+	_last_toast = ""
+	door.call("interact", player)
+	_check(_toast_count == 1, "the door answered with exactly one toast (got %d)" % _toast_count)
+	_check(_last_toast == "Нужен ключ", "the door says what is missing (got '%s')" % _last_toast)
+	_check(not bool(gs.get_flag("ruin_door_open", false)), "talking to the door raises no flag")
+
+	# --- one key, spent once, and the door stops blocking this frame -----------
+	gs.add_item("ruin_key", 2)
+	_toast_count = 0
+	lever.call("interact", player)
+	_check(gs.count_item("ruin_key") == 1,
+		"the lever spent exactly one of the two keys (got %d left)" % gs.count_item("ruin_key"))
+	_check(bool(gs.get_flag("ruin_door_open", false)), "the lever raised the open flag")
+	_check(bool(door.call("is_open")), "the door reads itself open")
+	_check(door_body.collision_layer & 1 == 0, "the door dropped the world layer in the same frame")
+	_check(door_shape != null and door_shape.disabled, "the door's shape is disabled too")
+	_check(_toast_count == 2, "the lever and the door each spoke once (got %d toasts)" % _toast_count)
+	_check(_last_toast == "Дверь открыта", "the door announced itself (got '%s')" % _last_toast)
+	_check(String(door.call("prompt_text")) == "Открыто", "the open door prompts 'Открыто'")
+	_check(String(lever.call("prompt_text")) == "Рычаг опущен", "the used lever prompts 'Рычаг опущен'")
+
+	# --- the lever is a one-shot, and the door's open() is idempotent ----------
+	_toast_count = 0
+	lever.call("interact", player)
+	_check(_toast_count == 1 and _last_toast == "Уже открыто",
+		"the lever says 'Уже открыто' and spends nothing again (got %d toast, '%s')" % [_toast_count, _last_toast])
+	_check(gs.count_item("ruin_key") == 1, "the second pull spent no further key")
+
+	_toast_count = 0
+	door.call("open")
+	_check(_toast_count == 0, "a second open() says nothing (got %d toasts)" % _toast_count)
+	_check(bool(gs.get_flag("ruin_door_open", false)), "the second open() kept the flag raised")
+	_check(door_body.collision_layer & 1 == 0, "the second open() left the door non-solid")
+	_check(bool(door.call("is_open")), "the second open() left the door open")
+
+	# --- a save that already has the flag spawns the door open ------------------
+	# Nothing calls open() on this path: the door is built from scratch and has to
+	# read the flag itself, which is the only reason a player who opened the door,
+	# saved and quit does not find it shut on him again.
+	_clear_slot(2)
+	var saved: Dictionary = sm.save_game(2)
+	_check(bool(saved.get("ok", false)), "the ruins run saved with the door open")
+	gs.reset()
+	_check(not bool(gs.get_flag("ruin_door_open", false)), "the reset dropped the flag")
+	var loaded: Dictionary = sm.load_game(2)
+	_check(bool(loaded.get("ok", false)), "the slot loaded back")
+	_check(bool(gs.get_flag("ruin_door_open", false)), "the load restored the open flag")
+
+	_check(bool(manager.call("travel", "forest")), "left the ruins to rebuild the zone")
+	await process_frame
+	_check(bool(manager.call("travel", "ruins")), "rebuilt the ruins from the restored state")
+	await process_frame
+	world = scene.get_node_or_null("World")
+	player = world.get_node_or_null("Player") as Node2D if world != null else null
+	var door2 := get_first_node_in_group("ruin_door") as StaticBody2D
+	_check(door2 != null, "the rebuilt ruins have a door")
+	_check(door2 != null and door2.collision_layer & 1 == 0,
+		"a save with the flag spawns the door already open")
+	var shape2 := door2.get_node_or_null("CollisionShape2D") as CollisionShape2D if door2 != null else null
+	_check(shape2 != null and shape2.disabled, "the spawned-open door has no collision shape either")
+	_check(door2 != null and String(door2.call("prompt_text")) == "Открыто",
+		"the spawned-open door prompts 'Открыто'")
+
+	# --- the key on the ground, taken the way a player takes anything -----------
+	var key2 := _find_pickup_by_name("RuinKey") as Node2D
+	_check(key2 != null, "the rebuilt ruins still have the key on the ground")
+	_check(player != null and key2 != null and _tile_of_node(player) == entry,
+		"the rebuilt zone put the player back on the entry tile")
+	var landmark_kinds2: Array[String] = []
+	if world != null:
+		for lm: Dictionary in world.call("landmarks"):
+			landmark_kinds2.append(String(lm.get("kind", "")))
+	_check(landmark_kinds2.has("key"), "the key is a landmark while it still lies there")
+
+	gs.reset()
+	_check(gs.count_item("ruin_key") == 0, "the inventory starts empty before the pickup")
+	if player != null and key2 != null:
+		player.global_position = key2.global_position
+		# The overlap is reported by the physics server, which needs a step to notice
+		# that a body moved into an area — and more than one here. Bounded rather than
+		# guessed at: a machine that needs four frames waits four, and a key that is
+		# never taken still fails the check below instead of hanging the suite.
+		var frames := 0
+		while gs.count_item("ruin_key") == 0 and frames < 10:
+			await physics_frame
+			frames += 1
+		await process_frame
+	_check(gs.count_item("ruin_key") == 1,
+		"walking over the key adds exactly one ruin_key (got %d)" % gs.count_item("ruin_key"))
+	_check(not is_instance_valid(key2), "the pickup freed itself once taken")
+	var kinds_after_pickup: Array[String] = []
+	if world != null:
+		for lm: Dictionary in world.call("landmarks"):
+			kinds_after_pickup.append(String(lm.get("kind", "")))
+	_check(not kinds_after_pickup.has("key"), "the map drops the key marker once it is taken")
+	_check(kinds_after_pickup.has("door") and kinds_after_pickup.has("mechanism"),
+		"the doorway and the lever stay marked after the key is gone")
+
+	# --- the items behind the puzzle -------------------------------------------
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/items.json"))
+	_check(raw is Dictionary, "data/items.json parses as a JSON object")
+	var items: Dictionary = (raw as Dictionary).get("items", {}) if raw is Dictionary else {}
+	var key_def: Dictionary = items.get("ruin_key", {})
+	var shard_def: Dictionary = items.get("bone_shard", {})
+	_check(not key_def.is_empty() and not shard_def.is_empty(),
+		"the table declares both ruin_key and bone_shard")
+	_check(String(key_def.get("name", "")) == "Ржавый ключ"
+			and String(key_def.get("type", "")) == "quest"
+			and String(key_def.get("rarity", "")) == "rare"
+			and int(key_def.get("price", -1)) == 0
+			and String(key_def.get("source", "")) == "руины",
+		"ruin_key is a rare quest item worth 0 gold, found in the ruins")
+	_check(String(shard_def.get("name", "")) == "Обломок кости"
+			and String(shard_def.get("type", "")) == "material"
+			and String(shard_def.get("rarity", "")) == "common"
+			and int(shard_def.get("price", -1)) == 6
+			and String(shard_def.get("source", "")) == "скелет",
+		"bone_shard is a common material worth 6 gold, dropped by a skeleton")
+	_check(ItemDB.icon("ruin_key") != "" and ItemDB.icon("bone_shard") != "",
+		"both new items read through ItemDB with a real glyph")
+
+	# One glyph per item, across the whole table: two items sharing a mark would
+	# make the inventory row ambiguous, and nothing else in the game checks it.
+	var icon_owner: Dictionary = {}
+	var dupe_icons: Array[String] = []
+	for item_id: String in items.keys():
+		var block: Variant = items[item_id]
+		var icon := String((block as Dictionary).get("icon", "")) if block is Dictionary else ""
+		if icon == "":
+			dupe_icons.append("%s has no icon" % item_id)
+			continue
+		if icon_owner.has(icon):
+			dupe_icons.append("%s shared by %s and %s" % [icon, String(icon_owner[icon]), item_id])
+			continue
+		icon_owner[icon] = item_id
+	_check(dupe_icons.is_empty(), "every item in the table has its own icon (%s)" % ", ".join(dupe_icons))
+	_check(String(key_def.get("icon", "")) != String(shard_def.get("icon", "")),
+		"the key and the bone shard are not the same glyph")
+
+	# --- the forest is untouched ------------------------------------------------
+	_toast_count = 0
+	bus.toast.disconnect(_count_toast)
+	_check(bool(manager.call("travel", "forest")), "the group travelled back to the forest")
+	await process_frame
+	await process_frame
+	var back := scene.get_node_or_null("World")
+	_check(back != null and String(back.call("zone_id")) == "forest", "the way back rebuilt the forest")
+	_check(get_first_node_in_group("ruin_door") == null, "the forest has no ruins door")
+	_check(get_first_node_in_group("mechanism") == null, "the forest has no ruins mechanism")
+	var forest_wolves := 0
+	var forest_skeletons := 0
+	for node in get_nodes_in_group("enemy"):
+		var back_type := String(node.get("enemy_type"))
+		if back_type == "ash_wolf":
+			forest_wolves += 1
+		elif back_type == "ruin_skeleton" or back_type == "ruin_skeleton_archer":
+			forest_skeletons += 1
+	_check(forest_wolves >= 5, "the forest still spawns its wolf pack (got %d)" % forest_wolves)
+	_check(forest_skeletons == 0, "no skeleton followed the player into the forest")
+	var forest_lms: Array = back.call("landmarks") if back != null else []
+	_check(forest_lms.size() == 9, "the forest still lists its nine landmarks (got %d)" % forest_lms.size())
+	var forest_interactables := get_nodes_in_group("interactable")
+	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Edrik",
+		"Edrik is still the first interactable after the ruins were built and freed")
+
+	# --- leave no residue -------------------------------------------------------
+	scene.queue_free()
+	await process_frame
+	_clear_slot(2)
+	gs.reset()
+	DamageResolver.reset()
+	# The pickup cue this group starts is the last sound the suite ever starts, and
+	# this is the last group that runs, so it is also the group that would quit with
+	# a voice still held by the audio server — the shutdown noise the audio group
+	# documents at length (leaked ObjectDB instances plus `pickup.wav` still in use),
+	# which would poison the suite's own error gate. Same remedy, same reason: stop
+	# the voices and give the server wall-clock time, not frames, to let go.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		_audio_stop_all(audio)
+		await create_timer(0.5).timeout
+	_check(not bool(gs.get_flag("ruin_door_open", false)), "the group left no door flag behind")
+	_check(gs.count_item("ruin_key") == 0, "the group left no key behind")
+	_check(get_nodes_in_group("ruin_door").is_empty(), "the group left no door in the tree")
+	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
+	completed["ruins_mechanics"] = true
+
+
+## The key lying on the ground, found by name through the group the pickup joins
+## rather than by node path, so a renamed prop still shows up here and a missing
+## one still fails the check instead of hiding.
+func _find_pickup_by_name(node_name: String) -> Node:
+	for node: Node in _find_pickups():
+		if String(node.name) == node_name:
+			return node
+	return null
+
+
+## Every tile a body's own collision shape covers, read back out of the live
+## `RectangleShape2D` and the node's position rather than from the constant that
+## placed it. A blocking claim handed to `_bfs_distance` has to name the tiles the
+## player's body actually hits, and a slab five tiles tall is five of them: pass
+## the one tile the node stands on and the route around a closed door comes back
+## open.
+func _slab_footprint(body: Node2D, shape: CollisionShape2D) -> Dictionary:
+	var out := {}
+	var rect := (shape.shape if shape != null else null) as RectangleShape2D
+	if rect == null or body == null:
+		return out
+	var center := body.global_position + shape.position
+	var half := rect.size * 0.5
+	var first := Vector2i(
+		floori((center.x - half.x) / 16.0), floori((center.y - half.y) / 16.0))
+	var last := Vector2i(
+		floori((center.x + half.x - 0.01) / 16.0), floori((center.y + half.y - 0.01) / 16.0))
+	for y in range(first.y, last.y + 1):
+		for x in range(first.x, last.x + 1):
+			out[Vector2i(x, y)] = true
+	return out
