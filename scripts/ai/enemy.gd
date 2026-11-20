@@ -27,6 +27,38 @@ const ATTACK_COOLDOWN := 0.85
 ## атаку, как только почует"). Applied only when `charge_on_sight` is set.
 const CHARGE_DETECT_MULTIPLIER := 1.5
 
+## --- behaviour trait tuning (spec §10) ---------------------------------------
+## A hit counts as frontal while the angle to the attacker stays inside this
+## cone, so a shielded enemy only soaks what it actually faces. cos(70°).
+const FRONTAL_BLOCK_ANGLE := 70.0
+const FRONTAL_BLOCK_COS := 0.342
+## Cultist aura: allies inside this radius are healed once per AURA_INTERVAL, and
+## no more than AURA_MAX_TARGETS of them per tick (a packed room cannot lag a frame).
+const AURA_RADIUS := 70.0
+const AURA_INTERVAL := 1.0
+const AURA_MAX_TARGETS := 8
+## Death pool: a corpse zone of this radius that pays out death_pool_damage once
+## per DEATH_POOL_TICK for DEATH_POOL_LIFETIME seconds. At most DEATH_POOL_MAX
+## pools may be alive at once, however many plague bearers die together.
+const DEATH_POOL_RADIUS := 34.0
+const DEATH_POOL_LIFETIME := 4.0
+const DEATH_POOL_TICK := 1.0
+const DEATH_POOL_STATUS_DURATION := 1.5
+const DEATH_POOL_MAX := 3
+const DEATH_POOL_GROUP := &"death_pool"
+## Blink hop length and the exposure window that follows it.
+const TELEPORT_MIN := 40.0
+const TELEPORT_MAX := 70.0
+const TELEPORT_VULNERABLE_TIME := 0.15
+const TELEPORT_VULNERABLE_BONUS := 1.5
+## Swarm: allies within this radius each add pack_bonus to the speed multiplier,
+## up to this total bonus.
+const PACK_RADIUS := 90.0
+const PACK_BONUS_CAP := 0.4
+## How often the swarm re-counts its neighbours. A group scan is not free, so the
+## count is refreshed a few times a second and read from a cache every frame.
+const PACK_REFRESH_INTERVAL := 0.25
+
 @export var kind: Kind = Kind.MELEE
 @export var enemy_type: StringName = &"ash_wolf"
 @export var display_name: String = "Пепельный волк"
@@ -54,6 +86,36 @@ const CHARGE_DETECT_MULTIPLIER := 1.5
 ## to plain white, otherwise the first hit would wash the identity away.
 @export var sprite_tint: Color = Color.WHITE
 
+## --- behaviour traits (spec §10) ---------------------------------------------
+## Seven mechanical levers that make a new enemy type genuinely different without
+## a new script. Every one defaults to the value the wolf and the cultist already
+## had (0.0 / false / ""), so an enemy that sets none of them behaves byte for
+## byte as it did before these exports existed, and every new trait is inert until
+## a scene opts in.
+##
+## Frontal shield: a fraction (0..1) of incoming damage absorbed when the hit
+## lands on the side the enemy is facing (within FRONTAL_BLOCK_ANGLE). The knight.
+@export var frontal_block: float = 0.0
+## Cultist caster: heals allies within AURA_RADIUS through their HealthComponent
+## every second. 0 disables the aura entirely.
+@export var aura_heal_per_second: int = 0
+## Plague bearer: on death leaves a short-lived damaging zone at the corpse. The
+## string is the status it inflicts ("blight"); "" leaves no pool at all.
+@export var death_pool: String = ""
+@export var death_pool_damage: int = 4
+## Root beast / turret: never walks, but still strikes anything that steps into
+## attack_range. The chase turns to face the player; only the legs are off.
+@export var stationary: bool = false
+## Blinker: while chasing, teleports a short hop toward a random offset every N
+## seconds and is briefly exposed right after. 0 disables blinking.
+@export var teleport_interval: float = 0.0
+## Spider: a landed melee hit chills the target for this many seconds. 0 keeps
+## the swing clean.
+@export var web_on_hit: float = 0.0
+## Swarm: an additive speed bonus per living ally within PACK_RADIUS, capped at
+## PACK_BONUS_CAP. 0 keeps the lone-wolf speed.
+@export var pack_bonus: float = 0.0
+
 @onready var sprite: Sprite2D = $Sprite2D
 @onready var health: HealthComponent = $HealthComponent
 @onready var attack_area: Area2D = $AttackHitbox
@@ -80,11 +142,31 @@ var _status_component: StatusComponent = null
 var _stagger_bonus := 0.0
 var _stagger_left := 0.0
 
+## Facing as a unit vector, tracked alongside `sprite.flip_h` so the frontal-block
+## cone and the blink direction have a real direction to work from. Only read by
+## traits that opt in, so a default enemy never looks at it.
+var _facing := Vector2.ZERO
+## Cultist aura accumulator (heal once per AURA_INTERVAL, not per frame).
+var _aura_accum := 0.0
+## Blink clock and the exposure timer that follows a hop.
+var _teleport_accum := 0.0
+var _teleport_vulnerable_left := 0.0
+## Swarm speed is recomputed on a slow clock (a group scan is not free) and read
+## from this cache every frame, so `_physics_process` never allocates. For an enemy
+## with no pack_bonus it is simply `speed_multiplier`, refreshed in place.
+var _effective_speed_mult := 1.0
+var _pack_accum := 0.0
+
 ## The world node that owns the village safe zone (the `Forest`), resolved through
 ## the `safe_zone_owner` group and cached. Null when no safe zone exists (a bare
 ## test arena), in which case every safe-zone rule below is inert and the enemy
 ## behaves exactly as it did before the village existed.
 var _safe_owner: Node = null
+
+## The zone that owns the tile grid (the node up the tree that answers `cell_at`),
+## resolved lazily and cached so a blinker can reject a wall destination. Null in a
+## bare test arena with no world above it, where the blink simply never validates.
+var _world: Node = null
 
 
 func _ready() -> void:
@@ -105,6 +187,9 @@ func _ready() -> void:
 		sc.name = "StatusComponent"
 		add_child(sc)
 		_status_component = sc
+	# Seed the movement cache so the first chase frame already reads the scene's
+	# own speed even before the swarm clock has had a chance to refresh.
+	_effective_speed_mult = speed_multiplier
 
 
 ## Lazily resolved status component. Attached in code (never edited into the
@@ -216,14 +301,44 @@ func is_status_owner_dead() -> bool:
 func receive_damage(amount: int, info: Dictionary = {}) -> void:
 	if state == State.DEAD:
 		return
-	health.take_damage(amount, info)
-	_spawn_damage_number(amount)
+	var final_amount := amount
+	# Frontal shield: only a hit that lands inside the facing cone is soaked, and
+	# only when the attacker bothered to say where it came from. The absorbed
+	# amount is written back onto the incoming info (the DamageResolver result
+	# dict, which is what reaches Telemetry.combat right after this call), so the
+	# block shows up in the combat log without a second event.
+	if frontal_block > 0.0 and _is_frontal_hit(info):
+		var reduced := maxi(1, int(round(float(amount) * (1.0 - frontal_block))))
+		info["blocked"] = amount - reduced
+		final_amount = reduced
+	# A blink leaves the enemy briefly exposed: +50 % damage while the window is
+	# open. Inert whenever teleport_interval is 0 (the timer never starts).
+	if _teleport_vulnerable_left > 0.0:
+		final_amount = int(round(float(final_amount) * TELEPORT_VULNERABLE_BONUS))
+		info["teleport_vulnerable"] = true
+	health.take_damage(final_amount, info)
+	_spawn_damage_number(final_amount)
 	if state != State.DEAD:
 		# An ice + physical combination (spec §9.2) asks for a deeper stagger. The
 		# bonus is written per hit and consumed by _enter(), so a later hit without
 		# a combination cannot inherit it, and a DoT tick never re-applies it.
 		_stagger_bonus = _combination_stagger_bonus(info)
 		_enter(State.STAGGER)
+
+
+## True when `info` names an attacker position that lies inside the facing cone.
+## A missing/malformed attacker_position, or an enemy with no facing yet, reads as
+## "not frontal" so the shield never fires on a hit it cannot place.
+func _is_frontal_hit(info: Dictionary) -> bool:
+	var attacker_position: Variant = info.get("attacker_position")
+	if not (attacker_position is Vector2):
+		return false
+	if _facing.length() < 0.01:
+		return false
+	var to_attacker := (attacker_position as Vector2) - global_position
+	if to_attacker.length() < 0.01:
+		return false
+	return _facing.dot(to_attacker.normalized()) >= FRONTAL_BLOCK_COS
 
 
 ## Extra stagger seconds carried by a hit's "combination" block (see
@@ -264,6 +379,9 @@ func _on_died(_info: Dictionary) -> void:
 		"enemy_type": String(enemy_type),
 		"pos": [global_position.x, global_position.y],
 	})
+	# The corpse pool is a separate node owned by the parent, so it outlives this
+	# enemy's own fade-and-free tween below.
+	_spawn_death_pool()
 	var tween: Tween = create_tween()
 	tween.set_parallel(true)
 	tween.tween_property(self, "modulate:a", 0.0, 0.45)
@@ -294,6 +412,11 @@ func _physics_process(delta: float) -> void:
 			_process_investigate(delta)
 		State.CHASE:
 			_process_chase(delta)
+			# A blinker only shuffles position while it is actively chasing, and
+			# only while the chase is still a chase (a swing that started this
+			# frame must not also teleport).
+			if state == State.CHASE:
+				_tick_teleport(delta)
 		State.ATTACK:
 			_process_attack(delta)
 	var sc := _status()
@@ -302,6 +425,11 @@ func _physics_process(delta: float) -> void:
 		if mult != 1.0:
 			velocity *= mult
 	_apply_safe_zone_movement()
+	# A turret never walks: whatever the state machine decided, its legs stay put.
+	# Turning and striking are untouched, so it still swings at anything that steps
+	# into attack_range. Inert unless `stationary` is set.
+	if stationary:
+		velocity = Vector2.ZERO
 	move_and_slide()
 
 
@@ -324,6 +452,10 @@ func _tick(delta: float) -> void:
 		_flash_timer -= delta
 		if _flash_timer <= 0.0:
 			sprite.modulate = sprite_tint
+	if _teleport_vulnerable_left > 0.0:
+		_teleport_vulnerable_left = maxf(0.0, _teleport_vulnerable_left - delta)
+	_refresh_pack_speed(delta)
+	_tick_aura(delta)
 
 
 func _enter(next: State) -> void:
@@ -445,10 +577,178 @@ func _process_chase(delta: float) -> void:
 			return
 
 	if kind == Kind.RANGED and min_range > 0.0 and dist < min_range:
-		velocity = -dir * RANGED_SPEED * speed_multiplier
+		velocity = -dir * RANGED_SPEED * _effective_speed_mult
 	else:
 		var base_speed := MELEE_SPEED if kind == Kind.MELEE else RANGED_SPEED
-		velocity = dir * base_speed * speed_multiplier
+		velocity = dir * base_speed * _effective_speed_mult
+
+
+# --- behaviour traits (spec §10) -----------------------------------------------
+# Each helper below is inert at its export default, so an enemy that opts into
+# none of them runs the exact code path it ran before these traits existed.
+
+## The speed multiplier this enemy would move at right now, counting the allies
+## currently around it. Computed fresh (it is a query for tests and UI, not a
+## per-frame call — movement reads the cache below instead), so a caller sees the
+## swarm bonus the instant an ally walks in or out of range.
+func effective_speed_multiplier() -> float:
+	if pack_bonus <= 0.0:
+		return speed_multiplier
+	return speed_multiplier + _pack_bonus_value(_pack_allies_count())
+
+
+## The swarm bonus a given number of nearby allies is worth, capped so a packed
+## room cannot outrun the design. 0 when the enemy is not a pack fighter.
+func _pack_bonus_value(allies: int) -> float:
+	if pack_bonus <= 0.0:
+		return 0.0
+	return minf(PACK_BONUS_CAP, pack_bonus * float(allies))
+
+
+## Living allies (group "enemy", not self, not dead) within PACK_RADIUS. Scans the
+## group, so it is called on the slow refresh clock below, never every frame.
+func _pack_allies_count() -> int:
+	var count := 0
+	for node in get_tree().get_nodes_in_group("enemy"):
+		if node == self or not is_instance_valid(node):
+			continue
+		var e2d := node as Node2D
+		if e2d == null:
+			continue
+		if e2d.global_position.distance_to(global_position) > PACK_RADIUS:
+			continue
+		if _is_dead_enemy(e2d):
+			continue
+		count += 1
+	return count
+
+
+## A corpse (or a fading one) is not a living ally. Reads the duck-typed shape the
+## group actually holds: an Enemy answers through `state`, anything else through a
+## HealthComponent, and a node with neither is treated as alive.
+func _is_dead_enemy(node: Node) -> bool:
+	var st: Variant = node.get("state")
+	if st != null and int(st) == int(State.DEAD):
+		return true
+	var hc := node.get_node_or_null("HealthComponent") as HealthComponent
+	return hc != null and hc.is_dead
+
+
+## Refresh the cached speed multiplier. Without pack_bonus this is a plain
+## assignment (so a boss that multiplies speed_multiplier mid-fight is picked up
+## the same frame), and with it the group scan runs a few times a second, not 60.
+func _refresh_pack_speed(delta: float) -> void:
+	if pack_bonus <= 0.0:
+		_effective_speed_mult = speed_multiplier
+		return
+	_pack_accum += delta
+	if _pack_accum < PACK_REFRESH_INTERVAL:
+		return
+	_pack_accum = 0.0
+	_effective_speed_mult = speed_multiplier + _pack_bonus_value(_pack_allies_count())
+
+
+## Cultist aura: one heal pass per AURA_INTERVAL, never per frame. Inert at 0.
+func _tick_aura(delta: float) -> void:
+	if aura_heal_per_second <= 0 or state == State.DEAD:
+		return
+	_aura_accum += delta
+	if _aura_accum < AURA_INTERVAL:
+		return
+	_aura_accum -= AURA_INTERVAL
+	_heal_nearby_allies()
+
+
+func _heal_nearby_allies() -> void:
+	var healed := 0
+	for node in get_tree().get_nodes_in_group("enemy"):
+		if healed >= AURA_MAX_TARGETS:
+			return
+		if node == self or not is_instance_valid(node):
+			continue
+		var e2d := node as Node2D
+		if e2d == null:
+			continue
+		if e2d.global_position.distance_to(global_position) > AURA_RADIUS:
+			continue
+		var hc := e2d.get_node_or_null("HealthComponent") as HealthComponent
+		if hc == null or hc.is_dead:
+			continue
+		hc.heal(aura_heal_per_second)
+		healed += 1
+
+
+## Blinker: a hop every teleport_interval while chasing. Inert at 0.
+func _tick_teleport(delta: float) -> void:
+	if teleport_interval <= 0.0:
+		return
+	_teleport_accum += delta
+	if _teleport_accum < teleport_interval:
+		return
+	_teleport_accum = 0.0
+	_do_blink()
+
+
+## A short hop toward a random offset around the current facing. The rotation only
+## steers the landing point; the displacement is exactly the sampled distance, so a
+## blink always moves 40–70 px. A wall destination is refused outright.
+func _do_blink() -> void:
+	var base := _facing
+	if base.length() < 0.01:
+		base = Vector2.RIGHT
+	var dir := base.rotated(randf_range(-PI * 0.5, PI * 0.5))
+	var destination := global_position + dir * randf_range(TELEPORT_MIN, TELEPORT_MAX)
+	if _tile_is_solid(destination):
+		return
+	global_position = destination
+	_teleport_vulnerable_left = TELEPORT_VULNERABLE_TIME
+	Telemetry.event(&"enemy_blink", {
+		"enemy_type": String(enemy_type),
+		"pos": [global_position.x, global_position.y],
+	})
+
+
+## True when the tile under `pos` is solid in the owning zone. With no world above
+## this enemy (a bare arena) there is nothing to validate against, so the blink is
+## allowed; the walkable set is the same "." / "," the zones themselves use.
+func _tile_is_solid(pos: Vector2) -> bool:
+	var world := _world_node()
+	if world == null or not world.has_method("cell_at"):
+		return false
+	var tile := Vector2i(floori(pos.x / 16.0), floori(pos.y / 16.0))
+	var cell := String(world.call("cell_at", tile))
+	return cell != "." and cell != ","
+
+
+## The nearest ancestor that can read the tile grid, cached. Null when none exists.
+func _world_node() -> Node:
+	if _world != null and is_instance_valid(_world):
+		return _world
+	var parent := get_parent()
+	while parent != null:
+		if parent.has_method("cell_at"):
+			_world = parent
+			return _world
+		parent = parent.get_parent()
+	return null
+
+
+## Plague bearer: leave a damaging pool on the corpse, unless the cap is already
+## reached. Inert while death_pool is "".
+func _spawn_death_pool() -> void:
+	if death_pool == "" or get_parent() == null:
+		return
+	if get_tree().get_nodes_in_group(DEATH_POOL_GROUP).size() >= DEATH_POOL_MAX:
+		return
+	var pool := DeathPool.new()
+	pool.configure(death_pool_damage, death_pool, DEATH_POOL_STATUS_DURATION,
+		DEATH_POOL_RADIUS, DEATH_POOL_LIFETIME, DEATH_POOL_TICK)
+	pool.global_position = global_position
+	get_parent().add_child(pool)
+	Telemetry.event(&"enemy_death_pool", {
+		"enemy_type": String(enemy_type),
+		"pos": [global_position.x, global_position.y],
+	})
 
 
 func _start_attack() -> void:
@@ -511,11 +811,21 @@ func _apply_melee_hits() -> void:
 		if _hit_this_swing.has(key):
 			continue
 		_hit_this_swing[key] = true
-		DamageResolver.resolve_hit(self, body, {
+		var payload := {
 			"damage": attack_damage,
 			"hit_id": _current_hit_id,
 			"damage_type": "physical",
-		})
+			# Where this swing came from, so a target with a frontal shield can
+			# place the hit. DamageResolver hands the payload's own keys to the
+			# target, so this is the only way a melee hit can carry a position.
+			"attacker_position": global_position,
+		}
+		# Spider web: a landed swing chills its target through the shared status
+		# payload path. Inert at the default 0.0, so an ordinary swing stays clean.
+		if web_on_hit > 0.0:
+			payload["status"] = "chill"
+			payload["status_duration"] = web_on_hit
+		DamageResolver.resolve_hit(self, body, payload)
 
 
 func _fire_projectile() -> void:
@@ -534,6 +844,10 @@ func _fire_projectile() -> void:
 func _face(dir: Vector2) -> void:
 	if dir.length() < 0.01:
 		return
+	# Track the facing as a vector for the traits that need a direction (frontal
+	# block, blink). The flip_h rule below is untouched, so a default enemy still
+	# turns exactly as it always did.
+	_facing = dir.normalized()
 	if absf(dir.x) > 0.2:
 		sprite.flip_h = dir.x < 0.0
 
@@ -551,3 +865,81 @@ func _spawn_damage_number(amount: int) -> void:
 	tween.tween_property(label, "position:y", label.position.y - 14.0, 0.55)
 	tween.tween_property(label, "modulate:a", 0.0, 0.55)
 	tween.chain().tween_callback(label.queue_free)
+
+
+## A short-lived damaging zone left by a plague bearer's corpse (spec §10). It is
+## a plain Node2D so it survives the enemy that spawned it (which fades and frees
+## itself a moment later), carries one Area2D that only listens on the player
+## layer, pays out its damage once per tick to whoever stands inside, and frees
+## itself on timeout. It never touches an enemy: the mask is the player layer and
+## the body filter re-checks the group, so a double guard against friendly fire.
+class DeathPool:
+	extends Node2D
+
+	## The player physics layer (bit 2). Masking to it alone is what keeps the pool
+	## from ever reporting an enemy body.
+	const PLAYER_LAYER := 2
+
+	var damage := 4
+	var inflicted_status := "blight"
+	var status_duration := 1.5
+	var radius := 34.0
+	var lifetime := 4.0
+	var tick_interval := 1.0
+
+	var _life := 0.0
+	var _tick_accum := 0.0
+	var _tick_counter := 0
+	var _area: Area2D = null
+
+	func configure(dmg: int, status: String, dur: float, pool_radius: float, pool_lifetime: float, pool_tick: float) -> void:
+		damage = dmg
+		inflicted_status = status
+		status_duration = dur
+		radius = pool_radius
+		lifetime = pool_lifetime
+		tick_interval = pool_tick
+
+	func _ready() -> void:
+		add_to_group(&"death_pool")
+		_area = Area2D.new()
+		_area.collision_layer = 0
+		_area.collision_mask = PLAYER_LAYER
+		var shape := CircleShape2D.new()
+		shape.radius = radius
+		var collision := CollisionShape2D.new()
+		collision.shape = shape
+		_area.add_child(collision)
+		add_child(_area)
+
+	func _process(delta: float) -> void:
+		_life += delta
+		if _life >= lifetime:
+			queue_free()
+			return
+		_tick_accum += delta
+		if _tick_accum >= tick_interval:
+			_tick_accum -= tick_interval
+			_damage_inside()
+
+	func _damage_inside() -> void:
+		if _area == null:
+			return
+		for body in _area.get_overlapping_bodies():
+			if body == null or not body.is_in_group("player"):
+				continue
+			if not body.has_method("receive_damage"):
+				continue
+			_tick_counter += 1
+			var payload := {
+				"damage": damage,
+				"hit_id": "death-pool-%d-%d" % [get_instance_id(), _tick_counter],
+				"damage_type": "blight",
+			}
+			if inflicted_status != "":
+				payload["status"] = inflicted_status
+				payload["status_duration"] = status_duration
+			# The attacker is null on purpose: the pool is environmental, and a
+			# source that could be freed before the blight it applied would leave
+			# the DoT pointing at a dead reference.
+			DamageResolver.resolve_hit(null, body, payload)

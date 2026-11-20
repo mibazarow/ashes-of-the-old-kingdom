@@ -330,12 +330,15 @@ func _run() -> void:
 	print("== skills panel ==")
 	await _test_skills_panel()
 
+	print("== enemy behaviour traits ==")
+	await _test_enemy_behaviour_traits()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 55, "every test group ran to completion (got %d/55)" % completed.size())
+	_check(completed.size() == 56, "every test group ran to completion (got %d/56)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -8762,3 +8765,349 @@ func _test_main_menu() -> void:
 	for _i in range(DRAIN_FRAMES):
 		await process_frame
 	completed["main_menu"] = true
+
+
+## Behaviour traits (spec §10, roadmap stage D). Seven exports on `Enemy` give a
+## new enemy type a genuinely different mechanic without a new script: a recoloured
+## mob is not a new type. Every trait is measured on a bare arena so no tree, clock
+## or unrelated enemy can move a number, and every one is proven inert at its
+## default by the final control block. States are spelled as numbers (3 CHASE,
+## 4 ATTACK, 6 DEAD) exactly as in the stagger and boss groups: naming `Enemy`
+## here would pull its autoload references into the suite's compile graph, which
+## does not exist under --script.
+func _test_enemy_behaviour_traits() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+
+	var arena := Node2D.new()
+	root.add_child(arena)
+	await process_frame
+
+	# --- frontal_block: a shield soaks the side it faces -----------------------
+	# Driven through receive_damage directly: DamageResolver builds its own result
+	# dict and does not forward arbitrary payload keys, so the only info that can
+	# carry an attacker_position to the target is the one the caller hands over.
+	# receive_damage annotates that same dict with `blocked`, which is exactly the
+	# dict DamageResolver later feeds to Telemetry.combat in the live path.
+	var shield_front := _spawn_trait_enemy(arena, Vector2(0, 0))
+	shield_front.set("frontal_block", 0.5)
+	shield_front.set("_facing", Vector2.RIGHT)  # faces +x
+	var front_hp_before := _enemy_hp(shield_front)
+	var front_info := {"attacker_position": shield_front.global_position + Vector2(40, 0)}
+	shield_front.receive_damage(10, front_info)
+	var front_taken := front_hp_before - _enemy_hp(shield_front)
+	_check(int(front_info.get("blocked", -1)) == 5,
+		"frontal_block 0.5 blocks 5 of 10 from the front (got %s)" % str(front_info.get("blocked")))
+	_check(front_taken == 5, "a frontal hit lands about half (took %d of 10)" % front_taken)
+	_check(front_info.has("blocked"), "the block is recorded on the incoming combat result")
+
+	var shield_back := _spawn_trait_enemy(arena, Vector2(0, 200))
+	shield_back.set("frontal_block", 0.5)
+	shield_back.set("_facing", Vector2.RIGHT)  # faces +x, attacker comes from -x
+	var back_hp_before := _enemy_hp(shield_back)
+	var back_info := {"attacker_position": shield_back.global_position + Vector2(-40, 0)}
+	shield_back.receive_damage(10, back_info)
+	var back_taken := back_hp_before - _enemy_hp(shield_back)
+	_check(not back_info.has("blocked"), "a hit from behind records no block")
+	_check(back_taken == 10, "a hit from behind lands in full (took %d of 10)" % back_taken)
+	shield_front.queue_free()
+	shield_back.queue_free()
+	await process_frame
+
+	# --- aura_heal_per_second: a caster keeps its pack alive -------------------
+	var caster := _spawn_trait_enemy(arena, Vector2(0, 0))
+	caster.set("aura_heal_per_second", 5)
+	caster.set("stationary", true)  # pin the caster so the radii stay exact
+	var near_ally := _spawn_trait_enemy(arena, Vector2(50, 0))   # within 70
+	var far_ally := _spawn_trait_enemy(arena, Vector2(100, 0))   # outside 70
+	near_ally.set_physics_process(false)
+	far_ally.set_physics_process(false)
+	_damage_enemy(near_ally, 20)
+	_damage_enemy(far_ally, 20)
+	var near_before := _enemy_hp(near_ally)
+	var far_before := _enemy_hp(far_ally)
+	_check(near_before == 6 and far_before == 6, "both allies are wounded to 6 hp first")
+	for _i in range(66):
+		await physics_frame
+	_check(_enemy_hp(near_ally) == near_before + 5,
+		"an ally within 70 px regains 5 hp after one aura tick (got %d)" % _enemy_hp(near_ally))
+	_check(_enemy_hp(far_ally) == far_before,
+		"an ally at 100 px is outside the aura and stays wounded (got %d)" % _enemy_hp(far_ally))
+	caster.queue_free()
+	near_ally.queue_free()
+	far_ally.queue_free()
+	await process_frame
+
+	# --- stationary: a turret that holds its ground but still bites ------------
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	player.position = Vector2(40, 0)  # seen, but out of melee reach
+	arena.add_child(player)
+	await process_frame
+	var turret := _spawn_trait_enemy(arena, Vector2.ZERO)
+	turret.set("stationary", true)
+	var turret_start := turret.global_position
+	for _i in range(60):
+		await physics_frame
+	_check(turret.global_position.distance_to(turret_start) < 0.5,
+		"a stationary enemy does not move over 60 frames while the player is near (drift %.2f)" % turret.global_position.distance_to(turret_start))
+	# Now step the player into reach: the turret must still swing without walking.
+	player.global_position = Vector2(12, 0)
+	var saw_attack := false
+	for _i in range(120):
+		await physics_frame
+		if int(turret.get("state")) == 4:
+			saw_attack = true
+			break
+	_check(saw_attack, "a stationary enemy still attacks once the player is in range")
+	_check(turret.global_position.distance_to(turret_start) < 0.5,
+		"the turret attacked without leaving its post (drift %.2f)" % turret.global_position.distance_to(turret_start))
+	turret.queue_free()
+	await process_frame
+
+	# --- teleport_interval: a blinker that hops and never clips a wall ---------
+	# A bare arena has no world above it, so the blink is always allowed; the
+	# displacement is then exactly the sampled hop. The caster is pinned (stationary)
+	# so the only position change on any frame is the blink itself.
+	var blinker := _spawn_trait_enemy(arena, Vector2.ZERO)
+	blinker.set("teleport_interval", 0.5)
+	blinker.set("stationary", true)
+	player.global_position = Vector2(60, 0)  # induce CHASE, face +x
+	var blink_min := INF
+	var blink_max := 0.0
+	var blink_frames_seen := 0
+	var prev_pos := blinker.global_position
+	for _i in range(150):
+		await physics_frame
+		var jump := prev_pos.distance_to(blinker.global_position)
+		if jump > 1.0:
+			blink_min = minf(blink_min, jump)
+			blink_max = maxf(blink_max, jump)
+			blink_frames_seen += 1
+		prev_pos = blinker.global_position
+	_check(blink_frames_seen >= 2, "the blinker hopped several times while chasing (%d)" % blink_frames_seen)
+	_check(blink_min >= 39.0 and blink_max <= 71.0,
+		"every blink moves 40-70 px (min %.1f, max %.1f)" % [blink_min, blink_max])
+	# With a fake world that walls off everything to the right, a blink must never
+	# land on a solid tile — the destination check rejects it outright.
+	var walled := FakeWalledWorld.new()
+	root.add_child(walled)
+	await process_frame
+	var wall_bl := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	wall_bl.position = Vector2(40, 40)  # tile (2,2), walkable
+	walled.add_child(wall_bl)
+	wall_bl.set("teleport_interval", 0.2)
+	wall_bl.set("stationary", true)
+	# Face it right, toward the solid half, so a naive hop would clip the wall.
+	wall_bl.set("_facing", Vector2.RIGHT)
+	var landed_on_solid := 0
+	for _i in range(150):
+		await physics_frame
+		var tile := Vector2i(floori(wall_bl.global_position.x / 16.0), floori(wall_bl.global_position.y / 16.0))
+		if String(walled.call("cell_at", tile)) != ".":
+			landed_on_solid += 1
+	_check(landed_on_solid == 0, "a blinker never lands on a solid tile (%d frames on solid)" % landed_on_solid)
+	blinker.queue_free()
+	wall_bl.queue_free()
+	walled.queue_free()
+	await process_frame
+
+	# --- web_on_hit: a landed swing leaves the player chilled ------------------
+	var spider := _spawn_trait_enemy(arena, Vector2(10, 0))  # within melee reach
+	spider.set("web_on_hit", 1.5)
+	player.global_position = Vector2.ZERO
+	var player_sc := player.get_node_or_null("StatusComponent") as StatusComponent
+	_check(player_sc != null, "the player owns a StatusComponent for the web test")
+	var chill_seen := 0.0
+	for _i in range(150):
+		await physics_frame
+		if player_sc != null and player_sc.has_status("chill"):
+			chill_seen = player_sc.time_left("chill")
+			break
+	_check(chill_seen > 1.2 and chill_seen <= 1.5,
+		"a web hit chills the player for ~1.5 s (got %.2f)" % chill_seen)
+	spider.queue_free()
+	if player_sc != null:
+		player_sc.clear_all()
+	await process_frame
+
+	# --- pack_bonus: a swarm that speeds up around its own ---------------------
+	_clear_enemies()
+	await process_frame
+	var swarm := _spawn_trait_enemy(arena, Vector2(400, 400))
+	swarm.set("pack_bonus", 0.1)
+	var alone := float(swarm.call("effective_speed_multiplier"))
+	var allies: Array[Node] = []
+	for i in range(2):
+		var a := _spawn_trait_enemy(arena, Vector2(400, 400) + Vector2(20 + i * 20, 0))
+		a.set_physics_process(false)
+		allies.append(a)
+	var with_two := float(swarm.call("effective_speed_multiplier"))
+	for i in range(4):
+		var a := _spawn_trait_enemy(arena, Vector2(400, 400) + Vector2(0, 20 + i * 12))
+		a.set_physics_process(false)
+		allies.append(a)
+	var with_six := float(swarm.call("effective_speed_multiplier"))
+	_check(absf(alone - 1.0) < 0.0001, "a lone swarm keeps its plain speed (%.2f)" % alone)
+	_check(with_two > alone + 0.05, "two allies within 90 px raise the swarm speed (%.2f > %.2f)" % [with_two, alone])
+	_check(absf(with_six - 1.4) < 0.0001,
+		"six allies still cap the swarm bonus at +40%% (%.2f)" % with_six)
+	swarm.queue_free()
+	for a in allies:
+		a.queue_free()
+	await process_frame
+
+	# --- death_pool: a corpse that keeps hurting -------------------------------
+	_clear_enemies()
+	await process_frame
+	player.global_position = Vector2(600, 600)
+	if player_sc != null:
+		player_sc.clear_all()
+	gs.revive_full()
+	var plague := _spawn_trait_enemy(arena, player.global_position)
+	plague.set("death_pool", "blight")
+	plague.set("death_pool_damage", 4)
+	# A bystander standing in the same spot must never be touched by the pool.
+	var bystander := _spawn_trait_enemy(arena, player.global_position)
+	bystander.set_physics_process(false)
+	var bystander_hp_before := _enemy_hp(bystander)
+	DamageResolver.resolve_hit(null, plague, {"damage": 999, "hit_id": "dp-kill-1", "damage_type": "physical"})
+	await process_frame
+	var pools := get_nodes_in_group("death_pool")
+	_check(pools.size() == 1, "killing the plague bearer spawns exactly one pool (got %d)" % pools.size())
+	var player_hp_before := int(gs.hp)
+	for _i in range(66):
+		await physics_frame
+	_check(int(gs.hp) < player_hp_before,
+		"the pool damages the player standing in it after 1 s (%d -> %d)" % [player_hp_before, int(gs.hp)])
+	_check(player_sc != null and player_sc.has_status("blight"), "the pool inflicts blight on the player")
+	_check(_enemy_hp(bystander) == bystander_hp_before,
+		"the pool never damages an enemy standing in it (hp %d)" % _enemy_hp(bystander))
+	# Step clear, then let it run out on its own.
+	player.global_position = Vector2(900, 900)
+	for _i in range(230):
+		await physics_frame
+	_check(get_nodes_in_group("death_pool").is_empty(),
+		"the pool is freed after its lifetime (%d still alive)" % get_nodes_in_group("death_pool").size())
+	bystander.queue_free()
+	await process_frame
+
+	# --- death_pool cap: four die, three pools is the ceiling ------------------
+	_clear_enemies()
+	_clear_death_pools()
+	await process_frame
+	var dying: Array[Node] = []
+	for i in range(4):
+		var p := _spawn_trait_enemy(arena, Vector2(1200 + i * 30, 1200))
+		p.set("death_pool", "blight")
+		dying.append(p)
+	for i in range(dying.size()):
+		DamageResolver.resolve_hit(null, dying[i], {"damage": 999, "hit_id": "dp-cap-%d" % i, "damage_type": "physical"})
+	await process_frame
+	_check(get_nodes_in_group("death_pool").size() == 3,
+		"a fourth simultaneous death pool is not created (got %d)" % get_nodes_in_group("death_pool").size())
+	_clear_death_pools()
+	await process_frame
+
+	# --- defaults: an enemy that opts into nothing is the old enemy ------------
+	# A control wolf (scene defaults, nothing touched) and a wolf whose seven trait
+	# exports are explicitly written back to their default values must trace the
+	# identical path. Both are seeded to the same value so the per-instance jitter in
+	# _ready (cooldown, wander) is identical, and the only random source in the
+	# window is the enemy itself, so the two runs stay in lockstep.
+	_clear_enemies()
+	await process_frame
+	player.global_position = Vector2(40, 0)
+	seed(20261120)
+	var control := _spawn_trait_enemy(arena, Vector2.ZERO)
+	for _i in range(60):
+		await physics_frame
+	var control_pos := control.global_position
+	var control_state := int(control.get("state"))
+	control.queue_free()
+	await process_frame
+
+	seed(20261120)
+	var explicit := _spawn_trait_enemy(arena, Vector2.ZERO)
+	explicit.set("frontal_block", 0.0)
+	explicit.set("aura_heal_per_second", 0)
+	explicit.set("death_pool", "")
+	explicit.set("death_pool_damage", 4)
+	explicit.set("stationary", false)
+	explicit.set("teleport_interval", 0.0)
+	explicit.set("web_on_hit", 0.0)
+	explicit.set("pack_bonus", 0.0)
+	for _i in range(60):
+		await physics_frame
+	var explicit_pos := explicit.global_position
+	var explicit_state := int(explicit.get("state"))
+	_check(explicit_pos.is_equal_approx(control_pos) or explicit_pos.distance_to(control_pos) < 0.01,
+		"an all-defaults enemy tracks the control position exactly (%s vs %s)" % [str(explicit_pos), str(control_pos)])
+	_check(explicit_state == control_state,
+		"an all-defaults enemy is in the same state as the control (%d vs %d)" % [explicit_state, control_state])
+	_check(explicit_pos.x > 1.0,
+		"the all-defaults enemy still closes on the player (x %.1f, not frozen)" % explicit_pos.x)
+	explicit.queue_free()
+
+	# --- cleanup ---------------------------------------------------------------
+	arena.queue_free()
+	await process_frame
+	_clear_death_pools()
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	# This group hurts the player for real (pool, web swing), so it can leave a
+	# `hurt` sample mid-playback. It now runs after the audio-draining main-menu
+	# group, so nothing downstream would silence it, and a stream still held at exit
+	# is reported as a leaked AudioStreamWAV — which the acceptance run counts as a
+	# failure. Silence the pool and let it run dry here, exactly as the last group does.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		_audio_stop_all(audio)
+		for _i in range(DRAIN_FRAMES):
+			await process_frame
+	completed["enemy_behaviour_traits"] = true
+
+
+## A wolf instance dropped into `arena` at `pos`. The wolf scene is the plain
+## `Enemy` script, so it is the honest base for a trait that a new type would set.
+func _spawn_trait_enemy(arena: Node2D, pos: Vector2) -> Node2D:
+	var e := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	e.position = pos
+	arena.add_child(e)
+	return e
+
+
+func _enemy_hp(node: Node) -> int:
+	var hc := node.get_node_or_null("HealthComponent") as HealthComponent
+	return int(hc.current_health) if hc != null else -1
+
+
+func _damage_enemy(node: Node, amount: int) -> void:
+	var hc := node.get_node_or_null("HealthComponent") as HealthComponent
+	if hc != null:
+		hc.take_damage(amount)
+
+
+func _clear_enemies() -> void:
+	for node in get_nodes_in_group("enemy"):
+		if is_instance_valid(node):
+			node.queue_free()
+
+
+func _clear_death_pools() -> void:
+	for node in get_nodes_in_group("death_pool"):
+		if is_instance_valid(node):
+			node.queue_free()
+
+
+## A stand-in zone for the blink wall test: every tile at column >= 3 is solid, so
+## a hop steered to the right must be rejected. It answers `cell_at` exactly like a
+## real zone, which is the only contract `Enemy._tile_is_solid` relies on.
+class FakeWalledWorld:
+	extends Node2D
+
+	func cell_at(tile: Vector2i) -> String:
+		if tile.x >= 3:
+			return "#"
+		return "."
