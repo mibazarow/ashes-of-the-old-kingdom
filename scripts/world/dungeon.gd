@@ -48,8 +48,24 @@ const ENTRY_FALLBACK_SCAN_RADIUS := 3
 ## walking the zone, far enough that arriving never opens the prompt under his
 ## feet. A radius-0 scan checks the declared tile rather than snapping it to the
 ## nearest free one, because a wide row-major scan would answer with the top-left
-## corner of its box and move the only exit in the zone somewhere else.
+## corner of its box and move the stair somewhere else.
 const RUINS_EXIT_TILE := Vector2i(2, 10)
+
+## The door to the fourth zone, in the far north-east corner of the undercroft: the
+## tile the walk from the stair is longest to reach (50 steps against the 25 that
+## cross the zone end to end), the one that takes the player past the plate on the
+## narrowed stretch of the middle corridor before it opens, and the one furthest
+## from every post, plate and column in the zone — ten tiles from the nearest of
+## them, so the door never shares a prompt with a skeleton and nobody spawns in the
+## doorway. A door to the fortress belongs at the end of the longest road the
+## undercroft asks for, not at the first free corner.
+##
+## Scan radius zero, like the ruins' descent: the declared tile is checked for
+## walkability rather than snapped to the nearest free one, because a wide
+## row-major scan would answer with the top-left corner of its box and move the
+## ascent somewhere the map and the tests no longer agree on.
+const FORTRESS_GATE_TILE := Vector2i(42, 1)
+const FORTRESS_GATE_SCAN_RADIUS := 0
 
 ## The masonry. Eight blocks, each one the mass between two neighbouring
 ## corridors, and each clamped to the interior when painted, so no block can ever
@@ -270,6 +286,33 @@ func _spawn_actors() -> void:
 	var reserved := {spawn_tile: true, exit_tile: true}
 	_spawn_traps(spawn_tile, reserved)
 	_spawn_enemies(spawn_tile, reserved)
+	# Last, after every plate and post has had its turn at the reserved set. The
+	# door's tile is a fixed constant rather than a scan, so the order cannot move
+	# it, but the reserved set is the only thing here that knows which tiles the
+	# props ended up on, and reading it after they are placed means an edit to an
+	# anchor that walks a skeleton onto the door shows up as a collision this
+	# function can see instead of two props sharing one tile in silence. Same
+	# position in the flow as the ruins' descent, for the same reason.
+	_spawn_fortress_gate(spawn_tile, reserved)
+
+
+## The door up to the fortress, at the far end of the longest walk the undercroft
+## asks for. Built in code like the stair back to the ruins: a `ZoneExit` has no
+## sprite of its own and draws itself, so a node assembled here cannot drift away
+## from the tile constant that places it, and the ascent cannot be edited out of
+## existence by a scene edit. It is deliberately not a landmark, exactly as the
+## ruins leave their own descent unmarked: the map marks the way out and the two
+## hazards, and the door to the fifth area of the world is the reward for walking
+## the undercroft rather than a waypoint handed to the player before he starts.
+func _spawn_fortress_gate(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		FORTRESS_GATE_TILE, FORTRESS_GATE_SCAN_RADIUS, entry, reserved, 0)
+	var gate := ZoneExit.new()
+	gate.name = "FortressGate"
+	gate.target_zone = "fortress"
+	gate.prompt = "Войти в крепость"
+	gate.position = _tile_center(tile.x, tile.y)
+	add_child(gate)
 
 
 ## Two plates on the two narrowed stretches. Each takes the first free tile of its

@@ -14,6 +14,11 @@
 			"name": "Подземелье под руинами",
 			"script": "res://scripts/world/dungeon.gd",
 			"entry_tile": [3, 12]
+		},
+		"fortress": {
+			"name": "Древняя крепость",
+			"script": "res://scripts/world/fortress.gd",
+			"entry_tile": [4, 14]
 		}
 	}
 }

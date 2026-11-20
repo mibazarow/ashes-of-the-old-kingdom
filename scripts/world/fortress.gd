@@ -1,0 +1,394 @@
+class_name Fortress
+extends ZoneBase
+## The fourth zone: the ancient fortress at the end of the road, reached through
+## the door at the far north-east corner of the undercroft. The dungeon is what
+## the player pays a key for; this is what the whole route was walking towards,
+## so the zone is built as a progression rather than a place to get lost in —
+## outer yard, barracks, archive, throne hall, and the broken sanctum behind it.
+##
+## Like the two zones before it, the layout is written out as constants instead of
+## rolled from a seed: a fixed list of wall rects, pillars and floor patches is
+## deterministic by construction, so there is no generator to keep in step and no
+## seed to pin. Unlike them, the shape here is a row of rooms rather than a hall or
+## a network: four dividing walls cut the grid into five named areas, and each wall
+## leaves one opening two tiles tall on the two rows of the spine.
+##
+## The spine is the promise this zone makes about itself. Rows 14..15 are kept free
+## of masonry from the west border to the east one — no wall rect, no pillar and no
+## dirt-free gap ever lands there — so the road from the entry to the sanctum is
+## always two tiles wide, every doorway lines up with it, and a player who walks
+## east can always walk back west. Nothing in this zone is one-way: there is no
+## door, no lever, no drop and no collapse. The fortress was sealed by other
+## people, long ago; the walk through it is the player's own.
+##
+## The last room is the exception in a specific way. The sanctum beyond the throne
+## hall is left empty on purpose — see `BOSS_ARENA` — because the final boss of the
+## game is meant to be fought there and nothing may be standing in the ring when he
+## arrives. That is the one piece of geometry in this zone written for content that
+## does not exist yet, and it is the reason the sanctum's own doorway has no
+## flanking pillars on its east side.
+
+const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
+const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
+const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
+const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
+
+const MAP_W := 48
+const MAP_H := 30
+
+## The zone's own entry tile, used only as the fallback when the data table has
+## nothing usable for this zone. It is the same tile `data/zones.json` names, and
+## it sits in the west end of the spine, inside the outer yard, where the road back
+## down to the dungeon is three tiles away and every room is down the same road.
+const FALLBACK_ENTRY_TILE := Vector2i(4, 14)
+
+## How far the spawn scan widens when the entry tile named in the data turns out
+## to sit on something solid. Three tiles clears a single pillar or a one-tile wall
+## stub without wandering out of the yard.
+const ENTRY_FALLBACK_SCAN_RADIUS := 3
+
+## The two rows of the spine. The invariant of this zone is that every tile of
+## these rows, from the west border to the east one, is walkable: the four dividing
+## walls open onto them, the four room markers stand on them, and the road back is
+## the same road going the other way. `_generate_map` paints the masonry after the
+## floor and the tests measure the rows, so an edit that breaks the spine shows up
+## as a red check rather than as a corridor a player finds out about alone.
+const SPINE_TOP_ROW := 14
+const SPINE_BOTTOM_ROW := 15
+
+## The stair back down, in the yard three tiles north-west of the arrival tile:
+## close enough that a player who came up to look around can leave without walking
+## the fortress, far enough that arriving never opens the prompt under his feet.
+## Same distance and same reasoning as the ruins' `ForestGate` and the dungeon's
+## `RuinsExit`. A radius-0 scan checks the declared tile rather than snapping it to
+## the nearest free one, because a wide row-major scan would answer with the
+## top-left corner of its box and move the only exit in the zone.
+const DUNGEON_EXIT_TILE := Vector2i(2, 11)
+
+## The masonry, in the order it is painted. The four dividing walls come first:
+## each is one tile thick, runs the whole interior height, and is written as two
+## rects so the two rows of the spine stay open through it — that opening is the
+## doorway, two tiles tall against a two-tile road, which is what keeps the zone
+## walkable in both directions without a single door in it. The rest are the rooms
+## each wall creates: hut stubs and a curtain stub in the yard, four bunk bars in
+## the barracks, six racks in the archive, two daises in the throne hall. Every one
+## of them is an island — clear of the border, of the dividing walls and of each
+## other — so none of them can seal a pocket, and the yard, the barracks, the
+## archive and the throne hall each stay one connected room.
+const INNER_WALLS: Array[Rect2i] = [
+	# Dividers: yard | barracks | archive | throne hall | sanctum.
+	Rect2i(13, 1, 1, 13), Rect2i(13, 16, 1, 13),
+	Rect2i(24, 1, 1, 13), Rect2i(24, 16, 1, 13),
+	Rect2i(34, 1, 1, 13), Rect2i(34, 16, 1, 13),
+	Rect2i(41, 1, 1, 13), Rect2i(41, 16, 1, 13),
+	# Outer yard: two hut foundations and the stub of the curtain that burned.
+	Rect2i(3, 4, 6, 1), Rect2i(3, 24, 6, 1),
+	Rect2i(10, 7, 1, 4), Rect2i(10, 19, 1, 4),
+	# Barracks: four bunk bars, two north of the parade ground and two south.
+	Rect2i(16, 3, 6, 1), Rect2i(16, 6, 6, 1),
+	Rect2i(16, 22, 6, 1), Rect2i(16, 25, 6, 1),
+	# Archive: four shelf runs and two fallen ones lying across the room.
+	Rect2i(27, 3, 1, 4), Rect2i(31, 3, 1, 4),
+	Rect2i(27, 21, 1, 4), Rect2i(31, 21, 1, 4),
+	Rect2i(28, 9, 3, 1), Rect2i(28, 19, 3, 1),
+	# Throne hall: the dais the king never left and the one below it.
+	Rect2i(36, 4, 4, 2), Rect2i(36, 23, 4, 2),
+]
+
+## Standing columns. The twelve that flank the four doorways sit one tile either
+## side of an opening and one row off a spine row, so they read as gateposts and
+## never as a narrowed passage: the doorway stays two tiles wide, and the approach
+## to it stays two tiles wide. The six hall columns are decorative and are all off
+## the spine. The sanctum's doorway has gateposts on the throne-hall side only —
+## the two that would stand on its east side are inside `BOSS_ARENA`, and a ring
+## the final boss has to walk into cannot start with two columns in it.
+const PILLARS: Array[Vector2i] = [
+	Vector2i(12, 13), Vector2i(12, 16), Vector2i(14, 13), Vector2i(14, 16),
+	Vector2i(23, 13), Vector2i(23, 16), Vector2i(25, 13), Vector2i(25, 16),
+	Vector2i(33, 13), Vector2i(33, 16), Vector2i(35, 13), Vector2i(35, 16),
+	Vector2i(40, 13), Vector2i(40, 16),
+	Vector2i(6, 8), Vector2i(6, 21),
+	Vector2i(19, 10), Vector2i(19, 19),
+	Vector2i(29, 8), Vector2i(29, 21),
+	Vector2i(37, 9), Vector2i(37, 20),
+]
+
+## Worn floor, drawn as dirt: the garrison's yard, the parade ground the barracks
+## drilled on, the archive floor, the throne hall's approach, and two scorch marks
+## in the sanctum where the ritual went wrong. Painted before the masonry so a
+## patch can only ever be covered by a wall, never the other way round. Deliberately
+## short of `BOSS_ARENA`: the ring the final boss is fought in is bare stone.
+const DIRT_PATCHES: Array[Rect2i] = [
+	Rect2i(2, 11, 5, 5),
+	Rect2i(15, 12, 8, 5),
+	Rect2i(26, 12, 7, 4),
+	Rect2i(35, 12, 6, 5),
+	Rect2i(43, 4, 3, 4),
+	Rect2i(43, 21, 3, 4),
+]
+
+## The five named areas of spec §5, as the rectangles each dividing wall leaves
+## between itself and the next. The sanctum is here because it is a real room the
+## geometry defines, and it is deliberately not one of the markers below: the four
+## marked areas are the ones a player is sent to look for, and the sanctum is the
+## one he is supposed to walk into without being told.
+##
+## The markers take the centre of their rectangle, which for these rooms is always
+## a tile of the spine, so a marker can never be dropped inside a wall by an edit
+## to a rect: widening a room moves its marker along the road, not off it.
+const ROOM_BOUNDS := {
+	"fortress_yard": Rect2i(1, 1, 12, 28),
+	"fortress_barracks": Rect2i(14, 1, 10, 28),
+	"fortress_archive": Rect2i(25, 1, 9, 28),
+	"fortress_throne": Rect2i(35, 1, 6, 28),
+	"fortress_sanctum": Rect2i(42, 1, 5, 28),
+}
+
+## The four areas the map names, in the order a player walks them. Spelled out as
+## a list rather than derived from `ROOM_BOUNDS` so the sanctum cannot join the
+## markers by someone filling in the room table, and so the stable ids the map and
+## the tests use are visible in one line.
+const ROOM_MARKERS: Array[String] = [
+	"fortress_yard", "fortress_barracks", "fortress_archive", "fortress_throne",
+]
+
+## The ring the final boss is meant to be fought in: the far end of the throne
+## hall, inside the broken sanctum, entered through the last two-tile doorway on
+## the spine. Reserved in the same pass that reserves the entry and the exit, so no
+## enemy, no prop and no future spawn can be placed on it by `_find_prop_tile`, and
+## kept free of masonry, of pillars and of dirt by the constants above. Every tile
+## of it is walkable and reachable from the entry, which is the whole requirement:
+## the fight is not here yet, but the ground it will need is, and a boss added
+## later should have to be added, not cleared.
+const BOSS_ARENA := Rect2i(42, 11, 5, 8)
+
+## Posts. Two guards and a boar hold the yard, the two bowmen and the boar's
+## parade ground hold the barracks, and the archive keeps the two lights and a
+## bowman of its own, where a caster has the shelf runs to break a line of sight
+## behind. Every anchor is in the half of the zone the player has to walk to reach,
+## and every one of them is snapped by `_find_prop_tile`, so a wall or a column
+## edited later moves the post with it instead of swallowing it.
+const GUARD_A_ANCHOR := Vector2i(3, 6)
+const GUARD_B_ANCHOR := Vector2i(11, 22)
+const ARCHER_A_ANCHOR := Vector2i(17, 4)
+const ARCHER_B_ANCHOR := Vector2i(21, 24)
+const BOAR_A_ANCHOR := Vector2i(20, 18)
+const WISP_A_ANCHOR := Vector2i(28, 6)
+const WISP_B_ANCHOR := Vector2i(32, 22)
+const ARCHER_C_ANCHOR := Vector2i(26, 19)
+
+## How wide each post scans for a free tile, and how far every one of them has to
+## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
+## sight line of a plain enemy: at that Chebyshev distance a post can see the entry
+## but cannot have been standing close enough to be on top of the player the frame
+## the zone finished building. Same rule the ruins and the dungeon spawn with.
+const ENEMY_SCAN_RADIUS := 2
+const ENEMY_CLEAR_FROM_ENTRY := 6
+
+## The way back, kept as a live node reference as in the other zones. The four room
+## markers need no node: they name ground, not objects, and ground cannot free
+## itself, so they are built from `ROOM_BOUNDS` on every call rather than cached.
+var _exit_node: Node2D
+
+
+func zone_id() -> String:
+	return "fortress"
+
+
+func zone_name() -> String:
+	return "Древняя крепость"
+
+
+## The stair down and the four named areas. The rooms are marked because the map is
+## where a player looks to find out how far he still has to walk, and a fortress
+## that is only a corridor between walls tells him nothing about what the walls are
+## for; the stair is marked so the way out is findable on the map once he has
+## walked near it, which is the same reason the dungeon marks its own.
+func landmarks() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if _exit_node != null and is_instance_valid(_exit_node):
+		out.append({
+			"id": "DungeonExit",
+			"kind": "gate",
+			"tile": Vector2i(
+				floori(_exit_node.global_position.x / float(TILE)),
+				floori(_exit_node.global_position.y / float(TILE))
+			),
+		})
+	for room_id: String in ROOM_MARKERS:
+		out.append({"id": String(room_id), "kind": "room", "tile": _room_centre(String(room_id))})
+	return out
+
+
+## The marked tile of a named area: the centre of its rectangle, floored, which for
+## these five rooms always lands on a spine row.
+func _room_centre(room_id: String) -> Vector2i:
+	var bounds: Rect2i = ROOM_BOUNDS.get(room_id, Rect2i())
+	var center: Vector2 = bounds.get_center()
+	return Vector2i(floori(center.x), floori(center.y))
+
+
+func _generate_map() -> void:
+	_map_width = MAP_W
+	_map_height = MAP_H
+	var grid: Array = []
+	for y in range(MAP_H):
+		var row: Array = []
+		for x in range(MAP_W):
+			var edge := x == 0 or y == 0 or x == MAP_W - 1 or y == MAP_H - 1
+			row.append("#" if edge else ".")
+		grid.append(row)
+
+	# The order is the layout: worn floor first, then the masonry that buries it,
+	# then the columns. Reversing the last two would drop a pillar into a wall stub
+	# rather than into a room, which is harmless, but painting the floor after the
+	# walls would put scorch marks on top of the daises, which is not.
+	for patch: Rect2i in DIRT_PATCHES:
+		_paint_rect(grid, patch, ",")
+	for wall: Rect2i in INNER_WALLS:
+		_paint_rect(grid, wall, "#")
+	for pillar: Vector2i in PILLARS:
+		if _is_interior(pillar):
+			grid[pillar.y][pillar.x] = "#"
+
+	_map.clear()
+	for y in range(MAP_H):
+		_map.append("".join(PackedStringArray(grid[y])))
+
+
+## Paints one rect with a character, clipped to the interior so the border wall
+## stays solid no matter how the constants are edited later.
+func _paint_rect(grid: Array, rect: Rect2i, ch: String) -> void:
+	for y in range(rect.position.y, rect.position.y + rect.size.y):
+		for x in range(rect.position.x, rect.position.x + rect.size.x):
+			if not _is_interior(Vector2i(x, y)):
+				continue
+			grid[y][x] = ch
+
+
+func _is_interior(tile: Vector2i) -> bool:
+	return tile.x > 0 and tile.y > 0 and tile.x < MAP_W - 1 and tile.y < MAP_H - 1
+
+
+func _spawn_actors() -> void:
+	# The entry tile comes from the data table, snapped to the nearest walkable
+	# cell so a hand-edited `entry_tile` that lands on a column still spawns a
+	# player standing on floor.
+	var entry := ZoneManager.entry_tile(zone_id())
+	if entry == Vector2i.ZERO:
+		entry = FALLBACK_ENTRY_TILE
+	var spawn_tile := _entry_spawn_tile(entry)
+	player = _instantiate(PLAYER_SCENE, _tile_center(spawn_tile.x, spawn_tile.y), "Player")
+	player.name = "Player"
+	player.add_to_group("player")
+	player.set("spawn_point", player.global_position)
+
+	# The way back is placed first, so its tile is already reserved while the posts
+	# are still being snapped and nothing can be parked on the stair.
+	var exit_tile := _find_walkable_near(DUNGEON_EXIT_TILE, 0)
+	var exit := ZoneExit.new()
+	exit.name = "DungeonExit"
+	exit.target_zone = "dungeon"
+	exit.prompt = "Вернуться в подземелье"
+	exit.position = _tile_center(exit_tile.x, exit_tile.y)
+	add_child(exit)
+	_exit_node = exit
+
+	# The arena goes into the reserved set tile by tile, before any post is placed,
+	# so the ring is held for the boss by the same mechanism that keeps two enemies
+	# off one tile rather than by a rule each future spawner has to remember.
+	var reserved := {spawn_tile: true, exit_tile: true}
+	for tile: Vector2i in _rect_tiles(BOSS_ARENA):
+		reserved[tile] = true
+	_spawn_enemies(spawn_tile, reserved)
+
+
+## Two guards, three bowmen, a boar and two lights. Each tile is marked reserved as
+## it is taken, so two posts whose anchors are close can never collapse onto the
+## same tile once the grid nudges them, and none of them can land on the stair, on
+## the entry or inside the arena.
+func _spawn_enemies(entry: Vector2i, reserved: Dictionary) -> void:
+	for post: Array in [
+		[SKELETON_SCENE, GUARD_A_ANCHOR, "GuardA"],
+		[SKELETON_SCENE, GUARD_B_ANCHOR, "GuardB"],
+		[SKELETON_ARCHER_SCENE, ARCHER_A_ANCHOR, "SkeletonArcherA"],
+		[SKELETON_ARCHER_SCENE, ARCHER_B_ANCHOR, "SkeletonArcherB"],
+		[BOAR_SCENE, BOAR_A_ANCHOR, "BoarA"],
+		[WISP_SCENE, WISP_A_ANCHOR, "WispA"],
+		[WISP_SCENE, WISP_B_ANCHOR, "WispB"],
+		[SKELETON_ARCHER_SCENE, ARCHER_C_ANCHOR, "SkeletonArcherC"],
+	]:
+		var tile := _find_prop_tile(
+			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
+		reserved[tile] = true
+		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## Every tile of a rect, in row-major order. Used to hand the arena to the reserved
+## set, which is keyed by tile rather than by shape.
+func _rect_tiles(rect: Rect2i) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for y in range(rect.position.y, rect.position.y + rect.size.y):
+		for x in range(rect.position.x, rect.position.x + rect.size.x):
+			out.append(Vector2i(x, y))
+	return out
+
+
+## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules
+## added: a tile a prop already stands on is not free, and neither is a tile
+## closer than `clear_from_entry` to the tile the player arrives on (Chebyshev, so
+## the diagonal counts as close too). Deterministic for the same reason the base
+## scan is — the order depends only on the anchor and the grid. The same rule the
+## ruins and the dungeon keep their own copy of; the base class owns the shared
+## plumbing and this is content.
+func _find_prop_tile(
+		anchor: Vector2i,
+		radius: int,
+		entry: Vector2i,
+		reserved: Dictionary,
+		clear_from_entry: int
+	) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			if not _is_walkable(t) or reserved.has(t):
+				continue
+			if maxi(absi(t.x - entry.x), absi(t.y - entry.y)) < clear_from_entry:
+				continue
+			return t
+	return anchor
+
+
+func _is_walkable(tile: Vector2i) -> bool:
+	var ch := cell_at(tile)
+	return ch == "." or ch == ","
+
+
+## The tile the player arrives on: the entry point named in `data/zones.json`,
+## unless that cell turns out to be solid, in which case the nearest walkable one.
+##
+## `ZoneBase._find_walkable_near` cannot simply be handed the entry tile with a
+## radius, because it returns the first walkable cell of its scan box in
+## row-major order rather than preferring the anchor. The declared tile is where
+## the player is meant to arrive, so it is used whenever it is walkable, and the
+## base scan is only reached as the fallback for data that put an entry point
+## inside a column.
+func _entry_spawn_tile(entry: Vector2i) -> Vector2i:
+	if _is_walkable(entry):
+		return entry
+	for radius in range(1, ENTRY_FALLBACK_SCAN_RADIUS + 1):
+		var candidate := _find_walkable_near(entry, radius)
+		if _is_walkable(candidate):
+			return candidate
+	return entry
+
+
+## The fortress has no villagers and therefore no schedule to serve, but the day
+## cycle is world-owned state the HUD reads through the `day_clock` group, so the
+## zone runs its own clock. The sanctum has no sky and the ritual broke whatever
+## ceiling it had, but the clock line in the HUD is not the sky: without a clock it
+## would simply go blank for as long as the player stood here.
+func _setup_day_cycle() -> void:
+	day_clock = DayClock.new()
+	day_clock.name = "DayClock"
+	add_child(day_clock)

@@ -336,12 +336,15 @@ func _run() -> void:
 	print("== dungeon ==")
 	await _test_dungeon()
 
+	print("== fortress ==")
+	await _test_fortress()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 57, "every test group ran to completion (got %d/57)" % completed.size())
+	_check(completed.size() == 58, "every test group ran to completion (got %d/58)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -7117,7 +7120,7 @@ func _reset_buses_to_engine_default(am: Node) -> void:
 
 # --- zones -------------------------------------------------------------------
 
-## The zone table: two declared zones, each naming a script that exists and an
+## The zone table: four declared zones, each naming a script that exists and an
 ## entry tile inside it. Everything else about travel resolves through these
 ## rows, so a typo here is the one mistake that cannot be recovered from code.
 func _test_zone_registry() -> void:
@@ -7134,14 +7137,15 @@ func _test_zone_registry() -> void:
 		completed["zone_registry"] = true
 		return
 	var table: Dictionary = zones as Dictionary
-	_check(table.size() == 3, "data/zones.json declares 3 zones (got %d)" % table.size())
-	_check(table.has("forest") and table.has("ruins") and table.has("dungeon"),
-		"the table declares forest, ruins and dungeon (got %s)" % str(table.keys()))
+	_check(table.size() == 4, "data/zones.json declares 4 zones (got %d)" % table.size())
+	_check(table.has("forest") and table.has("ruins") and table.has("dungeon") and table.has("fortress"),
+		"the table declares forest, ruins, dungeon and fortress (got %s)" % str(table.keys()))
 
 	var expected := {
 		"forest": {"name": "Лесной край", "script": "res://scripts/world/forest.gd", "entry": Vector2i(4, 9)},
 		"ruins": {"name": "Руины у опушки", "script": "res://scripts/world/ruins.gd", "entry": Vector2i(3, 8)},
 		"dungeon": {"name": "Подземелье под руинами", "script": "res://scripts/world/dungeon.gd", "entry": Vector2i(3, 12)},
+		"fortress": {"name": "Древняя крепость", "script": "res://scripts/world/fortress.gd", "entry": Vector2i(4, 14)},
 	}
 	for zone_id: String in expected:
 		var def: Variant = table.get(zone_id, {})
@@ -7185,6 +7189,15 @@ func _test_zone_registry() -> void:
 			"ZoneManager reads the ruins entry tile from the table")
 		_check(String(manager_class.call("zone_display_name", "ruins")) == "Руины у опушки",
 			"ZoneManager reads the ruins display name from the table")
+		# The fortress is the row a hand-written JSON edit is most likely to break:
+		# it is the newest, and its script is the only one whose name does not match
+		# the zone id it sits under in the table.
+		_check(bool(manager_class.call("has_zone", "fortress")),
+			"ZoneManager knows the fortress from the table")
+		_check(Vector2i(manager_class.call("entry_tile", "fortress")) == Vector2i(4, 14),
+			"ZoneManager reads the fortress entry tile from the table")
+		_check(String(manager_class.call("zone_display_name", "fortress")) == "Древняя крепость",
+			"ZoneManager reads the fortress display name from the table")
 	completed["zone_registry"] = true
 
 
@@ -9516,3 +9529,456 @@ func _test_dungeon() -> void:
 	gs.reset()
 	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
 	completed["dungeon"] = true
+
+
+## The fourth zone: the ancient fortress at the end of the road, and the door in the
+## far corner of the undercroft that is the only way into it. The checks walk the
+## route a player walks — forest, ruins, undercroft, up through the door — and then
+## measure the zone: extent, border, how much of it the arrival tile can actually
+## reach, the rooms the spine runs through, the garrison, the way back down, and the
+## ring of bare stone kept empty for a final boss that is not implemented yet.
+func _test_fortress() -> void:
+	gs.reset()
+	_check(String(gs.zone) == "forest", "the fortress group starts in the forest")
+
+	# --- the table, read the way the manager reads it --------------------------
+	var manager_script := load("res://scripts/world/zone_manager.gd") as GDScript
+	_check(manager_script != null, "the fortress group can load the zone manager")
+	if manager_script == null:
+		completed["fortress"] = true
+		return
+	_check(bool(manager_script.call("has_zone", "fortress")),
+		"ZoneManager knows the fortress from the table")
+	_check(String(manager_script.call("zone_script_path", "fortress"))
+			== "res://scripts/world/fortress.gd",
+		"the fortress names its own script")
+	_check(FileAccess.file_exists("res://scripts/world/fortress.gd"),
+		"the script the fortress names exists")
+	var table_entry := Vector2i(manager_script.call("entry_tile", "fortress"))
+	_check(table_entry == Vector2i(4, 14),
+		"the fortress entry tile is (4, 14) (got %s)" % str(table_entry))
+	_check(String(manager_script.call("zone_display_name", "fortress"))
+			== "Древняя крепость",
+		"the fortress is named the ancient fortress (got '%s')"
+			% String(manager_script.call("zone_display_name", "fortress")))
+
+	# --- a live run, down the whole road the way a player goes it ---------------
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	var hud := scene.get_node_or_null("HUD")
+	_check(manager != null, "the fortress group has a zone manager to travel with")
+	if manager == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["fortress"] = true
+		return
+
+	_check(bool(manager.call("travel", "ruins")), "the group travelled into the ruins")
+	await process_frame
+	_check(bool(manager.call("travel", "dungeon")),
+		"the group travelled down into the undercroft")
+	for i in range(2):
+		await process_frame
+	var undercroft := scene.get_node_or_null("World")
+	var undercroft_player := undercroft.get_node_or_null("Player") as Node2D if undercroft != null else null
+	_check(undercroft != null and String(undercroft.call("zone_id")) == "dungeon",
+		"the group stands in the undercroft before the door")
+	if undercroft == null or undercroft_player == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["fortress"] = true
+		return
+
+	# --- the door, and where in the undercroft it stands ------------------------
+	var gate := undercroft.get_node_or_null("FortressGate")
+	_check(gate != null, "the undercroft places a FortressGate")
+	_check(gate != null and gate.is_in_group("interactable"),
+		"the ascent is an interactable")
+	_check(gate != null and String((gate as Node).get("target_zone")) == "fortress",
+		"the ascent leads to the fortress")
+	var gate_prompt := ""
+	if gate != null:
+		gate_prompt = String((gate as Node).call("prompt_text"))
+	_check(gate_prompt == "Войти в крепость",
+		"the ascent prompts 'Войти в крепость' (got '%s')" % gate_prompt)
+	var gate_tile := _tile_of_node(gate as Node2D)
+	_check(String(undercroft.call("cell_at", gate_tile)) in [".", ","],
+		"the ascent stands on floor ('%s' at %s)"
+			% [String(undercroft.call("cell_at", gate_tile)), str(gate_tile)])
+	var down_entry := Vector2i(3, 12)
+	var undercroft_dist := _bfs_reachable(undercroft, down_entry, {})
+	_check(undercroft_dist.has(gate_tile),
+		"the ascent stands on ground reachable from the stair (%s)" % str(gate_tile))
+	# The far end of the longest walk the undercroft asks for: the door has to be
+	# deeper in than the crossing the player passes on the way, and nobody should
+	# reach it without walking most of the zone.
+	var gate_walk := int(undercroft_dist.get(gate_tile, -1))
+	_check(gate_walk >= 40,
+		"the ascent is at the end of a long walk: %d tiles from the stair" % gate_walk)
+	_check(gate_tile != down_entry
+			and maxi(absi(gate_tile.x - down_entry.x), absi(gate_tile.y - down_entry.y)) >= 2,
+		"the ascent is not on the tile the player arrives on, nor near enough to open on arrival")
+
+	# Far from everything the hazards and the garrison stand on, so the door never
+	# competes with another prompt and nothing spawns in the doorway.
+	var undercroft_props: Array[Vector2i] = []
+	for node: Node in undercroft.get_children():
+		if node is SpikeTrap:
+			undercroft_props.append(_tile_of_node(node as Node2D))
+	for node in get_nodes_in_group("enemy"):
+		undercroft_props.append(_tile_of_node(node as Node2D))
+	undercroft_props.append(_tile_of_node(undercroft.get_node_or_null("RuinsExit") as Node2D))
+	var gate_too_close: Array[String] = []
+	for prop: Vector2i in undercroft_props:
+		var clear := maxi(absi(gate_tile.x - prop.x), absi(gate_tile.y - prop.y))
+		if clear < 6:
+			gate_too_close.append("%s=%d" % [str(prop), clear])
+	_check(gate_too_close.is_empty(),
+		"the ascent is at least 6 tiles from every plate, post and the stair back (%s)"
+			% ", ".join(gate_too_close))
+
+	# The door is deliberately not a landmark, exactly as the ruins leave their own
+	# descent unmarked: the map marks the way out and the two hazards, and the way on
+	# to the fifth area of the world is what walking the undercroft earns.
+	var undercroft_lm_ids: Array[String] = []
+	for lm: Dictionary in undercroft.call("landmarks"):
+		undercroft_lm_ids.append(String(lm.get("id", "")))
+	_check(not undercroft_lm_ids.has("FortressGate"),
+		"the ascent is not marked on the undercroft map (%s)" % ", ".join(undercroft_lm_ids))
+
+	# --- using the door is what opens the fortress ------------------------------
+	gate.call("interact", undercroft_player)
+	for i in range(3):
+		await process_frame
+	var world := scene.get_node_or_null("World")
+	_check(world != null, "using the ascent left a World node standing")
+	_check(world != null and world != undercroft,
+		"the ascent rebuilt World rather than reusing it")
+	_check(world != null and String(world.call("zone_id")) == "fortress",
+		"the live world is the fortress after the ascent")
+	_check(world != null and world.get_script() == load("res://scripts/world/fortress.gd"),
+		"the new World runs scripts/world/fortress.gd")
+	_check(String(gs.zone) == "fortress", "GameState.zone followed the ascent")
+	if world == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["fortress"] = true
+		return
+
+	var script := load("res://scripts/world/fortress.gd") as GDScript
+	_check(script != null, "the fortress group can load the zone script")
+	var consts: Dictionary = script.get_script_constant_map() if script != null else {}
+
+	# --- the map: extent, border, and how much of it a player can actually walk --
+	var size: Vector2i = world.call("map_size")
+	_check(size == Vector2i(48, 30), "the fortress is 48x30 (got %s)" % str(size))
+	var border_bad := 0
+	for x in range(size.x):
+		if String(world.call("cell_at", Vector2i(x, 0))) != "#":
+			border_bad += 1
+		if String(world.call("cell_at", Vector2i(x, size.y - 1))) != "#":
+			border_bad += 1
+	for y in range(size.y):
+		if String(world.call("cell_at", Vector2i(0, y))) != "#":
+			border_bad += 1
+		if String(world.call("cell_at", Vector2i(size.x - 1, y))) != "#":
+			border_bad += 1
+	_check(border_bad == 0, "the fortress is walled in on all four sides (%d gaps)" % border_bad)
+
+	var entry := Vector2i(4, 14)
+	_check(String(world.call("cell_at", entry)) in [".", ","],
+		"the entry tile named in the table is floor ('%s')" % String(world.call("cell_at", entry)))
+	var player_node := world.get_node_or_null("Player") as Node2D
+	_check(player_node != null and _tile_of_node(player_node) == entry,
+		"the player stands on the fortress entry tile (got %s)"
+			% str(_tile_of_node(player_node) if player_node != null else Vector2i.ZERO))
+
+	var walkable: Array[Vector2i] = []
+	for y in range(size.y):
+		for x in range(size.x):
+			var t := Vector2i(x, y)
+			var ch := String(world.call("cell_at", t))
+			if ch == "." or ch == ",":
+				walkable.append(t)
+	_check(not walkable.is_empty(), "the fortress has floor to walk on (%d tiles)" % walkable.size())
+
+	var dist := _bfs_reachable(world, entry, {})
+	var pct := 0.0
+	if not walkable.is_empty():
+		pct = 100.0 * float(dist.size()) / float(walkable.size())
+	_check(dist.size() >= int(float(walkable.size()) * 0.9),
+		"at least 90%% of the walkable tiles are reachable from the entry (got %d of %d = %.1f%%)"
+			% [dist.size(), walkable.size(), pct])
+	var stranded: Array[String] = []
+	for t: Vector2i in walkable:
+		if not dist.has(t):
+			stranded.append(str(t))
+	_check(stranded.is_empty(),
+		"every walkable tile is reachable — no room is walled off (%d stranded: %s)"
+			% [stranded.size(), ", ".join(stranded)])
+
+	# The spine: the two rows the road runs along, from the west border to the east
+	# one. This is the promise the whole zone is built on — the four dividing walls
+	# open onto these rows and nothing else is allowed to cross them — so it is
+	# measured tile by tile instead of being inferred from the wall constants, which
+	# are exactly the thing a later edit breaks.
+	var spine_rows: Array[int] = [
+		int(consts.get("SPINE_TOP_ROW", 14)), int(consts.get("SPINE_BOTTOM_ROW", 15)),
+	]
+	var spine_bad: Array[String] = []
+	for row: int in spine_rows:
+		for x in range(1, size.x - 1):
+			var cell := String(world.call("cell_at", Vector2i(x, row)))
+			if cell != "." and cell != ",":
+				spine_bad.append("%d,%d='%s'" % [x, row, cell])
+	_check(spine_bad.is_empty(),
+		"the two spine rows are walkable end to end, so the road never dead-ends (%s)"
+			% ", ".join(spine_bad))
+
+	# --- the rooms the spine runs through ---------------------------------------
+	var room_bounds: Dictionary = consts.get("ROOM_BOUNDS", {})
+	var markers: Array = consts.get("ROOM_MARKERS", [])
+	_check(markers.size() == 4,
+		"the fortress names four areas on the map (got %d)" % markers.size())
+	var marker_ids: Array[String] = []
+	for marker: Variant in markers:
+		marker_ids.append(String(marker))
+	_check(marker_ids == ["fortress_yard", "fortress_barracks", "fortress_archive", "fortress_throne"],
+		"the four named areas are yard, barracks, archive and throne hall (got %s)"
+			% ", ".join(marker_ids))
+
+	var room_centres: Array[Vector2i] = []
+	var landmark_tiles := {}
+	for lm: Dictionary in world.call("landmarks"):
+		landmark_tiles[String(lm.get("id", ""))] = lm.get("tile", Vector2i.ZERO)
+	var bad_rooms: Array[String] = []
+	for room_id: String in marker_ids:
+		var bounds: Rect2i = room_bounds.get(room_id, Rect2i())
+		_check(bounds.has_area(), "%s declares an area of the map" % room_id)
+		var tile: Vector2i = landmark_tiles.get(room_id, Vector2i(-999, -999))
+		if not bounds.has_point(tile):
+			bad_rooms.append("%s@%s outside %s" % [room_id, str(tile), str(bounds)])
+			continue
+		var cell := String(world.call("cell_at", tile))
+		if cell != "." and cell != ",":
+			bad_rooms.append("%s@%s='%s'" % [room_id, str(tile), cell])
+		if not dist.has(tile):
+			bad_rooms.append("%s@%s unreachable" % [room_id, str(tile)])
+		if not room_centres.has(tile):
+			room_centres.append(tile)
+	_check(bad_rooms.is_empty(),
+		"every named area is marked on walkable ground reachable from the entry (%s)"
+			% ", ".join(bad_rooms))
+	_check(room_centres.size() == 4,
+		"the four areas are marked on four different tiles (got %d)" % room_centres.size())
+
+	# Every area reachable from every other one. The zone has no doors, no levers and
+	# no one-way drops, so a pair of rooms that cannot see each other over the spine
+	# would mean a sealed room rather than a hard-to-find route.
+	var cut_rooms: Array[String] = []
+	for a: Vector2i in room_centres:
+		for b: Vector2i in room_centres:
+			if a == b:
+				continue
+			if _bfs_distance(world, a, b, {}) < 0:
+				cut_rooms.append("%s->%s" % [str(a), str(b)])
+	_check(cut_rooms.is_empty(),
+		"every area is reachable from every other one (%s cut)" % ", ".join(cut_rooms))
+
+	# --- the ring kept for the final boss ---------------------------------------
+	# The boss himself is not implemented; the ground he will need is, and it is kept
+	# clear by the same constants that place everything else. Checked against the
+	# built map rather than against the constants alone, because a wall, a column or
+	# a scorch mark edited in later is what would quietly take the ring away.
+	var arena_value: Variant = consts.get("BOSS_ARENA", null)
+	var arena: Rect2i = Rect2i()
+	if arena_value is Rect2i:
+		arena = arena_value
+	_check(arena == Rect2i(42, 11, 5, 8),
+		"the ring kept for the final boss is the sanctum floor (got %s)" % str(arena))
+	_check(arena.position.x > 0 and arena.position.y > 0
+			and arena.end.x <= size.x - 1 and arena.end.y <= size.y - 1,
+		"the ring lies inside the fortress walls (%s)" % str(arena))
+	var arena_bad: Array[String] = []
+	var arena_tiles: Array[Vector2i] = []
+	for y in range(arena.position.y, arena.position.y + arena.size.y):
+		for x in range(arena.position.x, arena.position.x + arena.size.x):
+			var tile := Vector2i(x, y)
+			arena_tiles.append(tile)
+			var cell := String(world.call("cell_at", tile))
+			# Bare stone: not masonry, and not worn floor either, so the ring reads
+			# as a ring the moment the player walks into the sanctum.
+			if cell != ".":
+				arena_bad.append("%d,%d='%s'" % [x, y, cell])
+			elif not dist.has(tile):
+				arena_bad.append("%d,%d unreachable" % [x, y])
+	_check(arena_tiles.size() == 40, "the ring is 40 tiles of ground (got %d)" % arena_tiles.size())
+	_check(arena_bad.is_empty(),
+		"the ring is clear walkable stone, reachable from the entry (%s)"
+			% ", ".join(arena_bad))
+	var pillars_in_ring: Array[String] = []
+	for pillar: Variant in (consts.get("PILLARS", []) as Array):
+		if arena.has_point(pillar as Vector2i):
+			pillars_in_ring.append(str(pillar))
+	_check(pillars_in_ring.is_empty(),
+		"no column stands inside the ring the final boss has to walk into (%s)"
+			% ", ".join(pillars_in_ring))
+
+	# --- the way back down ------------------------------------------------------
+	var exit := world.get_node_or_null("DungeonExit")
+	_check(exit != null, "the fortress places a way back down")
+	_check(exit != null and exit.is_in_group("interactable"), "the way back is an interactable")
+	_check(exit != null and String((exit as Node).get("target_zone")) == "dungeon",
+		"the way back leads to the undercroft")
+	var exit_prompt := ""
+	if exit != null:
+		exit_prompt = String((exit as Node).call("prompt_text"))
+	_check(exit_prompt == "Вернуться в подземелье",
+		"the way back prompts 'Вернуться в подземелье' (got '%s')" % exit_prompt)
+	var exit_tile := _tile_of_node(exit as Node2D)
+	_check(String(world.call("cell_at", exit_tile)) in [".", ","],
+		"the way back stands on floor ('%s' at %s)"
+			% [String(world.call("cell_at", exit_tile)), str(exit_tile)])
+	_check(int(dist.get(exit_tile, -1)) >= 0, "the way back is reachable from the entry")
+	_check(exit_tile != entry, "the way back is not on the tile the player arrives on")
+	_check(maxi(absi(exit_tile.x - entry.x), absi(exit_tile.y - entry.y)) >= 2,
+		"the way back is far enough off the entry that arriving does not open its prompt")
+
+	# --- the garrison -----------------------------------------------------------
+	var guards: Array[Node] = []
+	var bowmen: Array[Node] = []
+	var lights: Array[Node] = []
+	var beasts: Array[Node] = []
+	for node in get_nodes_in_group("enemy"):
+		var enemy_type := String(node.get("enemy_type"))
+		if enemy_type == "ruin_skeleton":
+			guards.append(node)
+		elif enemy_type == "ruin_skeleton_archer":
+			bowmen.append(node)
+		elif enemy_type == "ash_wisp":
+			lights.append(node)
+		elif enemy_type == "ash_boar":
+			beasts.append(node)
+	_check(guards.size() == 2, "the fortress holds 2 ruin_skeleton (got %d)" % guards.size())
+	_check(bowmen.size() == 3, "the fortress holds 3 ruin_skeleton_archer (got %d)" % bowmen.size())
+	_check(lights.size() == 2, "the fortress holds 2 ash_wisp (got %d)" % lights.size())
+	_check(beasts.size() == 1, "the fortress holds 1 ash_boar (got %d)" % beasts.size())
+	var garrison: Array[Node] = []
+	garrison.append_array(guards)
+	garrison.append_array(bowmen)
+	garrison.append_array(lights)
+	garrison.append_array(beasts)
+	_check(garrison.size() == 8, "the fortress holds eight enemies in total (got %d)" % garrison.size())
+	var off_ground: Array[String] = []
+	var too_near: Array[String] = []
+	var unreachable_posts: Array[String] = []
+	for node: Node in garrison:
+		var tile := _tile_of_node(node as Node2D)
+		var cell := String(world.call("cell_at", tile))
+		if cell != "." and cell != ",":
+			off_ground.append("%s@%s='%s'" % [String(node.name), str(tile), cell])
+		if not dist.has(tile):
+			unreachable_posts.append("%s@%s" % [String(node.name), str(tile)])
+		var clear := maxi(absi(tile.x - entry.x), absi(tile.y - entry.y))
+		if clear < 6:
+			too_near.append("%s@%s=%d" % [String(node.name), str(tile), clear])
+	_check(off_ground.is_empty(), "every enemy stands on a walkable tile (%s)" % ", ".join(off_ground))
+	_check(unreachable_posts.is_empty(),
+		"every enemy stands on ground reachable from the entry (%s)" % ", ".join(unreachable_posts))
+	_check(too_near.is_empty(),
+		"every enemy is at least 6 tiles from the entry tile (%s)" % ", ".join(too_near))
+	var post_tiles := {}
+	var doubled: Array[String] = []
+	for node: Node in garrison:
+		var tile := _tile_of_node(node as Node2D)
+		if post_tiles.has(tile):
+			doubled.append("%s and %s on %s" % [String(post_tiles[tile]), String(node.name), str(tile)])
+		post_tiles[tile] = String(node.name)
+	_check(doubled.is_empty(), "no two enemies share a tile (%s)" % ", ".join(doubled))
+	_check(not post_tiles.has(exit_tile) and not post_tiles.has(entry),
+		"no enemy is parked on the stair or the entry tile")
+	var in_ring: Array[String] = []
+	for tile: Vector2i in post_tiles.keys():
+		if arena_tiles.has(tile):
+			in_ring.append("%s@%s" % [String(post_tiles[tile]), str(tile)])
+	_check(in_ring.is_empty(),
+		"nothing is standing in the ring kept for the final boss (%s)" % ", ".join(in_ring))
+
+	# --- what the map marks, and the clock the HUD reads ------------------------
+	var landmark_kinds: Array[String] = []
+	for lm: Dictionary in world.call("landmarks"):
+		landmark_kinds.append(String(lm.get("kind", "")))
+	landmark_kinds.sort()
+	_check(landmark_kinds == ["gate", "room", "room", "room", "room"],
+		"the map marks the way back and the four areas (got %s)" % ", ".join(landmark_kinds))
+	var lm_ids: Array[String] = []
+	for lm: Dictionary in world.call("landmarks"):
+		lm_ids.append(String(lm.get("id", "")))
+	_check(lm_ids.has("DungeonExit"), "the way back is marked by id (%s)" % ", ".join(lm_ids))
+	_check(get_first_node_in_group("day_clock") != null,
+		"the fortress runs a day clock for the HUD line")
+
+	# --- the map panel draws it --------------------------------------------------
+	_check(hud != null, "the HUD is present for the map check")
+	if hud != null:
+		var bound: Node = hud.call("map_bound_world")
+		_check(bound == world, "the map panel rebound to the fortress")
+		_check(bound != null and Vector2i(bound.call("map_size")) == Vector2i(48, 30),
+			"the rebound map reports the fortress size (got %s)"
+				% str(Vector2i(bound.call("map_size")) if bound != null else Vector2i.ZERO))
+		hud.call("open_map_for_shot")
+		for i in range(4):
+			await physics_frame
+		_check(bool(hud.call("is_map_open")),
+			"the map opens over the fortress without an error")
+		# Close it the way the player does, so no later group inherits ui_blocking.
+		var m_down := InputEventKey.new()
+		m_down.physical_keycode = KEY_M
+		m_down.keycode = KEY_M
+		m_down.pressed = true
+		Input.parse_input_event(m_down)
+		for i in range(4):
+			await physics_frame
+		var m_up := InputEventKey.new()
+		m_up.physical_keycode = KEY_M
+		m_up.keycode = KEY_M
+		m_up.pressed = false
+		Input.parse_input_event(m_up)
+		await physics_frame
+		_check(not bool(hud.call("is_map_open")), "the group closed the map again")
+		_check(not gs.ui_blocking, "the group left no ui_blocking behind")
+
+	# --- the round trip back -----------------------------------------------------
+	_check(bool(manager.call("travel", "dungeon")), "travel fortress -> dungeon succeeds")
+	await process_frame
+	await process_frame
+	var back := scene.get_node_or_null("World")
+	_check(back != null and String(back.call("zone_id")) == "dungeon",
+		"the way back down rebuilds the undercroft")
+	_check(String(gs.zone) == "dungeon", "GameState.zone came back down with the player")
+	_check(back != null and back.get_node_or_null("FortressGate") != null,
+		"the rebuilt undercroft has its door up to the fortress again")
+	_check(bool(manager.call("travel", "ruins")), "travel dungeon -> ruins succeeds")
+	await process_frame
+	await process_frame
+	_check(bool(manager.call("travel", "forest")), "travel ruins -> forest succeeds")
+	await process_frame
+	await process_frame
+	var forest := scene.get_node_or_null("World")
+	_check(forest != null and String(forest.call("zone_id")) == "forest",
+		"the round trip ends back in the forest")
+	_check(String(gs.zone) == "forest", "GameState.zone is back in the forest")
+
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
+	completed["fortress"] = true

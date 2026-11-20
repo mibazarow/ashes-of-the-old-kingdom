@@ -24,6 +24,11 @@ const COLOR_KEY := Color(0.95, 0.55, 0.20)
 ## and from the green lever it shares the passage with, so the two props of the
 ## ruins never read as one marker at four pixels to the tile.
 const COLOR_TABLET := Color(0.78, 0.80, 0.88)
+## A named area of a zone — the fortress yard, barracks, archive, throne hall.
+## Muted slate: a room is ground, not an object, so it has to read as the least
+## assertive marker on the map. Clear of the violet gate it can sit beside, of the
+## near-white tablet, and of the green lever, none of which name a whole room.
+const COLOR_ROOM := Color(0.38, 0.44, 0.55)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -159,6 +164,12 @@ func _draw() -> void:
 				# stone outlives every task carved on it.
 				"tablet":
 					color = COLOR_TABLET
+				# A named area of the fortress. Marked for the whole life of the
+				# zone like the stone: a room the player has already walked through
+				# is still the place he will be sent back to, and the marker names
+				# ground rather than a thing standing on it.
+				"room":
+					color = COLOR_ROOM
 				_:
 					continue
 			_draw_marker(tile, color)

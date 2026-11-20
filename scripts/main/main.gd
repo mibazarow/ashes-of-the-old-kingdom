@@ -130,6 +130,17 @@ func _maybe_capture_screenshot() -> void:
 		if manager != null:
 			manager.call("travel", "ruins")
 			manager.call("travel", "dungeon")
+	elif ui_probe == "fortress":
+		# The fourth zone, reached the way a player reaches it: down through the
+		# ruins, across the undercroft and up through the door at its far end. Three
+		# travels rather than one, because the fortress has no door to the forest —
+		# the ascent is in the north-east corner of the undercroft — so the capture
+		# walks the same route and lands on the same zone line the player would see.
+		var manager := get_node_or_null("ZoneManager")
+		if manager != null:
+			manager.call("travel", "ruins")
+			manager.call("travel", "dungeon")
+			manager.call("travel", "fortress")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
