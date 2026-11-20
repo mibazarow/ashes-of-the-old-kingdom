@@ -123,7 +123,15 @@ func _maybe_capture_screenshot() -> void:
 
 
 func _apply_pending_load() -> void:
-	var slot: int = int(OS.get_environment("PEPEL_LOAD_SLOT"))
+	# Two ways in, one path. The main menu hands a slot over through the autoload
+	# (`GameState.pending_load_slot`) because changing the scene frees the menu that
+	# asked, and `PEPEL_LOAD_SLOT=<n>` is the headless probe that has no menu to ask
+	# with. The autoload value is consumed either way, so a travel or a second scene
+	# change later in the same run cannot replay the same load.
+	var slot: int = GameState.pending_load_slot
+	GameState.pending_load_slot = 0
+	if slot <= 0:
+		slot = int(OS.get_environment("PEPEL_LOAD_SLOT"))
 	if slot <= 0:
 		return
 	# Travel before the load, never after. `load_game` hands the saved position to

@@ -10,6 +10,7 @@ const QUICK_SLOT_ACTIONS := [&"quick_slot_1", &"quick_slot_2", &"quick_slot_3", 
 const MAX_VISIBLE_ROWS := 8
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
+const COLOR_HINT := Color(0.6, 0.62, 0.6)
 
 ## Boss bar (spec §10.4 "полоска здоровья босса"). The boss is looked up through
 ## the `boss` group rather than a node path or a class reference, exactly like the
@@ -49,6 +50,22 @@ const ATTRIBUTE_LABELS_RU := {
 	"agility": "ловкость",
 	"intelligence": "интеллект",
 	"endurance": "выносливость",
+}
+
+## The two answers the defeat screen offers (spec §16.1). «Возродиться» deliberately
+## does not respawn anybody by itself: it only lets the tree run again, and the
+## player's own `DEAD` timer then calls his own `_respawn()`. Two respawn paths
+## would be two ways to disagree about where the player wakes up.
+const DEFEAT_OPTIONS := ["Возродиться", "В меню"]
+const MENU_SCENE := "res://scenes/main/menu.tscn"
+
+## The three endings of spec §16.1, keyed by the id a future final boss passes to
+## `show_victory()`. An unknown id falls back to the raw id rather than a blank
+## screen, so a typo in a boss script shows up as a wrong title, not as nothing.
+const ENDING_NAMES_RU := {
+	"dawn": "Новый рассвет",
+	"memory": "Память короля",
+	"crown": "Пепельный венец",
 }
 
 var _root: Control
@@ -104,6 +121,28 @@ var _craft_open := false
 var _tab_held: bool = false
 var _day_clock: Node = null
 var _clock_refresh_left := 0.0
+
+## Defeat screen (spec §16.1). Its own two-row cursor, and the only screen here
+## that pauses the tree on its own initiative: holding the death animation still is
+## what keeps the existing `_dead_timer` from respawning the player underneath a
+## screen that is still asking him what to do.
+var _defeat_panel: PanelContainer
+var _defeat_rows: Array[Label] = []
+var _defeat_selected := 0
+var _defeat_open := false
+
+## Victory screen. Reached only through `show_victory()`; nothing in the world calls
+## it yet because the final boss that would is not built.
+var _victory_panel: PanelContainer
+var _victory_title: Label
+var _victory_scroll: ScrollContainer
+var _victory_box: VBoxContainer
+var _victory_open := false
+
+## Edge detector for the pause menu's "В главное меню" key. Q has no InputMap action
+## (nothing in the game binds it), so it is polled by hand exactly like Enter, Tab
+## and Space already are.
+var _menu_key_held := false
 
 ## The zone the HUD currently shows and the map panel currently draws. Travel
 ## replaces the `World` node outright, so this is refreshed through
@@ -292,6 +331,78 @@ func _build_ui() -> void:
 	_build_character_panel()
 	_build_shop_panel()
 	_build_craft_panel()
+	_build_defeat_panel()
+	_build_victory_panel()
+
+
+## The defeat screen lives here rather than in its own script (unlike the shop or
+## the bench) because all it owns is a two-row cursor and three labels: everything
+## else it would need — `_panel_style`, `_make_text`, the centred-panel placement,
+## the `InputSource` polling and the `ui_blocking`/pause bookkeeping — already lives
+## in this file, and a separate script would carry a second copy of each. The
+## victory screen is here for the same reason plus one more: it renders the menu's
+## credit block, and the two must not be able to disagree about what they claim.
+func _build_defeat_panel() -> void:
+	_defeat_panel = PanelContainer.new()
+	_defeat_panel.name = "DefeatPanel"
+	_defeat_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_defeat_panel.position = Vector2(-70, -34)
+	_defeat_panel.custom_minimum_size = Vector2(140, 0)
+	_defeat_panel.visible = false
+	_defeat_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.05, 0.06, 0.08, 0.97)))
+	_root.add_child(_defeat_panel)
+
+	var box := VBoxContainer.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 2)
+	_defeat_panel.add_child(box)
+
+	box.add_child(_make_text("Вы погибли", Color(0.86, 0.3, 0.28)))
+
+	for option in DEFEAT_OPTIONS:
+		var row := _make_text("", COLOR_ROW)
+		row.custom_minimum_size = Vector2(128, 10)
+		box.add_child(row)
+		_defeat_rows.append(row)
+
+	box.add_child(_make_text("↑↓ выбор · E или Enter", COLOR_HINT))
+
+
+## The victory screen: the ending name over the same credit block the menu shows,
+## scrolled inside a fixed-height box so 22 lines of credits cannot push the panel
+## past a 270 px viewport.
+func _build_victory_panel() -> void:
+	_victory_panel = PanelContainer.new()
+	_victory_panel.name = "VictoryPanel"
+	_victory_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_victory_panel.position = Vector2(-156, -96)
+	_victory_panel.custom_minimum_size = Vector2(312, 0)
+	_victory_panel.visible = false
+	_victory_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.05, 0.06, 0.08, 0.97)))
+	_root.add_child(_victory_panel)
+
+	var box := VBoxContainer.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 2)
+	_victory_panel.add_child(box)
+
+	_victory_title = _make_text("", Color(0.96, 0.86, 0.5))
+	_victory_title.add_theme_font_size_override("font_size", 11)
+	box.add_child(_victory_title)
+
+	_victory_scroll = ScrollContainer.new()
+	_victory_scroll.name = "Credits"
+	_victory_scroll.custom_minimum_size = Vector2(300, 132)
+	_victory_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	box.add_child(_victory_scroll)
+
+	_victory_box = VBoxContainer.new()
+	_victory_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_victory_box.add_theme_constant_override("separation", 0)
+	_victory_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_victory_scroll.add_child(_victory_box)
+
+	box.add_child(_make_text("↑↓ прокрутка · E или Esc — закрыть", COLOR_HINT))
 
 
 ## The character screen lives in its own script (like SettingsPanel): it owns
@@ -571,6 +682,10 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("F9 — загрузить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("E — Настройки управления", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("C — Персонаж", Color(0.9, 0.9, 0.86)))
+	# Saves happen on F5, so leaving needs no prompt of its own: the item simply
+	# hands the run back to the menu, and whatever was saved is what «Продолжить»
+	# and «Загрузка» will find there.
+	box.add_child(_make_text("Q — В главное меню", Color(0.9, 0.9, 0.86)))
 
 
 func _make_theme() -> Theme:
@@ -647,6 +762,21 @@ func _connect_signals() -> void:
 	EventBus.quest_progress.connect(func(_id, _c, _t): _refresh_quest())
 	EventBus.quest_completed.connect(func(_id): _refresh_quest())
 	EventBus.skill_selected.connect(func(_id): _refresh_skill())
+	# The defeat screen listens to the same death signal the player does rather than
+	# watching HP: `GameState.take_damage()` is the one place that decides a run has
+	# ended, and reading its verdict is what keeps this screen from ever disagreeing
+	# with the player about whether he is dead.
+	EventBus.player_died.connect(_open_defeat)
+	EventBus.player_respawned.connect(_close_defeat)
+
+
+## The HUD is the only node in this project that pauses the tree, so leaving it —
+## a scene change back to the menu, or a test freeing the scene — must never hand
+## whatever comes next a paused tree with no screen left on it to unpause.
+func _exit_tree() -> void:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop != null and loop.paused:
+		loop.paused = false
 
 
 func _refresh_all() -> void:
@@ -1374,6 +1504,7 @@ func _refresh_journal() -> void:
 
 func _toggle_pause() -> void:
 	_paused = not _paused
+	_menu_key_held = false
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
 	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open or _craft_open
@@ -1386,6 +1517,7 @@ func _close_pause() -> void:
 	if not _paused:
 		return
 	_paused = false
+	_menu_key_held = false
 	_pause_panel.visible = false
 	get_tree().paused = false
 	EventBus.game_paused.emit(false)
@@ -1402,6 +1534,16 @@ func _process(_delta: float) -> void:
 	# not stop because a panel is open, and the bar must not freeze mid-swing
 	# behind the map or the shop.
 	_tick_boss_bar(_delta)
+	# The defeat and victory screens own the screen the way a modal does, and ahead
+	# of every other branch: both pause the tree, and the HUD polls with
+	# PROCESS_MODE_ALWAYS, so this is the only code that runs while the world is
+	# held still. Nothing else may answer the keys underneath them.
+	if _defeat_open:
+		_process_defeat_navigation()
+		return
+	if _victory_open:
+		_process_victory_navigation()
+		return
 	# The settings screen captures raw events itself; while it is open no
 	# action polling may reach the gameplay paths below.
 	if _settings_open:
@@ -1491,6 +1633,14 @@ func _process(_delta: float) -> void:
 		_toggle_character()
 		return
 	if _paused:
+		# Q leaves to the menu. It owns no InputMap action, so it is edge-detected by
+		# hand like Enter and Tab; the bot never pauses, so it can never reach it.
+		var menu_key_now := Input.is_key_pressed(KEY_Q)
+		var menu_key_edge := menu_key_now and not _menu_key_held
+		_menu_key_held = menu_key_now
+		if menu_key_edge:
+			return_to_menu()
+			return
 		if InputSource.is_action_just_pressed(&"interact"):
 			_open_settings()
 		return
@@ -1774,3 +1924,202 @@ func player_hp_bar_global_rect() -> Rect2:
 
 func clock_label_global_rect() -> Rect2:
 	return _clock_label.get_global_rect() if _clock_label != null else Rect2()
+
+
+# --- defeat screen (spec §16.1) ------------------------------------------------
+
+## Opens the defeat screen over a world that keeps running.
+##
+## Deliberately not a pause. The player already owns death: `_on_player_died` starts
+## the death animation and the `_dead_timer` that ends it, and `BOT-010` proves the
+## run is expected to survive a death and carry on. Freezing the tree here would put
+## a second owner on that timer — the screen would hold the world until someone
+## answers it, and anything that cannot answer it (a soak bot, a scripted revive)
+## would stay dead forever instead of respawning. So the screen only covers the
+## window the player is already unusable in, and it needs no `ui_blocking` of its
+## own: a player in `State.DEAD` reads no input at all, and this screen takes the
+## HUD's own `_process` before any panel branch can open over it. Setting the flag
+## here would have stopped the day clock and every NPC schedule for the length of the
+## death animation, which is a change to the world, not to the screen. «Возродиться»
+## is then exactly what the spec asks for and nothing more — it steps out of the way
+## and lets the player's own timer fire his own `_respawn()`. One respawn path, in one
+## file, as before.
+func _open_defeat() -> void:
+	if _defeat_open:
+		return
+	# Every modal the defeat panel could visually sit on top of goes first, the same
+	# way the shop and the bench clear the screen: a dialogue left open under «Вы
+	# погибли» would keep its own input branch alive behind a paused world.
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	if _shop_open:
+		close_shop()
+	if _craft_open:
+		close_craft()
+	_close_character()
+	if _settings_open:
+		_close_settings()
+	_close_pause()
+	_defeat_open = true
+	_defeat_selected = 0
+	_enter_held = false
+	_refresh_defeat()
+	_defeat_panel.visible = true
+	Telemetry.event(&"defeat_shown", {"hp": GameState.hp})
+
+
+## Leaves the defeat screen without deciding anything: the player's death timer
+## completes on its own, and the existing respawn puts him back on his spawn point.
+## Called both by «Возродиться» and by `player_respawned`, so a revive from anywhere
+## else can never leave the screen hanging over a live player.
+func _close_defeat() -> void:
+	if not _defeat_open:
+		return
+	_defeat_open = false
+	_defeat_panel.visible = false
+	_enter_held = false
+
+
+func _refresh_defeat() -> void:
+	for i in _defeat_rows.size():
+		var is_on := i == _defeat_selected
+		_defeat_rows[i].text = "%s %s" % ["> " if is_on else "  ", String(DEFEAT_OPTIONS[i])]
+		_defeat_rows[i].add_theme_color_override(
+			"font_color", Color(1.0, 0.97, 0.62) if is_on else COLOR_ROW)
+
+
+func _process_defeat_navigation() -> void:
+	var delta := 0
+	if InputSource.is_action_just_pressed(&"move_up"):
+		delta -= 1
+	if InputSource.is_action_just_pressed(&"move_down"):
+		delta += 1
+	if delta != 0:
+		_defeat_selected = clampi(_defeat_selected + delta, 0, DEFEAT_OPTIONS.size() - 1)
+		_refresh_defeat()
+	var enter_now := Input.is_key_pressed(KEY_ENTER)
+	var enter_edge := enter_now and not _enter_held
+	_enter_held = enter_now
+	if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+		if _defeat_selected == 0:
+			_close_defeat()
+		else:
+			return_to_menu()
+
+
+## Hands the run back to the main menu. Every flag this file owns is cleared on the
+## way out and the tree is unpaused before the scene changes: a new scene whose
+## nodes inherit the pause process mode would arrive frozen, with no HUD left in the
+## tree to thaw it.
+func return_to_menu() -> void:
+	_close_defeat()
+	close_victory()
+	_close_pause()
+	GameState.ui_blocking = false
+	var loop := get_tree()
+	loop.paused = false
+	loop.change_scene_to_file(MENU_SCENE)
+
+
+# --- victory screen (spec §16.1) -----------------------------------------------
+
+## The ending screen. Public because the final boss that has not been built yet is
+## what will call it; nothing in the world does today. `ending_id` is one of
+## `dawn`, `memory`, `crown`; anything else is shown verbatim rather than blanked.
+func show_victory(ending_id: String) -> void:
+	if _victory_box == null:
+		return
+	_victory_title.text = "Финал: %s" % String(ENDING_NAMES_RU.get(ending_id, ending_id))
+	for child in _victory_box.get_children():
+		_victory_box.remove_child(child)
+		child.queue_free()
+	for line in MainMenu.credits_lines():
+		var label := _make_text(String(line), Color(0.88, 0.9, 0.85))
+		label.custom_minimum_size = Vector2(296, 10)
+		_victory_box.add_child(label)
+	_victory_open = true
+	_enter_held = false
+	_victory_panel.visible = true
+	# The scroll box is laid out on the next frame, so the reset has to wait for it
+	# too; otherwise a second `show_victory()` would start where the last one left
+	# off because there was no scroll range to clamp against yet.
+	_reset_victory_scroll.call_deferred()
+	GameState.ui_blocking = true
+	get_tree().paused = true
+	Telemetry.event(&"victory_shown", {"ending": ending_id})
+
+
+func _reset_victory_scroll() -> void:
+	if _victory_scroll != null:
+		_victory_scroll.scroll_vertical = 0
+
+
+func close_victory() -> void:
+	if not _victory_open:
+		return
+	_victory_open = false
+	_victory_panel.visible = false
+	_enter_held = false
+	GameState.ui_blocking = false
+	get_tree().paused = false
+
+
+func _process_victory_navigation() -> void:
+	var delta := 0
+	if InputSource.is_action_just_pressed(&"move_up"):
+		delta -= 15
+	if InputSource.is_action_just_pressed(&"move_down"):
+		delta += 15
+	if delta != 0 and _victory_scroll != null:
+		_victory_scroll.scroll_vertical = \
+				maxi(0, int(_victory_scroll.scroll_vertical) + delta)
+	var enter_now := Input.is_key_pressed(KEY_ENTER)
+	var enter_edge := enter_now and not _enter_held
+	_enter_held = enter_now
+	if InputSource.is_action_just_pressed(&"interact") or enter_edge \
+			or InputSource.is_action_just_pressed(&"pause"):
+		close_victory()
+
+
+# --- read-only views of the two screens ---------------------------------------
+
+func is_defeat_open() -> bool:
+	return _defeat_open
+
+
+func defeat_row_texts() -> Array[String]:
+	var out: Array[String] = []
+	for row in _defeat_rows:
+		out.append(row.text)
+	return out
+
+
+func select_defeat_row(index: int) -> void:
+	if not _defeat_open:
+		return
+	_defeat_selected = clampi(index, 0, DEFEAT_OPTIONS.size() - 1)
+	_refresh_defeat()
+
+
+func is_victory_open() -> bool:
+	return _victory_open
+
+
+func victory_title_text() -> String:
+	return _victory_title.text if _victory_title != null else ""
+
+
+func victory_text() -> String:
+	if _victory_box == null:
+		return ""
+	var parts: PackedStringArray = []
+	for child in _victory_box.get_children():
+		if child is Label:
+			parts.append((child as Label).text)
+	return "\n".join(parts)

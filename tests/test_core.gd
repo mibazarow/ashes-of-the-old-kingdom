@@ -11,6 +11,11 @@ const FIXTURE_DIR := "res://tests/fixtures/saves"
 ## autoload so the suite keeps no compile-time dependency on an autoload
 ## identifier (the group resolves the node at runtime and calls it directly).
 const AUDIO_SETTINGS_PATH := "user://settings/audio.json"
+## Frames to let the audio pool run dry before the suite quits. Longest sample in
+## `assets/audio` is `boss_roar` at 500 ms, and a sample stolen at half pitch runs to
+## ~830 ms, so 60 frames at 60 Hz covers any cue any group could have started.
+const DRAIN_FRAMES := 60
+
 const AUDIO_SFX_NAMES: Array[String] = [
 	"hit", "hurt", "enemy_die", "pickup", "cast", "ui_click", "step", "boss_roar",
 ]
@@ -319,12 +324,15 @@ func _run() -> void:
 	print("== ruins mechanics ==")
 	await _test_ruins_mechanics()
 
+	print("== main menu ==")
+	await _test_main_menu()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 53, "every test group ran to completion (got %d/53)" % completed.size())
+	_check(completed.size() == 54, "every test group ran to completion (got %d/54)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -8368,3 +8376,201 @@ func _slab_footprint(body: Node2D, shape: CollisionShape2D) -> Dictionary:
 		for x in range(first.x, last.x + 1):
 			out[Vector2i(x, y)] = true
 	return out
+
+
+## Delete every file the save manager keeps for every slot, so the menu group can
+## start from "no saves at all" and leave nothing behind for the next run, a bot or
+## a real player. Same three paths `bot.gd` clears after its own save scenario.
+func _clear_all_save_slots() -> void:
+	for slot in range(1, int(sm.SLOT_COUNT) + 1):
+		for path in [sm.slot_path(slot), sm.slot_backup_path(slot), sm.slot_temp_path(slot)]:
+			if FileAccess.file_exists(path):
+				DirAccess.remove_absolute(path)
+
+
+## The main menu, the defeat screen and the victory screen (spec §16.1).
+##
+## The menu is driven through its own public methods rather than through simulated
+## keys, and its polling is switched off for the duration: a stray input edge left
+## by another group would otherwise activate a row, and two of those rows change the
+## scene out from under the suite. The defeat screen is the one part driven through
+## the real key path, because there the thing under test is exactly "the player
+## answers the screen with E".
+func _test_main_menu() -> void:
+	_clear_all_save_slots()
+	gs.reset()
+	qm.reset()
+	gs.pending_load_slot = 0
+	gs.ui_blocking = false
+	paused = false
+
+	# --- the menu is the boot scene --------------------------------------------
+	_check(String(ProjectSettings.get_setting("application/run/main_scene", ""))
+		== "res://scenes/main/menu.tscn",
+		"the boot scene is the main menu, not the world")
+	var packed: PackedScene = load("res://scenes/main/menu.tscn")
+	_check(packed != null, "menu.tscn loads standalone")
+	if packed == null:
+		completed["main_menu"] = true
+		return
+	var menu := packed.instantiate()
+	root.add_child(menu)
+	await process_frame
+	_check(bool(menu.is_built()), "the menu builds its own UI when nothing bypasses it")
+	# Read through the instance rather than through the class name: a static call on
+	# a global class does not resolve under `godot --script`, which is exactly the
+	# mode this suite runs in.
+	_check(not bool(menu.call("bypass_requested")),
+		"a plain test process is neither a bot nor a screenshot probe")
+	menu.set_process(false)
+
+	# --- the six entries of §16.1, in order ------------------------------------
+	var items: Array = menu.menu_items()
+	_check(items.size() == 6, "the menu offers six entries (got %d)" % items.size())
+	var expected: Array[String] = ["Новая игра", "Продолжить", "Загрузка", "Настройки", "Титры", "Выход"]
+	var ordered := items.size() == expected.size()
+	for i in mini(items.size(), expected.size()):
+		if String(items[i]) != expected[i]:
+			ordered = false
+	_check(ordered, "the six entries are the six of §16.1 in the documented order")
+
+	# --- «Продолжить» answers the saves that actually exist --------------------
+	_check(not bool(menu.continue_enabled()), "Продолжить is disabled with no saves at all")
+	_check(String(menu.slot_summary(1)) == "Слот 1 — пусто", "an empty slot reads as пусто")
+	_check(not bool(menu.request_slot(1)), "an empty slot refuses to be loaded")
+	_check(int(gs.pending_load_slot) == 0, "a refused request leaves the handoff alone")
+
+	gs.level = 3
+	gs.gold = 12
+	gs.hp = 41
+	gs.zone = "forest"
+	var saved: Dictionary = sm.save_game(1)
+	_check(bool(saved.get("ok", false)), "a real save lands in slot 1")
+	_check(bool(menu.continue_enabled()), "Продолжить is enabled once a slot exists")
+	_check(int(menu.most_recent_slot()) == 1, "the one real slot is the most recent")
+
+	# --- the slot line names the level and the zone, not the raw id ------------
+	var summary := String(menu.slot_summary(1))
+	_check(summary.contains("ур. 3"), "the slot line carries the level (got %s)" % summary)
+	_check(summary.contains("Лесной край"), "the slot line carries the zone name (got %s)" % summary)
+	_check(summary.contains("Слот 1"), "the slot line numbers the slot (got %s)" % summary)
+
+	# --- «Новая игра» puts the run back to its starting point ------------------
+	gs.hp = 1
+	gs.level = 9
+	gs.gold = 999
+	gs.add_item("iron_sword", 2)
+	gs.set_flag("dirty_marker", true)
+	qm.start("q01_ash_wolves")
+	menu.call("prepare_new_game")
+	_check(int(gs.level) == 1, "new game resets the level")
+	_check(int(gs.gold) == 0, "new game empties the purse")
+	_check(int(gs.hp) == int(gs.max_hp), "new game refills hp to the recomputed maximum")
+	_check(gs.inventory.is_empty(), "new game empties the bag")
+	_check(gs.flags.is_empty(), "new game clears the flags")
+	_check(String(gs.zone) == "forest", "new game drops the player in the forest")
+	_check(qm.states.is_empty(), "new game clears the quest board")
+	_check(int(gs.pending_load_slot) == 0, "new game asks for no slot")
+
+	# --- the handoff: the menu asks, the game applies --------------------------
+	gs.level = 9
+	gs.gold = 999
+	gs.hp = 7
+	_check(bool(menu.request_slot(1)), "request_slot accepts a slot that exists")
+	_check(int(gs.pending_load_slot) == 1, "the handoff value lands on the autoload")
+	menu.queue_free()
+	await process_frame
+
+	var game := (load("res://scenes/main/main.tscn") as PackedScene).instantiate()
+	root.add_child(game)
+	await process_frame
+	await process_frame
+	_check(int(gs.pending_load_slot) == 0, "the game consumed the pending slot")
+	_check(int(gs.level) == 3, "the load landed on the saved level (got %d)" % int(gs.level))
+	_check(int(gs.hp) == 41, "the load landed on the saved hp (got %d)" % int(gs.hp))
+	_check(int(gs.gold) == 12, "the load landed on the saved gold (got %d)" % int(gs.gold))
+
+	var hud := game.get_node_or_null("HUD")
+	_check(hud != null, "the game scene carries its HUD")
+	if hud == null:
+		game.queue_free()
+		await process_frame
+		_clear_all_save_slots()
+		gs.reset()
+		completed["main_menu"] = true
+		return
+
+	# --- the victory screen ----------------------------------------------------
+	hud.show_victory("memory")
+	_check(bool(hud.is_victory_open()), "show_victory opens the victory screen")
+	_check(String(hud.victory_title_text()).contains("Память короля"),
+		"the ending id memory reads «Память короля» (got %s)" % hud.victory_title_text())
+	_check(String(hud.victory_text()).contains("260 рублей"),
+		"the victory screen carries the credit block with the cost disclosure")
+	_check(paused, "the victory screen holds the world still")
+	hud.close_victory()
+	_check(not bool(hud.is_victory_open()), "close_victory hides the victory screen")
+	_check(not paused, "closing the victory screen hands the tree back")
+	for ending in [["dawn", "Новый рассвет"], ["crown", "Пепельный венец"]]:
+		hud.show_victory(String(ending[0]))
+		_check(String(hud.victory_title_text()).contains(String(ending[1])),
+			"the ending %s reads «%s»" % [ending[0], ending[1]])
+		hud.close_victory()
+
+	# --- the defeat screen -----------------------------------------------------
+	_check(not bool(hud.is_defeat_open()), "no defeat screen while the player is alive")
+	gs.take_damage(999)
+	_check(int(gs.hp) == 0, "the killing blow kills the player")
+	_check(bool(hud.is_defeat_open()), "death opens the defeat screen")
+	# The world must keep running under the screen: the respawn belongs to the
+	# player's own `_dead_timer`, and a paused tree would hand the screen a second,
+	# competing owner of it — and would strand anything that cannot answer the panel.
+	_check(not paused, "the defeat screen does not pause the tree")
+	var dead_player := game.get_node_or_null("World/Player")
+	_check(dead_player != null and bool(dead_player.call("is_status_owner_dead")),
+		"the player is still dead while the screen is up")
+	_check(int(gs.level) == 3, "the run stays as it was while the screen is up")
+	var rows: Array = hud.defeat_row_texts()
+	_check(rows.size() == 2, "the defeat screen offers two answers (got %d)" % rows.size())
+	_check(rows.size() == 2 and String(rows[0]).contains("Возродиться"),
+		"the first answer is «Возродиться»")
+	_check(rows.size() == 2 and String(rows[1]).contains("В меню"),
+		"the second answer is «В меню»")
+	# The cursor is walked onto «В меню» and back, so the row that gets activated is
+	# provably the one the cursor was moved off, not the one the screen opened on.
+	hud.select_defeat_row(1)
+	var moved: Array = hud.defeat_row_texts()
+	_check(moved.size() == 2 and String(moved[1]).begins_with(">"),
+		"the cursor moves onto «В меню»")
+	hud.select_defeat_row(0)
+	await _tap_key(KEY_E)
+	_check(not bool(hud.is_defeat_open()), "«Возродиться» closes the defeat screen")
+	_check(not paused, "«Возродиться» leaves the tree running for the existing respawn")
+
+	# --- cleanup ---------------------------------------------------------------
+	game.queue_free()
+	await process_frame
+	# This group is the last one, and it is the one that hurts the player for real,
+	# so it is also the one that leaves a `hurt` sample mid-playback when the process
+	# ends. A stream still held at exit is reported as a leaked AudioStreamWAV, which
+	# the acceptance run counts as a failure, so the pool is silenced here.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		_audio_stop_all(audio)
+	_clear_all_save_slots()
+	gs.reset()
+	qm.reset()
+	gs.pending_load_slot = 0
+	gs.ui_blocking = false
+	paused = false
+	_check(not paused, "the group leaves the tree running")
+	_check(not FileAccess.file_exists(String(sm.slot_path(1))), "the group leaves no save behind")
+	_check(int(gs.level) == 1 and int(gs.gold) == 0, "the group leaves the state clean")
+	# ... and let the pool actually run out. `stop()` only releases a stream that is
+	# still active; one that finished on its own keeps its playback object until the
+	# player's next process pass, and that leftover playback is what the engine
+	# reports at exit as a leaked AudioStreamWAV plus a resource still in use. This
+	# group is the last one, so there is no later group to drain it for free.
+	for _i in range(DRAIN_FRAMES):
+		await process_frame
+	completed["main_menu"] = true

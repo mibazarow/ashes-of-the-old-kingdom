@@ -142,6 +142,14 @@ var dialogue_read: Array[String] = []
 ## Set while a modal UI (dialogue, inventory, pause) owns the input.
 var ui_blocking: bool = false
 
+## The slot the main menu asked the game to load, 0 when nothing was asked.
+## Lives here rather than in a scene-local variable because the menu and the game
+## are two different scenes and `change_scene_to_file` frees the caller: the
+## autoload is the only object that outlives the handoff. `Main._apply_pending_load`
+## reads it once in `_ready` and zeroes it, so a later scene change inside the same
+## run cannot load the same slot a second time.
+var pending_load_slot: int = 0
+
 var _last_tick_ms: int = 0
 
 
