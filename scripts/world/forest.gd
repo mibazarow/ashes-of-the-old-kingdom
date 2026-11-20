@@ -1,12 +1,10 @@
 class_name Forest
-extends Node2D
-## Builds the forest slice at runtime: TileSet from the atlas, collisions,
-## props and spawns. Keeps the level data readable instead of a binary .tscn.
+extends ZoneBase
+## The first zone. Builds the forest slice at runtime: the grid from a fixed
+## seed, props and spawns, the village safe zone and the villager schedules.
+## Everything generic (grid reader, tileset build, exploration, camera, spawn
+## scans, schedule wiring) lives in `ZoneBase`; this file is content only.
 
-const TILE := 16
-const ATLAS := "res://assets/sprites/tiles.png"
-
-const PLAYER_SCENE := "res://scenes/player/player.tscn"
 const WOLF_SCENE := "res://scenes/enemies/wolf.tscn"
 const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
 const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
@@ -24,27 +22,6 @@ const BREAKABLE_SCENE := "res://scenes/world/breakable.tscn"
 const MAP_W := 52
 const MAP_H := 32
 const MAP_SEED := 20261107
-
-const TILE_GRASS := 0
-const TILE_DIRT := 1
-const TILE_STONE := 2
-const TILE_TREE := 3
-
-var player: Node2D
-var tile_layer: TileMapLayer
-var _map: Array[String] = []
-
-## The in-game day cycle driving the villager schedules (spec §12.1). Created as
-## a child node rather than an autoload so the world slice owns it and a test gets
-## it by instantiating the world scene. Exposed for the HUD and a test to reach.
-var day_clock: DayClock
-
-## Radius (in tiles) around the player that counts as explored on the map.
-const VISIT_RADIUS := 3
-
-## Tiles the player has seen, keyed by Vector2i. Read-only for the map panel.
-var _visited: Dictionary = {}
-var _last_visited_tile := Vector2i(-9999, -9999)
 
 ## Points of interest kept as live node references so the map can show them
 ## without fragile path lookups. Populated in _spawn_actors.
@@ -157,68 +134,19 @@ const PICKUP_COIN_ANCHOR := Vector2i(9, 26)
 const PICKUP_FLASK_TILE := Vector2i(20, 30)
 
 
-func _ready() -> void:
-	# Advertise the safe zone before any actor is spawned, so an enemy created in
-	# `_spawn_actors` can already resolve this world through the group and honour
-	# the boundary from its very first physics frame.
+func zone_id() -> String:
+	return "forest"
+
+
+func zone_name() -> String:
+	return "Лесной край"
+
+
+## Advertise the safe zone before any actor is spawned, so an enemy created in
+## `_spawn_actors` can already resolve this world through the group and honour
+## the boundary from its very first physics frame.
+func _advertise_zone() -> void:
 	add_to_group("safe_zone_owner")
-	_generate_map()
-	_build_tileset_and_layer()
-	_spawn_actors()
-	_setup_day_cycle()
-	_configure_camera()
-	_last_visited_tile = player_tile()
-	_mark_visited(_last_visited_tile)
-
-
-func _process(_delta: float) -> void:
-	var tile := player_tile()
-	if tile == _last_visited_tile:
-		return
-	_last_visited_tile = tile
-	_mark_visited(tile)
-
-
-func _mark_visited(center: Vector2i) -> void:
-	for dy in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
-		for dx in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
-			var t := Vector2i(center.x + dx, center.y + dy)
-			if t.x < 0 or t.y < 0 or t.x >= MAP_W or t.y >= MAP_H:
-				continue
-			_visited[t] = true
-
-
-func map_size() -> Vector2i:
-	return Vector2i(MAP_W, MAP_H)
-
-
-func cell_at(tile: Vector2i) -> String:
-	if tile.x < 0 or tile.y < 0 or tile.y >= _map.size():
-		return ""
-	var row: String = _map[tile.y]
-	if tile.x >= row.length():
-		return ""
-	return row[tile.x]
-
-
-func is_explored(tile: Vector2i) -> bool:
-	return _visited.has(tile)
-
-
-func explored_tiles() -> Array[Vector2i]:
-	var out: Array[Vector2i] = []
-	for key: Vector2i in _visited.keys():
-		out.append(key)
-	return out
-
-
-func player_tile() -> Vector2i:
-	if player == null:
-		return Vector2i(-1, -1)
-	return Vector2i(
-		floori(player.global_position.x / float(TILE)),
-		floori(player.global_position.y / float(TILE))
-	)
 
 
 ## The village safe zone rectangle, exposed so `Enemy` and a test read the exact
@@ -267,8 +195,9 @@ func landmarks() -> Array[Dictionary]:
 	return out
 
 
-
 func _generate_map() -> void:
+	_map_width = MAP_W
+	_map_height = MAP_H
 	var rng := RandomNumberGenerator.new()
 	rng.seed = MAP_SEED
 	var grid: Array = []
@@ -318,96 +247,6 @@ func _generate_map() -> void:
 	_map.clear()
 	for y in range(MAP_H):
 		_map.append("".join(PackedStringArray(grid[y])))
-
-
-func _build_tileset_and_layer() -> void:
-	var ts := TileSet.new()
-	ts.tile_size = Vector2i(TILE, TILE)
-	ts.add_physics_layer()
-	ts.set_physics_layer_collision_layer(0, 1)
-	ts.set_physics_layer_collision_mask(0, 0)
-
-	var src := TileSetAtlasSource.new()
-	src.texture = load(ATLAS)
-	src.texture_region_size = Vector2i(TILE, TILE)
-	# The source has to be registered before tiles are created, otherwise the
-	# created TileData does not know about the physics layer added above.
-	ts.add_source(src, 0)
-
-	for i in range(4):
-		src.create_tile(Vector2i(i, 0))
-
-	var square := PackedVector2Array([
-		Vector2(-8, -8), Vector2(8, -8), Vector2(8, 8), Vector2(-8, 8)
-	])
-	for solid in [TILE_STONE, TILE_TREE]:
-		var data := src.get_tile_data(Vector2i(solid, 0), 0)
-		data.add_collision_polygon(0)
-		data.set_collision_polygon_points(0, 0, square)
-
-	tile_layer = TileMapLayer.new()
-	tile_layer.name = "Ground"
-	tile_layer.tile_set = ts
-	tile_layer.y_sort_enabled = true
-	add_child(tile_layer)
-
-	for y in range(_map.size()):
-		var row: String = _map[y]
-		for x in range(row.length()):
-			var ch := row[x]
-			var tile := TILE_GRASS
-			match ch:
-				"#":
-					tile = TILE_STONE
-				"T":
-					tile = TILE_TREE
-				",":
-					tile = TILE_DIRT
-				_:
-					tile = TILE_GRASS
-			tile_layer.set_cell(Vector2i(x, y), 0, Vector2i(tile, 0))
-
-
-func _tile_center(x: int, y: int) -> Vector2:
-	return Vector2(x * TILE + TILE / 2.0, y * TILE + TILE / 2.0)
-
-
-## First walkable tile (grass "." or dirt ",") scanning row-major outward from
-## the anchor, so a prop never spawns inside a tree cluster or a wall. Falls
-## back to the anchor when nothing walkable is found in range. Deterministic:
-## the scan order depends only on the fixed seed and the fixed anchor.
-func _find_walkable_near(anchor: Vector2i, radius: int) -> Vector2i:
-	for dy in range(-radius, radius + 1):
-		for dx in range(-radius, radius + 1):
-			var t := Vector2i(anchor.x + dx, anchor.y + dy)
-			var ch := cell_at(t)
-			if ch == "." or ch == ",":
-				return t
-	return anchor
-
-
-## The same outward row-major scan, but a tile that lies within `min_distance`
-## tiles of any point in `avoid` (Chebyshev, so the diagonal counts as close too)
-## is skipped. The smith needs this where the merchant does not: the player
-## interacts with the NEAREST interactable in range, and the debug bot presses E
-## the moment it is within its stop tolerance of Edrik, so the forge has to sit
-## outside that reach rather than merely on a free tile. Deterministic, like every
-## other spawn here: the scan order depends only on the fixed seed and the anchor.
-func _find_walkable_away(anchor: Vector2i, radius: int, avoid: Array[Vector2i], min_distance: int) -> Vector2i:
-	for dy in range(-radius, radius + 1):
-		for dx in range(-radius, radius + 1):
-			var t := Vector2i(anchor.x + dx, anchor.y + dy)
-			var ch := cell_at(t)
-			if ch != "." and ch != ",":
-				continue
-			var too_close := false
-			for point: Vector2i in avoid:
-				if absi(t.x - point.x) < min_distance and absi(t.y - point.y) < min_distance:
-					too_close = true
-					break
-			if not too_close:
-				return t
-	return anchor
 
 
 func _spawn_actors() -> void:
@@ -574,11 +413,6 @@ func _spawn_rubble() -> void:
 	_rubble_node = rubble
 
 
-func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> void:
-	var e := _instantiate(scene_path, _tile_center(tx, ty), node_name)
-	e.name = node_name
-
-
 ## `_spawn_enemy` for a spawn whose tile is derived from the generated grid rather
 ## than hardcoded: the anchor is snapped to the nearest walkable tile by the same
 ## deterministic outward scan the chests use, so a solid tile (stone or a tree)
@@ -587,33 +421,6 @@ func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> vo
 func _spawn_enemy_walkable(scene_path: String, anchor: Vector2i, node_name: String, radius: int = NEW_ENEMY_SCAN_RADIUS) -> void:
 	var tile := _find_walkable_near(anchor, radius)
 	_spawn_enemy(scene_path, tile.x, tile.y, node_name)
-
-
-func _instantiate(scene_path: String, pos: Vector2, node_name: String) -> Node2D:
-	var packed: PackedScene = load(scene_path)
-	if packed == null:
-		push_error("Forest: cannot load %s" % scene_path)
-		return null
-	var inst := packed.instantiate() as Node2D
-	inst.position = pos
-	add_child(inst)
-	inst.name = node_name
-	return inst
-
-
-func _configure_camera() -> void:
-	if player == null:
-		return
-	var cam := player.get_node_or_null("Camera2D") as Camera2D
-	if cam == null:
-		return
-	cam.limit_left = 0
-	cam.limit_top = 0
-	cam.limit_right = MAP_W * TILE
-	cam.limit_bottom = MAP_H * TILE
-	cam.position_smoothing_enabled = true
-	cam.position_smoothing_speed = 7.0
-	cam.make_current()
 
 
 ## Builds the day cycle and gives every scheduled villager a `ScheduleComponent`.
@@ -630,12 +437,3 @@ func _setup_day_cycle() -> void:
 	_attach_schedule(_merchant_node)
 	_attach_schedule(_smith_node)
 	_attach_schedule(_mila_node)
-
-
-func _attach_schedule(npc: Node2D) -> void:
-	if npc == null or not is_instance_valid(npc):
-		return
-	var comp := ScheduleComponent.new()
-	comp.name = "ScheduleComponent"
-	comp.setup(npc, self, day_clock)
-	npc.add_child(comp)

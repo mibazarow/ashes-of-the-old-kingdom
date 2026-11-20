@@ -1,0 +1,289 @@
+class_name ZoneBase
+extends Node2D
+## Shared plumbing for a playable zone: the generated-grid reader, the runtime
+## TileSet/TileMapLayer build, exploration tracking, camera setup, walkable-tile
+## scans, actor instantiation and villager schedule attachment.
+##
+## A concrete zone owns only its own content — the grid, the spawns, the day
+## cycle wiring and the two `zone_*` identity hooks — and reaches this class by
+## overriding the virtual hooks `_ready` calls in a fixed order. Nothing here
+## knows anything about the forest.
+
+const TILE := 16
+const ATLAS := "res://assets/sprites/tiles.png"
+
+const PLAYER_SCENE := "res://scenes/player/player.tscn"
+
+const TILE_GRASS := 0
+const TILE_DIRT := 1
+const TILE_STONE := 2
+const TILE_TREE := 3
+
+## Radius (in tiles) around the player that counts as explored on the map.
+const VISIT_RADIUS := 3
+
+var player: Node2D
+var tile_layer: TileMapLayer
+var _map: Array[String] = []
+
+## The in-game day cycle driving the villager schedules (spec §12.1). Created as
+## a child node rather than an autoload so the zone owns it and a test gets it by
+## instantiating the world scene. Exposed for the HUD and a test to reach.
+var day_clock: DayClock
+
+## Tiles the player has seen, keyed by Vector2i. Read-only for the map panel.
+var _visited: Dictionary = {}
+var _last_visited_tile := Vector2i(-9999, -9999)
+
+## Extent of the generated grid. A zone's `_generate_map` owns these; the base
+## reads them for the camera limits and the exploration bounds instead of holding
+## a size of its own.
+var _map_width := 0
+var _map_height := 0
+
+
+func _ready() -> void:
+	# The fixed hook order. A zone that overrides any of them must keep this
+	# sequence: content first, then the tile layer that draws it, then the actors
+	# that stand on it, then the clock and the camera that watch them.
+	_advertise_zone()
+	_generate_map()
+	_build_tileset_and_layer()
+	_spawn_actors()
+	_setup_day_cycle()
+	_configure_camera()
+	_last_visited_tile = player_tile()
+	_mark_visited(_last_visited_tile)
+
+
+func _process(_delta: float) -> void:
+	var tile := player_tile()
+	if tile == _last_visited_tile:
+		return
+	_last_visited_tile = tile
+	_mark_visited(tile)
+
+
+# --- virtual hooks -------------------------------------------------------------
+
+## Runs before anything else, so a zone can publish itself to the groups other
+## actors look up (the safe zone owner, for instance) before a single actor of
+## this zone exists and while it still resolves them on its first frame.
+func _advertise_zone() -> void:
+	pass
+
+
+func _generate_map() -> void:
+	pass
+
+
+## Builds the runtime TileSet from the shared atlas and paints `_map` into a new
+## TileMapLayer. The character-to-tile mapping is the project-wide one, so a zone
+## only overrides this when it genuinely needs a different tileset.
+func _build_tileset_and_layer() -> void:
+	var ts := TileSet.new()
+	ts.tile_size = Vector2i(TILE, TILE)
+	ts.add_physics_layer()
+	ts.set_physics_layer_collision_layer(0, 1)
+	ts.set_physics_layer_collision_mask(0, 0)
+
+	var src := TileSetAtlasSource.new()
+	src.texture = load(ATLAS)
+	src.texture_region_size = Vector2i(TILE, TILE)
+	# The source has to be registered before tiles are created, otherwise the
+	# created TileData does not know about the physics layer added above.
+	ts.add_source(src, 0)
+
+	for i in range(4):
+		src.create_tile(Vector2i(i, 0))
+
+	var square := PackedVector2Array([
+		Vector2(-8, -8), Vector2(8, -8), Vector2(8, 8), Vector2(-8, 8)
+	])
+	for solid in [TILE_STONE, TILE_TREE]:
+		var data := src.get_tile_data(Vector2i(solid, 0), 0)
+		data.add_collision_polygon(0)
+		data.set_collision_polygon_points(0, 0, square)
+
+	tile_layer = TileMapLayer.new()
+	tile_layer.name = "Ground"
+	tile_layer.tile_set = ts
+	tile_layer.y_sort_enabled = true
+	add_child(tile_layer)
+
+	for y in range(_map.size()):
+		var row: String = _map[y]
+		for x in range(row.length()):
+			var ch := row[x]
+			var tile := TILE_GRASS
+			match ch:
+				"#":
+					tile = TILE_STONE
+				"T":
+					tile = TILE_TREE
+				",":
+					tile = TILE_DIRT
+				_:
+					tile = TILE_GRASS
+			tile_layer.set_cell(Vector2i(x, y), 0, Vector2i(tile, 0))
+
+
+func _spawn_actors() -> void:
+	pass
+
+
+func _setup_day_cycle() -> void:
+	pass
+
+
+func zone_id() -> String:
+	return "zone"
+
+
+func zone_name() -> String:
+	return "Зона"
+
+
+## Points of interest for the map panel. A zone answers with live node
+## references rather than paths, so the panel never needs a lookup that can go
+## stale.
+func landmarks() -> Array[Dictionary]:
+	return []
+
+
+func is_in_safe_zone(_tile: Vector2i) -> bool:
+	return false
+
+
+# --- public API ----------------------------------------------------------------
+
+func map_size() -> Vector2i:
+	return Vector2i(_map_width, _map_height)
+
+
+func cell_at(tile: Vector2i) -> String:
+	if tile.x < 0 or tile.y < 0 or tile.y >= _map.size():
+		return ""
+	var row: String = _map[tile.y]
+	if tile.x >= row.length():
+		return ""
+	return row[tile.x]
+
+
+func is_explored(tile: Vector2i) -> bool:
+	return _visited.has(tile)
+
+
+func explored_tiles() -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for key: Vector2i in _visited.keys():
+		out.append(key)
+	return out
+
+
+func player_tile() -> Vector2i:
+	if player == null:
+		return Vector2i(-1, -1)
+	return Vector2i(
+		floori(player.global_position.x / float(TILE)),
+		floori(player.global_position.y / float(TILE))
+	)
+
+
+# --- exploration ---------------------------------------------------------------
+
+func _mark_visited(center: Vector2i) -> void:
+	for dy in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+		for dx in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+			var t := Vector2i(center.x + dx, center.y + dy)
+			if t.x < 0 or t.y < 0 or t.x >= _map_width or t.y >= _map_height:
+				continue
+			_visited[t] = true
+
+
+# --- spawn helpers -------------------------------------------------------------
+
+func _tile_center(x: int, y: int) -> Vector2:
+	return Vector2(x * TILE + TILE / 2.0, y * TILE + TILE / 2.0)
+
+
+## First walkable tile (grass "." or dirt ",") scanning row-major outward from
+## the anchor, so a prop never spawns inside a tree cluster or a wall. Falls
+## back to the anchor when nothing walkable is found in range. Deterministic:
+## the scan order depends only on the fixed seed and the fixed anchor.
+func _find_walkable_near(anchor: Vector2i, radius: int) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			var ch := cell_at(t)
+			if ch == "." or ch == ",":
+				return t
+	return anchor
+
+
+## The same outward row-major scan, but a tile that lies within `min_distance`
+## tiles of any point in `avoid` (Chebyshev, so the diagonal counts as close too)
+## is skipped. The smith needs this where the merchant does not: the player
+## interacts with the NEAREST interactable in range, and the debug bot presses E
+## the moment it is within its stop tolerance of Edrik, so the forge has to sit
+## outside that reach rather than merely on a free tile. Deterministic, like every
+## other spawn here: the scan order depends only on the fixed seed and the anchor.
+func _find_walkable_away(anchor: Vector2i, radius: int, avoid: Array[Vector2i], min_distance: int) -> Vector2i:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var t := Vector2i(anchor.x + dx, anchor.y + dy)
+			var ch := cell_at(t)
+			if ch != "." and ch != ",":
+				continue
+			var too_close := false
+			for point: Vector2i in avoid:
+				if absi(t.x - point.x) < min_distance and absi(t.y - point.y) < min_distance:
+					too_close = true
+					break
+			if not too_close:
+				return t
+	return anchor
+
+
+func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> void:
+	var e := _instantiate(scene_path, _tile_center(tx, ty), node_name)
+	e.name = node_name
+
+
+func _instantiate(scene_path: String, pos: Vector2, node_name: String) -> Node2D:
+	var packed: PackedScene = load(scene_path)
+	if packed == null:
+		push_error("%s: cannot load %s" % [zone_id(), scene_path])
+		return null
+	var inst := packed.instantiate() as Node2D
+	inst.position = pos
+	add_child(inst)
+	inst.name = node_name
+	return inst
+
+
+func _configure_camera() -> void:
+	if player == null:
+		return
+	var cam := player.get_node_or_null("Camera2D") as Camera2D
+	if cam == null:
+		return
+	cam.limit_left = 0
+	cam.limit_top = 0
+	cam.limit_right = _map_width * TILE
+	cam.limit_bottom = _map_height * TILE
+	cam.position_smoothing_enabled = true
+	cam.position_smoothing_speed = 7.0
+	cam.make_current()
+
+
+## Gives one NPC a `ScheduleComponent` bound to this zone's clock. The clock has
+## to be in the tree already so its `_ready` (which loads `data/schedules.json`
+## and seeds the morning phase) runs before the component reads `phase()`.
+func _attach_schedule(npc: Node2D) -> void:
+	if npc == null or not is_instance_valid(npc):
+		return
+	var comp := ScheduleComponent.new()
+	comp.name = "ScheduleComponent"
+	comp.setup(npc, self, day_clock)
+	npc.add_child(comp)
