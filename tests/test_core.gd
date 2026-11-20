@@ -228,6 +228,9 @@ func _run() -> void:
 	print("== stagger recovery ==")
 	await _test_stagger_recovery()
 
+	print("== forest warden boss ==")
+	await _test_forest_warden_boss()
+
 	print("== weapon combos ==")
 	await _test_weapon_combos()
 
@@ -266,7 +269,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 42, "every test group ran to completion (got %d/42)" % completed.size())
+	_check(completed.size() == 43, "every test group ran to completion (got %d/43)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3241,6 +3244,367 @@ func _drive_out_of_stagger(node: Node, max_frames: int) -> int:
 		if int(node.get("state")) != 5:
 			return i + 1
 	return -1
+
+
+## Forest mini-boss (roadmap stage D, spec §10.4, §10.5). `Boss` puts two phases,
+## a telegraphed heavy swing and a stagger lock-out on top of the shared `Enemy`
+## FSM, and the HUD paints a bar for the boss the player is actually fighting.
+## The first block reads the real generated world, the rest measures behaviour on
+## a bare arena so no tree, no other enemy and no clock can move a number. States
+## are spelled as numbers (4 ATTACK, 5 STAGGER, 6 DEAD) exactly as in the stagger
+## group: naming `Enemy` or `Boss` here would pull their autoload references into
+## the suite's compile graph, which does not exist under --script.
+func _test_forest_warden_boss() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+
+	# --- the generated world carries exactly one warden ------------------------
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var world := scene.get_node_or_null("World")
+	var hud := scene.get_node_or_null("HUD")
+	var world_player := get_first_node_in_group("player") as Node2D
+	var wardens: Array[Node] = []
+	var wolves: Array[Node] = []
+	var archer: Node = null
+	for node in get_nodes_in_group("enemy"):
+		var type: Variant = node.get("enemy_type")
+		if type == &"forest_warden":
+			wardens.append(node)
+		elif type == &"ash_wolf":
+			wolves.append(node)
+		elif type == &"ash_archer":
+			archer = node
+	var bosses: Array[Node] = get_nodes_in_group("boss")
+	_check(wardens.size() == 1, "the world spawns exactly one forest_warden (got %d)" % wardens.size())
+	_check(bosses.size() == 1, "exactly one enemy joins the boss group (got %d)" % bosses.size())
+	var warden: Node = bosses[0] if bosses.size() == 1 else null
+	_check(warden != null and wardens.size() == 1 and warden == wardens[0],
+		"the one boss in the world is the one forest_warden")
+	_check(warden != null and String(warden.name) == "ForestWarden", "the warden node is named ForestWarden")
+
+	if warden != null and world != null and world_player != null:
+		var tile := Vector2i(
+			floori((warden as Node2D).global_position.x / 16.0),
+			floori((warden as Node2D).global_position.y / 16.0)
+		)
+		var cell := String(world.call("cell_at", tile))
+		_check(cell == "." or cell == ",", "the warden stands on a walkable tile ('%s' at %s)" % [cell, str(tile)])
+		var spawn_tile := Vector2i(
+			floori(world_player.global_position.x / 16.0),
+			floori(world_player.global_position.y / 16.0)
+		)
+		var separation := maxi(absi(tile.x - spawn_tile.x), absi(tile.y - spawn_tile.y))
+		_check(separation >= 20,
+			"the warden keeps %d tiles between itself and the player spawn" % separation)
+		if archer != null:
+			var archer_tile := Vector2i(
+				floori((archer as Node2D).global_position.x / 16.0),
+				floori((archer as Node2D).global_position.y / 16.0)
+			)
+			_check(tile != archer_tile, "the warden does not stand on the archer's tile")
+
+		_check(String(warden.get("display_name")) == "Хранитель леса", "the warden is named in Russian")
+		_check(int(warden.get("max_health")) == 180, "the warden pool is 180 hp")
+		_check(int(warden.get("attack_damage")) == 16, "the warden swing is 16")
+		_check(int(warden.get("xp_reward")) == 120 and int(warden.get("gold_reward")) == 60,
+			"the warden pays 120 xp and 60 gold")
+		_check(String(warden.get("loot_item")) == "echo_amulet"
+			and is_equal_approx(float(warden.get("loot_chance")), 1.0),
+			"the warden always drops the echo amulet")
+		_check(is_equal_approx(float(warden.get("speed_multiplier")), 0.85),
+			"the warden moves at 0.85 of the base speed (%.2f)" % float(warden.get("speed_multiplier")))
+		_check(is_equal_approx(float(warden.get("phase_two_health_fraction")), 0.5),
+			"the warden enrages at half its pool")
+		var warden_sprite := warden.get_node_or_null("Sprite2D") as Sprite2D
+		_check(warden_sprite != null
+			and (warden.get("sprite_tint") as Color).is_equal_approx(warden_sprite.modulate),
+			"the warden sprite carries its exported tint at start")
+		# A boss that is only a bigger wolf would still wear the wolf's body box.
+		if not wolves.is_empty():
+			var warden_body := (warden.get_node("CollisionShape2D") as CollisionShape2D).shape as RectangleShape2D
+			var wolf_body := (wolves[0].get_node("CollisionShape2D") as CollisionShape2D).shape as RectangleShape2D
+			_check(warden_body != null and wolf_body != null
+				and warden_body.size.x > wolf_body.size.x and warden_body.size.y > wolf_body.size.y,
+				"the warden body box is larger than a wolf's (%s vs %s)" % [
+					str(warden_body.size) if warden_body != null else "none",
+					str(wolf_body.size) if wolf_body != null else "none",
+				])
+
+	# --- the boss bar: engaged, marked, clear of the rest of the HUD -----------
+	if hud != null and warden != null and world_player != null:
+		_check(not bool(hud.call("boss_bar_visible")),
+			"no boss bar at the spawn, where the warden is dozens of tiles away")
+		# The bar is polled from the live distance, so the honest way to engage it
+		# is to put the player where a player who came for this fight would stand.
+		world_player.global_position = (warden as Node2D).global_position + Vector2(0.0, -32.0)
+		await process_frame
+		await process_frame
+		_check(bool(hud.call("boss_bar_visible")), "the boss bar shows once the player is inside 200 px")
+		var bar_text := String(hud.call("boss_bar_text"))
+		_check(bar_text.contains("Хранитель леса"), "the bar names the boss (%s)" % bar_text)
+		_check(bar_text.contains("180/180"), "the bar reads the whole pool (%s)" % bar_text)
+		_check(bar_text.contains("Фаза 1"), "the bar marks phase 1 above the threshold (%s)" % bar_text)
+		var bar_rect: Rect2 = hud.call("boss_bar_global_rect")
+		var hp_rect: Rect2 = hud.call("player_hp_bar_global_rect")
+		var clock_rect: Rect2 = hud.call("clock_label_global_rect")
+		_check(bar_rect.size.x > 0.0 and bar_rect.size.y > 0.0,
+			"the bar occupies a real rect on screen (%s)" % str(bar_rect))
+		_check(not bar_rect.grow(1.0).intersects(hp_rect),
+			"the boss bar leaves the HP/mana column alone (%s vs %s)" % [str(bar_rect), str(hp_rect)])
+		_check(not bar_rect.grow(1.0).intersects(clock_rect),
+			"the boss bar leaves the day clock alone (%s vs %s)" % [str(bar_rect), str(clock_rect)])
+
+		warden.receive_damage(95, {"damage": 95, "hit_id": "warden-bar-phase"})
+		await process_frame
+		_check(String(hud.call("boss_bar_text")).contains("Фаза 2"),
+			"the bar marks phase 2 below the threshold (%s)" % String(hud.call("boss_bar_text")))
+		_check(String(hud.call("boss_bar_text")).contains("85/180"),
+			"the bar tracks the live pool (%s)" % String(hud.call("boss_bar_text")))
+
+		world_player.global_position = (warden as Node2D).global_position + Vector2(-400.0, -32.0)
+		await process_frame
+		_check(not bool(hud.call("boss_bar_visible")),
+			"the bar hides again when the player walks out of range")
+		world_player.global_position = (warden as Node2D).global_position + Vector2(0.0, -32.0)
+		await process_frame
+		_check(bool(hud.call("boss_bar_visible")), "the bar returns when the player comes back")
+		warden.receive_damage(999, {"damage": 999, "hit_id": "warden-bar-kill"})
+		await process_frame
+		_check(not bool(hud.call("boss_bar_visible")), "the bar disappears when the boss dies")
+
+	scene.queue_free()
+	await process_frame
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+
+	# --- behaviour on a bare arena ---------------------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var duelist := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	duelist.position = Vector2.ZERO
+	arena.add_child(duelist)
+	var warden_scene: PackedScene = load("res://scenes/enemies/forest_warden.tscn")
+	await process_frame
+
+	# --- phase 2 fires exactly once, at 90 of 180 ------------------------------
+	var phase_log: Array[int] = []
+	var phase_recorder := func(phase: int) -> void:
+		phase_log.append(phase)
+	var warden_a := warden_scene.instantiate() as Node2D
+	warden_a.position = Vector2(400, 400)
+	arena.add_child(warden_a)
+	warden_a.connect(&"phase_changed", phase_recorder)
+	await process_frame
+	var pool_a := warden_a.get_node("HealthComponent") as HealthComponent
+	var speed_before := float(warden_a.get("speed_multiplier"))
+	var cooldown_before := float(warden_a.get("attack_cooldown_multiplier"))
+	_check(int(warden_a.call("current_phase")) == 1, "the warden starts in phase 1")
+	_check(int(warden_a.call("phase_two_threshold")) == 90, "the phase-2 threshold of a 180 hp warden is 90")
+	# 89 of 180 leaves 91 hp: one point above the threshold, so nothing may fire.
+	DamageResolver.resolve_hit(null, warden_a, {"damage": 89, "hit_id": "warden-ph-1", "damage_type": "physical"})
+	_check(pool_a.current_health == 91, "89 damage leaves the warden at 91 hp (got %d)" % pool_a.current_health)
+	_check(phase_log.is_empty(), "one point above the threshold fires nothing (%d events)" % phase_log.size())
+	_check(int(warden_a.call("current_phase")) == 1, "the warden is still in phase 1 at 91 hp")
+	DamageResolver.resolve_hit(null, warden_a, {"damage": 1, "hit_id": "warden-ph-2", "damage_type": "physical"})
+	_check(phase_log.size() == 1, "crossing 90 hp fires phase_changed exactly once (got %d)" % phase_log.size())
+	_check(phase_log.size() == 1 and phase_log[0] == 2, "the signal carries the new phase number")
+	_check(int(warden_a.call("current_phase")) == 2, "the warden reports phase 2 at 90 hp")
+	DamageResolver.resolve_hit(null, warden_a, {"damage": 20, "hit_id": "warden-ph-3", "damage_type": "physical"})
+	DamageResolver.resolve_hit(null, warden_a, {"damage": 20, "hit_id": "warden-ph-4", "damage_type": "physical"})
+	_check(phase_log.size() == 1, "further damage below the threshold never re-fires it (got %d)" % phase_log.size())
+	# The case the one-way guard exists for: healed back over the threshold and
+	# dropped through it again, the boss must still be paying for exactly one
+	# enrage, not for two (spec §10.5 — a boss may not become a sponge).
+	pool_a.heal(80)
+	_check(pool_a.current_health > 90, "the warden is healed back above the threshold (%d hp)" % pool_a.current_health)
+	DamageResolver.resolve_hit(null, warden_a, {"damage": 120, "hit_id": "warden-ph-5", "damage_type": "physical"})
+	_check(phase_log.size() == 1, "a second crossing of the same threshold does not stack the enrage (got %d)" % phase_log.size())
+	_check(is_equal_approx(float(warden_a.get("speed_multiplier")), speed_before * 1.3),
+		"phase 2 multiplies chase speed by 1.3 exactly once (%.4f vs %.4f)" % [
+			float(warden_a.get("speed_multiplier")), speed_before * 1.3])
+	_check(is_equal_approx(float(warden_a.get("attack_cooldown_multiplier")), cooldown_before * 0.6),
+		"phase 2 multiplies the cooldown by 0.6 exactly once (%.4f vs %.4f)" % [
+			float(warden_a.get("attack_cooldown_multiplier")), cooldown_before * 0.6])
+	_check(float(warden_a.get("speed_multiplier")) > speed_before, "phase 2 chases faster than phase 1")
+	_check(float(warden_a.get("attack_cooldown_multiplier")) < cooldown_before,
+		"phase 2 swings sooner than phase 1")
+	warden_a.disconnect(&"phase_changed", phase_recorder)
+	warden_a.queue_free()
+	await process_frame
+
+	# --- and the enrage is felt in the walk, not only stored in a number -------
+	var runner := warden_scene.instantiate() as Node2D
+	runner.position = Vector2(0, -80)
+	arena.add_child(runner)
+	await process_frame
+	await process_frame
+	var from_phase_one := runner.global_position
+	for i in range(4):
+		await physics_frame
+	var closed_phase_one := from_phase_one.distance_to(runner.global_position)
+	runner.global_position = Vector2(0, -80)
+	DamageResolver.resolve_hit(null, runner, {"damage": 120, "hit_id": "warden-run", "damage_type": "physical"})
+	await process_frame
+	var from_phase_two := runner.global_position
+	for i in range(4):
+		await physics_frame
+	var closed_phase_two := from_phase_two.distance_to(runner.global_position)
+	_check(closed_phase_one > 0.0, "the phase-1 warden really closes on the player (%.2f px)" % closed_phase_one)
+	_check(closed_phase_two > closed_phase_one * 1.15,
+		"the enraged warden covers the same four frames faster (%.2f px vs %.2f px)" % [
+			closed_phase_two, closed_phase_one])
+	runner.queue_free()
+	await process_frame
+
+	# --- every third swing is the heavy one, through the real attack path ------
+	# The warden is pinned to one post for the duration of this block: nothing in
+	# the arena can walk it out of range of the duelist between the wind-up and
+	# the hitbox, so the number measured is the swing and not a position. The
+	# swing itself is entirely the FSM's: _start_attack -> _process_attack ->
+	# _apply_melee_hits -> DamageResolver, and the damage is read back out of the
+	# resolver's own payload rather than out of the player's HP (the player has
+	# i-frames, the payload does not).
+	var striker := warden_scene.instantiate() as Node2D
+	striker.position = Vector2(0, -10)
+	arena.add_child(striker)
+	var striker_status := striker.get_node_or_null("StatusComponent") as StatusComponent
+	if striker_status != null:
+		striker_status.set_process(false)
+	var striker_id := striker.get_instance_id()
+	var dealt: Array[int] = []
+	var damage_listener := func(payload: Dictionary) -> void:
+		if int(payload.get("attacker_id", 0)) == striker_id:
+			dealt.append(int(payload.get("final_damage", 0)))
+	bus.damage_dealt.connect(damage_listener)
+	var telegraph := striker.get_node("Telegraph") as ColorRect
+	var base_telegraph := telegraph.color
+	var heavy_telegraph_seen := false
+	var heavy_windup_seen := 0.0
+	var was_attacking := false
+	var swings := 0
+	for i in range(400):
+		await physics_frame
+		striker.global_position = Vector2(0, -10)
+		var attacking := int(striker.get("state")) == 4
+		if attacking and not was_attacking:
+			swings += 1
+			if bool(striker.call("is_heavy_swing")):
+				heavy_windup_seen = float(striker.get("windup_multiplier"))
+		was_attacking = attacking
+		if telegraph.visible and telegraph.color != base_telegraph:
+			heavy_telegraph_seen = true
+		if swings >= 3 and dealt.size() >= 3 and not attacking:
+			break
+	bus.damage_dealt.disconnect(damage_listener)
+	_check(swings >= 3 and dealt.size() >= 3,
+		"the warden swung at the player three times (swings %d, landed %d)" % [swings, dealt.size()])
+	if dealt.size() >= 3:
+		_check(dealt[0] == 16 and dealt[1] == 16,
+			"the first two swings land the plain 16 (got %d and %d)" % [dealt[0], dealt[1]])
+		_check(dealt[2] == 29, "the third swing lands round(16 x 1.8) = 29 (got %d)" % dealt[2])
+		_check(float(dealt[2]) / float(dealt[0]) > 1.7,
+			"the heavy swing is ~1.8x the ordinary one (%.2f x)" % (float(dealt[2]) / float(dealt[0])))
+	_check(heavy_telegraph_seen, "the heavy wind-up paints the telegraph a different colour")
+	_check(not is_equal_approx(heavy_windup_seen, 1.0) and heavy_windup_seen > 1.5,
+		"the heavy wind-up runs at 1.6x the wind-up multiplier (%.2f)" % heavy_windup_seen)
+	_check(is_equal_approx(float(striker.get("windup_multiplier")), 1.0),
+		"the borrowed wind-up multiplier is handed back after the heavy swing")
+	# The cadence itself, walked directly: the counter is what decides the heavy
+	# swing, so a frame loop is not needed to prove it is every third and not
+	# every fourth. The warden is out of sight of the duelist, so nothing else can
+	# start a swing between the probes.
+	var cadence: Array[bool] = []
+	for probe in range(1, 8):
+		striker.set("_swing_counter", probe - 1)
+		striker.call("_start_attack")
+		cadence.append(bool(striker.call("is_heavy_swing")))
+	_check(cadence == [false, false, true, false, false, true, false],
+		"the heavy swing falls on exactly every third swing %s" % str(cadence))
+	striker.call("_release_heavy_windup")
+	_check(is_equal_approx(float(striker.get("windup_multiplier")), 1.0),
+		"the cadence probe left the wind-up multiplier at its scene value")
+	striker.queue_free()
+	await process_frame
+
+	# --- ordinary hits do not lock a boss, ice + physical does ------------------
+	var bulwark := warden_scene.instantiate() as Node2D
+	bulwark.position = Vector2(400, 400)
+	arena.add_child(bulwark)
+	var bulwark_status := bulwark.get_node_or_null("StatusComponent") as StatusComponent
+	_check(bulwark_status != null, "the warden owns a StatusComponent")
+	if bulwark_status != null:
+		bulwark_status.set_process(false)
+	await process_frame
+	DamageResolver.resolve_hit(null, bulwark, {"damage": 5, "hit_id": "warden-stag-1", "damage_type": "physical"})
+	_check(int(bulwark.get("state")) != 5,
+		"an ordinary hit does not stagger the warden (state=%s)" % str(bulwark.get("state")))
+	DamageResolver.resolve_hit(null, bulwark, {"damage": 5, "hit_id": "warden-stag-2", "damage_type": "fire"})
+	_check(int(bulwark.get("state")) != 5,
+		"an elemental hit does not stagger the warden either (state=%s)" % str(bulwark.get("state")))
+	# The control rule the boss leaves open on purpose (spec §9.2): a chilled
+	# target hit by a physical blow asks for a deeper stagger, and that is the one
+	# door through which a boss still goes down.
+	if bulwark_status != null:
+		_check(bulwark_status.apply_status("chill", 30.0), "the warden can be chilled")
+		_check(bulwark_status.has_status("chill"), "the chill is on the warden")
+	DamageResolver.resolve_hit(null, bulwark, {"damage": 5, "hit_id": "warden-stag-3", "damage_type": "physical"})
+	_check(int(bulwark.get("state")) == 5,
+		"ice + physical does stagger the warden (state=%s)" % str(bulwark.get("state")))
+	_check(float(bulwark.get("_stagger_left")) > 0.0, "the combo stagger clock runs on the warden")
+	# Regression: the lock-out lives in Boss._enter, so the plain enemy that never
+	# opted into it must still flinch exactly as it always did.
+	var wolf := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	wolf.position = Vector2(400, 440)
+	arena.add_child(wolf)
+	var wolf_status := wolf.get_node_or_null("StatusComponent") as StatusComponent
+	if wolf_status != null:
+		wolf_status.set_process(false)
+	await process_frame
+	DamageResolver.resolve_hit(null, wolf, {"damage": 3, "hit_id": "warden-wolf-1", "damage_type": "physical"})
+	_check(int(wolf.get("state")) == 5, "an ordinary hit still staggers a wolf (state=%s)" % str(wolf.get("state")))
+	_check(float(wolf.get("_stagger_left")) > 0.0, "the wolf stagger clock runs (%.2f s)" % float(wolf.get("_stagger_left")))
+	bulwark.queue_free()
+	wolf.queue_free()
+	await process_frame
+
+	# --- the kill pays exactly the boss bounty ---------------------------------
+	var bounty := warden_scene.instantiate() as Node2D
+	bounty.position = Vector2(500, 500)
+	arena.add_child(bounty)
+	await process_frame
+	var died_types: Array[StringName] = []
+	var died_ids: Array[StringName] = []
+	var death_listener := func(enemy_id: StringName, enemy_type: StringName, _pos: Vector2) -> void:
+		died_types.append(enemy_type)
+		died_ids.append(enemy_id)
+	bus.enemy_died.connect(death_listener)
+	bounty.receive_damage(999, {"damage": 999, "hit_id": "warden-bounty"})
+	bus.enemy_died.disconnect(death_listener)
+	_check(died_types.size() == 1 and died_types[0] == &"forest_warden",
+		"enemy_died fires once for the warden type (%s)" % str(died_types))
+	_check(died_ids.size() == 1 and died_ids[0] != &"" and String(died_ids[0]).length() > 2,
+		"the death carries the warden instance id (%s)" % str(died_ids))
+	_check(gs.kill_count("forest_warden") == 1, "the warden kill is credited to forest_warden")
+	# 120 xp over a reset level-1 curve (100 to the next level) is one level and
+	# 20 left over: the exact bounty, neither rounded away nor doubled.
+	_check(gs.gold == 60, "the warden paid exactly 60 gold (got %d)" % gs.gold)
+	_check(gs.level == 2 and gs.xp == 20,
+		"the warden paid exactly 120 xp (level %d, %d over)" % [gs.level, gs.xp])
+	_check(gs.count_item("echo_amulet") == 1, "the guaranteed drop landed in the bag")
+
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	completed["boss_warden"] = true
 
 
 ## Spec §6 "Комбо зависят от оружия": the attack chain is item data, not a

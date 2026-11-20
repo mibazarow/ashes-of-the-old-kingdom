@@ -11,6 +11,7 @@ const WOLF_SCENE := "res://scenes/enemies/wolf.tscn"
 const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
 const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
+const FOREST_WARDEN_SCENE := "res://scenes/enemies/forest_warden.tscn"
 const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
@@ -84,6 +85,20 @@ const WISP_B_ANCHOR := Vector2i(41, 18)
 ## How far the walkable scan looks around a new-enemy anchor before giving up.
 ## 5 tiles is 80 px against a 2x2 tree cluster, so it always finds the clearing.
 const NEW_ENEMY_SCAN_RADIUS := 5
+
+## Anchor for the forest mini-boss (roadmap stage D, spec §10.4). It sits inside
+## the east clearing the archer and the sword chest already hold, one tile short
+## of the archer's own tile, so the boss guards the same clearing without standing
+## on top of the ranged enemy or the chest.
+##
+## The scan radius here is deliberately 1 rather than `NEW_ENEMY_SCAN_RADIUS`:
+## the clearing is carved walkable across the whole rectangle rows 4..7 x
+## cols MAP_W-9..MAP_W-2, so a one-tile scan is guaranteed to land inside it,
+## while a five-tile scan would just as happily walk out of the clearing toward
+## the map border. The tile it picks is (MAP_W - 9, 6) on every run: the anchor,
+## the rectangle and the seed are all fixed.
+const FOREST_WARDEN_ANCHOR := Vector2i(MAP_W - 8, 7)
+const FOREST_WARDEN_SCAN_RADIUS := 1
 
 
 func _ready() -> void:
@@ -389,6 +404,15 @@ func _spawn_actors() -> void:
 	_spawn_enemy_walkable(WISP_SCENE, WISP_A_ANCHOR, "WispA")
 	_spawn_enemy_walkable(WISP_SCENE, WISP_B_ANCHOR, "WispB")
 
+	# The mini-boss goes last among the enemies on purpose. It is the only enemy
+	# of its type, it owns the far east corner, and its `boss` group is what the
+	# HUD looks up for the boss bar — so nothing else in the world can shadow it.
+	# It is also added after every other spawn so a debug bot that walks at the
+	# nearest enemy still reaches a wolf first: the boss is ~39 tiles from the
+	# player spawn, well outside the 230 px leash its own post allows.
+	_spawn_enemy_walkable(FOREST_WARDEN_SCENE, FOREST_WARDEN_ANCHOR, "ForestWarden",
+		FOREST_WARDEN_SCAN_RADIUS)
+
 	_instantiate(PICKUP_SCENE, _tile_center(13, 10), "PickupA")
 
 
@@ -402,8 +426,8 @@ func _spawn_enemy(scene_path: String, tx: int, ty: int, node_name: String) -> vo
 ## deterministic outward scan the chests use, so a solid tile (stone or a tree)
 ## can never take an enemy. Deterministic like every other spawn here, because the
 ## scan order depends only on the fixed seed and the fixed anchor.
-func _spawn_enemy_walkable(scene_path: String, anchor: Vector2i, node_name: String) -> void:
-	var tile := _find_walkable_near(anchor, NEW_ENEMY_SCAN_RADIUS)
+func _spawn_enemy_walkable(scene_path: String, anchor: Vector2i, node_name: String, radius: int = NEW_ENEMY_SCAN_RADIUS) -> void:
+	var tile := _find_walkable_near(anchor, radius)
 	_spawn_enemy(scene_path, tile.x, tile.y, node_name)
 
 

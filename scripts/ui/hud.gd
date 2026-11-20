@@ -11,6 +11,18 @@ const MAX_VISIBLE_ROWS := 8
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
 
+## Boss bar (spec §10.4 "полоска здоровья босса"). The boss is looked up through
+## the `boss` group rather than a node path or a class reference, exactly like the
+## day clock is looked up through `day_clock`, so the HUD stays out of the AI's
+## compile graph. A boss counts as engaged while the player stands inside this
+## radius of it and it is still alive; outside it the bar is simply not on screen,
+## so the top of the viewport is not permanently claimed by an enemy the player
+## is not fighting.
+const BOSS_GROUP := &"boss"
+const BOSS_ENGAGE_RADIUS := 200.0
+const BOSS_BAR_W := 180.0
+const COLOR_BOSS_BAR := Color(0.62, 0.32, 0.72)
+
 ## Russian display names for the day phases (spec §12.1), keyed by the phase id in
 ## data/schedules.json. An unknown id falls back to the raw id rather than blank.
 const PHASE_LABELS_RU := {
@@ -91,6 +103,14 @@ var _craft_open := false
 var _tab_held: bool = false
 var _day_clock: Node = null
 var _clock_refresh_left := 0.0
+
+## Boss bar state (spec §10.4). The boss is found through the `boss` group rather
+## than a node path or a class reference, exactly like the day clock is found
+## through `day_clock`, so the HUD stays out of the AI's compile graph.
+var _boss_panel: PanelContainer
+var _boss_bar: ProgressBar
+var _boss_label: Label
+var _boss: Node = null
 
 ## Branching-dialogue state (spec §12.2). The runner is non-null only while a
 ## data-driven conversation owns the panel; the legacy one-line quest dialogue
@@ -192,6 +212,9 @@ func _build_ui() -> void:
 	_clock_label.clip_text = true
 	_clock_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	right.add_child(_clock_label)
+
+	# --- boss bar, its own centred row under the stats row ---------------------
+	_build_boss_bar(column)
 
 	# --- toast under the top row ---
 	var toast_row := CenterContainer.new()
@@ -301,6 +324,46 @@ func _build_map_panel() -> void:
 	_map_panel.setup(world)
 	_map_panel.visible = false
 	_root.add_child(_map_panel)
+
+
+## The boss bar is its own centred row in the top column, between the stat row and
+## the toast row. It is a row rather than an absolutely placed panel for one
+## reason: a row can never overlap the HP/mana column on its left or the day-clock
+## column on its right, because those live in a different row and the container
+## gives each of them its own band. While no boss is engaged the panel is hidden,
+## and a hidden child takes no space in a BoxContainer, so the layout of every
+## screen that existed before bosses is pixel-identical.
+func _build_boss_bar(column: Control) -> void:
+	var row := CenterContainer.new()
+	row.name = "BossBarRow"
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(row)
+
+	_boss_panel = PanelContainer.new()
+	_boss_panel.name = "BossBar"
+	_boss_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_boss_panel.visible = false
+	_boss_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.06, 0.07, 0.09, 0.92)))
+	row.add_child(_boss_panel)
+
+	var box := VBoxContainer.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 1)
+	_boss_panel.add_child(box)
+
+	# One line with the name, the pool and the phase marker, then the bar itself.
+	# The line is clipped rather than wrapped so a long boss name can never widen
+	# the row and push the toast around.
+	_boss_label = _make_text("", Color(0.96, 0.86, 0.5))
+	_boss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_boss_label.clip_text = true
+	_boss_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_boss_label.custom_minimum_size = Vector2(BOSS_BAR_W, 0)
+	box.add_child(_boss_label)
+
+	_boss_bar = _make_bar(COLOR_BOSS_BAR)
+	_boss_bar.custom_minimum_size = Vector2(BOSS_BAR_W, 5)
+	box.add_child(_boss_bar)
 
 
 func _build_dialogue_panel() -> void:
@@ -1270,6 +1333,10 @@ func _process(_delta: float) -> void:
 	# The clock line refreshes on its own one-second cadence, ahead of every
 	# modal early-return below, so it stays readable over the map, shop and bench.
 	_tick_clock(_delta)
+	# The boss bar is polled here for the same reason the clock is: a fight does
+	# not stop because a panel is open, and the bar must not freeze mid-swing
+	# behind the map or the shop.
+	_tick_boss_bar(_delta)
 	# The settings screen captures raw events itself; while it is open no
 	# action polling may reach the gameplay paths below.
 	if _settings_open:
@@ -1550,3 +1617,84 @@ func refresh_clock_line() -> void:
 ## what the player sees without reaching into the HUD's private node tree.
 func clock_line_text() -> String:
 	return _clock_label.text if _clock_label != null else ""
+
+
+## Repaints the boss bar from the live boss, or hides it. Polled rather than
+## signal-driven on purpose: the bar has to disappear the moment the player walks
+## out of range as well as the moment the boss dies, and only a distance check
+## covers both without a signal for every way a fight can end.
+func _tick_boss_bar(_delta: float) -> void:
+	if _boss_panel == null or _boss_bar == null or _boss_label == null:
+		return
+	var boss := _resolve_boss()
+	var player := get_tree().get_first_node_in_group("player") as Node2D
+	var engaged := boss != null and player != null and not _boss_is_dead(boss) \
+			and player.global_position.distance_to(boss.global_position) <= BOSS_ENGAGE_RADIUS
+	if not engaged:
+		_boss = null
+		_boss_panel.visible = false
+		return
+	var pool := boss.get_node_or_null("HealthComponent")
+	if pool == null:
+		_boss_panel.visible = false
+		return
+	var maximum := maxi(1, int(pool.get("max_health")))
+	_boss_bar.max_value = maximum
+	_boss_bar.value = clampi(int(pool.get("current_health")), 0, maximum)
+	var phase := int(boss.call("current_phase")) if boss.has_method("current_phase") else 1
+	_boss_label.text = "%s  %d/%d  ·  Фаза %d" % [
+		String(boss.get("display_name")),
+		int(pool.get("current_health")),
+		maximum,
+		phase,
+	]
+	_boss_panel.visible = true
+
+
+## The boss whose bar this is, resolved through the `boss` group and cached until
+## it leaves the tree. Re-resolved every frame it is missing, which is what lets a
+## second boss (or a respawn) take the bar over without the HUD knowing names.
+func _resolve_boss() -> Node:
+	if _boss != null and is_instance_valid(_boss):
+		return _boss
+	_boss = get_tree().get_first_node_in_group(BOSS_GROUP)
+	return _boss
+
+
+## Dead answer for the bar. Read through the pool and the owner rather than
+## through a class, so the HUD compiles without the AI scripts: a boss that is
+## dying still owns a fading corpse for ~0.45 s, and a bar over a corpse reads as
+## a fight that never ended.
+func _boss_is_dead(boss: Node) -> bool:
+	var pool := boss.get_node_or_null("HealthComponent")
+	if pool != null and bool(pool.get("is_dead")):
+		return true
+	return boss.has_method("is_status_owner_dead") and bool(boss.call("is_status_owner_dead"))
+
+
+# Read-only views of the boss bar, so a test or a screenshot probe can tell
+# whether the bar is on screen, what it says and where it sits without reaching
+# into the HUD's private node tree — the same contract `clock_line_text` gives.
+# The rects are empty while the corresponding control is hidden, which is what
+# lets an overlap check compare only the controls that are actually drawn.
+
+func boss_bar_visible() -> bool:
+	return _boss_panel != null and _boss_panel.visible
+
+
+func boss_bar_text() -> String:
+	return _boss_label.text if _boss_label != null else ""
+
+
+func boss_bar_global_rect() -> Rect2:
+	if _boss_panel == null or not _boss_panel.visible:
+		return Rect2()
+	return _boss_panel.get_global_rect()
+
+
+func player_hp_bar_global_rect() -> Rect2:
+	return _hp_bar.get_global_rect() if _hp_bar != null else Rect2()
+
+
+func clock_label_global_rect() -> Rect2:
+	return _clock_label.get_global_rect() if _clock_label != null else Rect2()
