@@ -14,7 +14,7 @@ Godot его читает, принимает и доходит до прове�
 $ godot --headless --path . --export-release "Windows Desktop" /tmp/pepl_probe.exe
 ERROR: Cannot export project with preset "Windows Desktop" due to configuration errors:
 Шаблоны экспорта не найдены по ожидаемому пути:
-/Users/mb/Library/Application Support/Godot/export_templates/4.7.2.stable/windows_release_x86_64.exe
+~/Library/Application Support/Godot/export_templates/4.7.2.stable/windows_release_x86_64.exe
 ERROR: Project export for preset "Windows Desktop" failed.
 ```
 
