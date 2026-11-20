@@ -440,6 +440,9 @@ func try_ability() -> bool:
 			_cast_aoe(skill, dir, hit_id)
 	var skill_name := String(skill.get("name", id))
 	EventBus.toast.emit(skill_name)
+	# A cast that actually paid mana and cooldown asks for its cue. Nothing else
+	# in the slice emits "cast", so no new signal was needed for it.
+	EventBus.sfx_requested.emit("cast", "SFX")
 	Telemetry.event(&"skill_cast", {
 		"skill": id,
 		"school": String(skill.get("school", "")),

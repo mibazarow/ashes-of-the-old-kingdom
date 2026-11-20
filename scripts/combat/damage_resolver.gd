@@ -40,6 +40,7 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 		"hit_id": hit_id,
 		"attacker_id": attacker.get_instance_id() if attacker != null else 0,
 		"target_id": target.get_instance_id(),
+		"target_groups": _groups_of(target),
 		"damage_type": String(payload.get("damage_type", "physical")),
 		"raw_damage": raw,
 		"final_damage": final_damage,
@@ -97,6 +98,18 @@ static func resolve_hit(attacker: Node, target: Node, payload: Dictionary) -> Di
 	if telemetry != null:
 		telemetry.combat(result)
 	return result
+
+
+## The target's own groups, copied into the payload so a listener can tell
+## "the player was hit" from "an enemy was hit" without holding a node
+## reference through a signal. Names rather than StringNames, so the payload
+## stays JSON-friendly for Telemetry. The resolver decides nothing from this
+## list: it describes the hit, and the listener decides what that means.
+static func _groups_of(target: Node) -> Array[String]:
+	var names: Array[String] = []
+	for group in target.get_groups():
+		names.append(String(group))
+	return names
 
 
 ## Mirrors StatusComponent._owner_is_dead(): the owner may answer for itself

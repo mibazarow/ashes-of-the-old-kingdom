@@ -130,6 +130,10 @@ Godot 4.7.2 уже установлен: `/Applications/Godot.app`, CLI —
 - **Логи** — `user://debug_runs/<run_id>/`: `events.jsonl`, `combat.jsonl`,
   `decisions.jsonl`, `errors.log`, `run_meta.json`, `summary.md`. Ошибки движка
   попадают в `errors.log` через `OS.add_logger`.
+- **Звук** — 8 процедурно сгенерированных заглушек (`tools/gen_audio.py`,
+  CC0, без сторонних сэмплов), шины `Master`/`Music`/`SFX`/`UI`, пул плееров и
+  отдельные громкости в `user://settings/audio.json`; музыка пока не подключена
+  (см. `docs/ASSET_CREDITS.md`).
 - **Отладочный бот** — 6 сценариев, управляет игроком через тот же
   `InputSource`, что и человек; не телепортируется и не читает скрытое
   состояние. Умеет обходить препятствия и пишет свои решения в лог.
@@ -177,10 +181,11 @@ godot --headless --path . --export-release "Windows Desktop" build/windows/pepl.
 scenes/     main, world, player, enemies, npcs, interactables, items, ui
 scripts/    core, save, player, combat, ai, npc, npcs, shop, craft, quests, inventory, world, ui, debug_bot
 data/       items.json, quests.json, shop.json, recipes.json
-assets/     сгенерированные 16x16 спрайты (см. docs/TODO_TEMP_ASSETS.md)
+assets/     сгенерированные 16x16 спрайты и звуки (см. docs/TODO_TEMP_ASSETS.md
+            и docs/ASSET_CREDITS.md)
 tests/      test_core.gd, fixtures/saves/ — три фикстуры сохранений для теста
             загрузки и миграции схемы (без персональных данных, см. README там же)
-tools/      генератор спрайтов, генератор InputMap
+tools/      генератор спрайтов, генератор звуков, генератор InputMap
 docs/       ARCHITECTURE.md, TEST_REPORT.md, ASSET_CREDITS.md, TODO_TEMP_ASSETS.md
 ```
 

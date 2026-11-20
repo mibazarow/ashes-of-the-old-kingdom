@@ -7,6 +7,14 @@ extends SceneTree
 
 const FIXTURE_DIR := "res://tests/fixtures/saves"
 
+## Written by `AudioManager`. Spelled out here instead of read from the
+## autoload so the suite keeps no compile-time dependency on an autoload
+## identifier (the group resolves the node at runtime and calls it directly).
+const AUDIO_SETTINGS_PATH := "user://settings/audio.json"
+const AUDIO_SFX_NAMES: Array[String] = [
+	"hit", "hurt", "enemy_die", "pickup", "cast", "ui_click", "step", "boss_roar",
+]
+
 var failures := 0
 var checks := 0
 
@@ -280,12 +288,15 @@ func _run() -> void:
 	print("== input bindings ==")
 	_test_input_bindings()
 
+	print("== audio ==")
+	await _test_audio()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 45, "every test group ran to completion (got %d/45)" % completed.size())
+	_check(completed.size() == 46, "every test group ran to completion (got %d/46)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6550,3 +6561,274 @@ func _test_village_world_and_enemy() -> void:
 	gs.reset()
 	qm.reset()
 
+
+
+# --- audio (spec §17) --------------------------------------------------------
+
+## The audio layer: the procedurally generated WAV set, the four-bus layout, the
+## player pool and the volume settings file. The group runs last on purpose, so
+## its deliberate volume changes and its settings file cannot leak into any
+## other group, and it cleans up after itself the way the input bindings group
+## does.
+##
+## `AudioManager` is resolved through the scene root and driven through `call`,
+## exactly like the other autoload-backed groups: the suite keeps no
+## compile-time dependency on an autoload identifier, so it still runs under
+## `godot --script`.
+##
+## One rule is asserted behaviourally rather than by reading the log: "a corrupt
+## file keeps the defaults without a GDScript backtrace". A test cannot read its
+## own process output, so the group proves the values stay put, and the
+## suite-wide `grep -cE 'ERROR|SCRIPT ERROR'` gate is what proves no backtrace
+## was printed.
+func _test_audio() -> void:
+	var am := root.get_node_or_null("AudioManager")
+	_check(am != null, "AudioManager autoload present")
+	if am == null:
+		completed["audio"] = true
+		return
+
+	_audio_stop_all(am)
+	_delete_audio_settings()
+	_apply_audio_defaults(am)
+
+	_test_audio_buses()
+	_test_audio_assets()
+	await _test_audio_playback(am)
+	_test_audio_volume(am)
+	_test_audio_settings(am)
+
+	# No residue: silence, default volumes, no settings file.
+	_audio_stop_all(am)
+	# A voice stopped and then quit from in the same frame is still held by the
+	# audio server when the process goes down, which the engine then reports as
+	# leaked ObjectDB instances plus a resource still in use — shutdown noise
+	# that would poison the suite's own error gate. Frames do not clear it
+	# (measured: 1..6 frames still leak), wall-clock time does (0.2 s never
+	# leaked in repeated runs), so the wait is on a timer rather than on
+	# `process_frame`, with margin.
+	await create_timer(0.5).timeout
+	_apply_audio_defaults(am)
+	_delete_audio_settings()
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH),
+		"audio group left no settings file behind")
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH + ".tmp"),
+		"audio group left no tmp file behind")
+	completed["audio"] = true
+
+
+## The layout shipped as `audio_bus_layout.tres`: four buses, the three
+## controllable ones feeding Master, which is the sink.
+func _test_audio_buses() -> void:
+	var expected: Array[String] = ["Master", "Music", "SFX", "UI"]
+	for i in expected.size():
+		var index := AudioServer.get_bus_index(expected[i])
+		_check(index == i, "bus %s exists at position %d (got %d)" % [expected[i], i, index])
+	for bus_label in ["Music", "SFX", "UI"]:
+		var send := String(AudioServer.get_bus_send(AudioServer.get_bus_index(bus_label)))
+		_check(send == "Master", "%s routes to Master (got %s)" % [bus_label, send])
+	_check(String(AudioServer.get_bus_send(AudioServer.get_bus_index("Master"))) == "",
+		"Master is the layout sink")
+
+
+## Every generated sound exists and really is PCM 16-bit mono 22050 Hz, read
+## straight from the container rather than through the import, so the check
+## covers the bytes the generator wrote. Peak below full scale on all eight:
+## decoding 30k samples is cheap, so there is no reason to sample only one.
+func _test_audio_assets() -> void:
+	for sound in AUDIO_SFX_NAMES:
+		var path := "res://assets/audio/%s.wav" % sound
+		_check(FileAccess.file_exists(path), "%s.wav exists" % sound)
+		var wav := _audio_read_wav(path)
+		_check(bool(wav.get("ok", false)), "%s.wav is RIFF/WAVE with fmt+data chunks" % sound)
+		_check(int(wav.get("format", 0)) == 1, "%s.wav is uncompressed PCM" % sound)
+		_check(int(wav.get("channels", 0)) == 1, "%s.wav is mono" % sound)
+		_check(int(wav.get("bits", 0)) == 16, "%s.wav is 16-bit" % sound)
+		_check(int(wav.get("rate", 0)) == 22050, "%s.wav is 22050 Hz" % sound)
+		_check(int(wav.get("frames", 0)) > 0, "%s.wav carries samples" % sound)
+		var peak := int(wav.get("peak", 0))
+		_check(peak > 0 and peak < 32767, "%s.wav does not clip (peak %d)" % [sound, peak])
+
+
+## Pool behaviour. The overlap is counted on the frame of the calls: a 90 ms
+## sound is long enough to survive a frame under `--headless` (measured 16
+## frames), but the property under test is "overlapping hits do not cut each
+## other off", which is only meaningful before any of them can end.
+func _test_audio_playback(am: Node) -> void:
+	_check(bool(am.call("play_sfx", "hit")), "play_sfx(\"hit\") returns true")
+	_check(_audio_playing_count(am, "SFX") >= 1, "an AudioStreamPlayer on the SFX bus is playing")
+	_check(not bool(am.call("play_sfx", "nope")), "play_sfx(\"nope\") returns false")
+	_check(not bool(am.call("play_sfx", "hit", "NoSuchBus")),
+		"play_sfx on a bus with no pool returns false")
+	_check(_audio_playing_count(am, "NoSuchBus") == 0, "no player is ever assigned an unknown bus")
+
+	_audio_stop_all(am)
+	for i in 10:
+		am.call("play_sfx", "hit")
+	var alive := _audio_playing_count(am, "SFX")
+	_check(alive >= 2, "10 rapid hits keep at least 2 players alive at once (got %d)" % alive)
+	await process_frame
+	alive = _audio_playing_count(am, "SFX")
+	_check(alive >= 2, "the same voices are still overlapping one frame later (got %d)" % alive)
+	_audio_stop_all(am)
+
+
+## Linear <-> dB on the bus, including the silence floor and the clamp.
+func _test_audio_volume(am: Node) -> void:
+	am.call("set_volume", "SFX", 0.0)
+	var sfx_db := AudioServer.get_bus_volume_db(AudioServer.get_bus_index("SFX"))
+	_check(absf(sfx_db + 80.0) < 0.5,
+		"set_volume(SFX, 0.0) writes about -80 dB (got %.1f)" % sfx_db)
+	_check(absf(float(am.call("volume", "SFX"))) < 0.001, "volume(SFX) reads back 0.0")
+
+	am.call("set_volume", "SFX", 0.5)
+	_check(absf(float(am.call("volume", "SFX")) - 0.5) < 0.01,
+		"set_volume(SFX, 0.5) round-trips within 0.01")
+
+	am.call("set_volume", "SFX", 1.5)
+	_check(absf(float(am.call("volume", "SFX")) - 1.0) < 0.01, "set_volume clamps above 1.0")
+	am.call("set_volume", "SFX", -0.5)
+	_check(absf(float(am.call("volume", "SFX"))) < 0.001, "set_volume clamps below 0.0")
+
+	# An unknown bus must be a no-op, not an error and not a side effect.
+	var master_before := AudioServer.get_bus_volume_db(AudioServer.get_bus_index("Master"))
+	am.call("set_volume", "NoSuchBus", 0.0)
+	_check(AudioServer.get_bus_volume_db(AudioServer.get_bus_index("Master")) == master_before,
+		"set_volume on an unknown bus changes no bus")
+	_check(absf(float(am.call("volume", "NoSuchBus")) - 1.0) < 0.001,
+		"volume() on an unknown bus reports the engine default")
+
+
+## The settings file: outside the saves directory, atomic, and tolerant of a
+## corrupt file.
+func _test_audio_settings(am: Node) -> void:
+	_delete_audio_settings()
+	am.call("set_volume", "SFX", 0.25)
+	am.call("set_volume", "Music", 0.75)
+	am.call("set_volume", "UI", 0.1)
+
+	var res: Dictionary = am.call("save_settings")
+	_check(bool(res.get("ok", false)), "save_settings reports ok")
+	_check(FileAccess.file_exists(AUDIO_SETTINGS_PATH), "audio settings file written")
+	_check(not AUDIO_SETTINGS_PATH.begins_with("user://saves"),
+		"audio settings live outside the saves directory")
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH + ".tmp"),
+		"atomic write renamed its tmp file away")
+
+	# Real round-trip: wipe the runtime values, let the file put them back.
+	am.call("set_volume", "SFX", 0.9)
+	am.call("set_volume", "Music", 0.9)
+	am.call("set_volume", "UI", 0.9)
+	am.call("load_settings")
+	_check(absf(float(am.call("volume", "SFX")) - 0.25) < 0.01, "SFX volume comes back from the file")
+	_check(absf(float(am.call("volume", "Music")) - 0.75) < 0.01, "Music volume comes back from the file")
+	_check(absf(float(am.call("volume", "UI")) - 0.1) < 0.01, "UI volume comes back from the file")
+
+	# A corrupt file keeps the defaults rather than half-applying garbage.
+	var defaults: Dictionary = am.call("settings_defaults")
+	for bus in ["Music", "SFX", "UI"]:
+		am.call("set_volume", bus, float(defaults[bus]))
+	var file := FileAccess.open(AUDIO_SETTINGS_PATH, FileAccess.WRITE)
+	_check(file != null, "corrupt audio settings fixture opens for writing")
+	if file != null:
+		file.store_string("{ this is not json")
+		file.close()
+	am.call("load_settings")
+	for bus in ["Music", "SFX", "UI"]:
+		_check(absf(float(am.call("volume", bus)) - float(defaults[bus])) < 0.01,
+			"corrupt audio settings file keeps the %s default" % bus)
+
+
+func _audio_playing_count(am: Node, bus: String) -> int:
+	var count := 0
+	for child in am.get_children():
+		var player := child as AudioStreamPlayer
+		if player != null and player.playing and String(player.bus) == bus:
+			count += 1
+	return count
+
+
+func _audio_stop_all(am: Node) -> void:
+	am.call("stop_music")
+	for child in am.get_children():
+		var player := child as AudioStreamPlayer
+		if player != null and player.playing:
+			player.stop()
+
+
+func _apply_audio_defaults(am: Node) -> void:
+	var defaults: Dictionary = am.call("settings_defaults")
+	for bus in ["Music", "SFX", "UI"]:
+		am.call("set_volume", bus, float(defaults[bus]))
+
+
+func _delete_audio_settings() -> void:
+	for path in [AUDIO_SETTINGS_PATH, AUDIO_SETTINGS_PATH + ".tmp"]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+
+## Minimal WAV reader: RIFF header, then a walk over the chunks, so the check
+## reads the same bytes `tools/gen_audio.py` wrote instead of trusting the
+## engine's import. Peak is the largest absolute int16 in the data chunk.
+func _audio_read_wav(path: String) -> Dictionary:
+	var out := {
+		"ok": false, "format": 0, "channels": 0, "rate": 0, "bits": 0,
+		"frames": 0, "peak": 0,
+	}
+	if not FileAccess.file_exists(path):
+		return out
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.size() < 44:
+		return out
+	if _audio_tag(bytes, 0) != "RIFF" or _audio_tag(bytes, 8) != "WAVE":
+		return out
+	var has_fmt := false
+	var has_data := false
+	var pos := 12
+	while pos + 8 <= bytes.size():
+		var chunk := _audio_tag(bytes, pos)
+		var size := _audio_u32(bytes, pos + 4)
+		var body := pos + 8
+		if size < 0 or body + size > bytes.size():
+			break
+		if chunk == "fmt " and size >= 16:
+			out["format"] = _audio_u16(bytes, body)
+			out["channels"] = _audio_u16(bytes, body + 2)
+			out["rate"] = _audio_u32(bytes, body + 4)
+			out["bits"] = _audio_u16(bytes, body + 14)
+			has_fmt = true
+		elif chunk == "data":
+			var peak := 0
+			var samples := size / 2
+			for i in samples:
+				var raw := _audio_u16(bytes, body + i * 2)
+				if raw > 32767:
+					raw -= 65536
+				var magnitude := absi(raw)
+				if magnitude > peak:
+					peak = magnitude
+			out["frames"] = samples
+			out["peak"] = peak
+			has_data = true
+		# Chunks are word-aligned, so an odd-sized one is followed by a pad byte.
+		pos = body + size + (size % 2)
+	out["ok"] = has_fmt and has_data
+	return out
+
+
+func _audio_tag(bytes: PackedByteArray, offset: int) -> String:
+	if offset + 4 > bytes.size():
+		return ""
+	return bytes.slice(offset, offset + 4).get_string_from_ascii()
+
+
+## Little-endian reads done by hand: WAV is little-endian by definition, and
+## spelling the byte order out keeps the parser honest on any host.
+func _audio_u16(bytes: PackedByteArray, offset: int) -> int:
+	return int(bytes[offset]) | (int(bytes[offset + 1]) << 8)
+
+
+func _audio_u32(bytes: PackedByteArray, offset: int) -> int:
+	return int(bytes[offset]) | (int(bytes[offset + 1]) << 8) \
+		| (int(bytes[offset + 2]) << 16) | (int(bytes[offset + 3]) << 24)

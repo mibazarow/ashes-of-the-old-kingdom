@@ -25,6 +25,7 @@ QuestManager="*res://scripts/quests/quest_manager.gd"
 SaveManager="*res://scripts/save/save_manager.gd"
 InputBindings="*res://scripts/core/input_bindings.gd"
 HitStop="*res://scripts/core/hit_stop.gd"
+AudioManager="*res://scripts/core/audio_manager.gd"
 
 [display]
 
@@ -152,6 +153,10 @@ character={
 [physics]
 
 2d/default_gravity=0.0
+
+[audio]
+
+buses/default_bus_layout="res://audio_bus_layout.tres"
 
 [rendering]
 

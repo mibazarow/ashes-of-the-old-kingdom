@@ -30,3 +30,10 @@ signal dialogue_requested(lines: Array)
 signal dialogue_closed()
 signal game_paused(is_paused: bool)
 signal save_loaded(player_position: Vector2)
+
+## Sound request for anything no existing signal describes (loot picked up, a
+## skill cast). `AudioManager` is the only listener, so an emitter never has to
+## know whether audio exists, and a system that already has its own signal
+## (damage, deaths) does not route through here. Emitters pass the bus ("SFX"
+## for world sounds, "UI" for menu sounds); signal parameters take no default.
+signal sfx_requested(name: String, bus: String)

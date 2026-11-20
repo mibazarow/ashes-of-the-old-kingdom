@@ -23,4 +23,8 @@ func _on_body_entered(body: Node) -> void:
 	if gold > 0:
 		GameState.add_gold(gold)
 	EventBus.toast.emit("+ %s" % ItemDB.display_name(item_id) if item_id != "" else "+%d золота" % gold)
+	# No existing signal describes "loot left the ground" (`item_picked` also
+	# fires for shop and craft results, where no sound is wanted), so the pickup
+	# asks for its own cue and stays ignorant of whether anything listens.
+	EventBus.sfx_requested.emit("pickup", "SFX")
 	queue_free()
