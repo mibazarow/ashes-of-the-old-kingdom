@@ -33,7 +33,7 @@ func save_game(slot: int) -> Dictionary:
 		"schema_version": SCHEMA_VERSION,
 		"saved_at": Time.get_datetime_string_from_system(true),
 		"play_time_ms": GameState.play_time_ms,
-		"zone": "forest",
+		"zone": GameState.zone,
 		"player_position": _player_position(),
 		"game_state": GameState.to_dict(),
 		"quests": QuestManager.to_dict(),
@@ -97,6 +97,14 @@ func load_game(slot: int) -> Dictionary:
 	var payload: Dictionary = migrated["data"]
 	GameState.from_dict(payload.get("game_state", {}))
 	QuestManager.from_dict(payload.get("quests", {}))
+	# The zone lives at the top level because it describes where the player stood,
+	# not what the player owns, and it is applied after `from_dict` so the slot's
+	# own record of the place wins over the copy inside the state block. A save
+	# written before zones existed has no such key and is left on whatever
+	# `from_dict` restored, which for that save is the default zone.
+	var zone_raw: Variant = payload.get("zone", null)
+	if zone_raw is String and String(zone_raw) != "":
+		GameState.set_zone(String(zone_raw))
 	Telemetry.event(&"save_loaded", {"slot": slot, "schema": int(payload.get("schema_version", 0))})
 
 	# Tell the player where the save left them. This is the player's own saved
@@ -108,9 +116,31 @@ func load_game(slot: int) -> Dictionary:
 	return {
 		"ok": true,
 		"slot": slot,
+		"zone": GameState.zone,
 		"player_position": payload.get("player_position", []),
 		"saved_at": payload.get("saved_at", ""),
 	}
+
+
+## The zone a slot says the player stood in, without loading anything. A caller
+## that is about to apply the save reads this first and travels there before the
+## load runs, so the `save_loaded` position lands on a player that already lives
+## in the saved zone instead of on a player the travel is about to free.
+##
+## Returns "" when the slot is missing, unreadable or names no zone: the caller
+## then stays where it is, which is the same place a pre-zone save left the
+## player. Reads the backup too, so a slot that `load_game` would recover
+## reports the zone it is going to restore rather than nothing.
+func slot_zone(slot: int) -> String:
+	if slot < 1 or slot > SLOT_COUNT:
+		return ""
+	var data: Variant = _parse_json(FileAccess.get_file_as_string(slot_path(slot)))
+	if not (data is Dictionary):
+		data = _try_backup(slot)
+	if not (data is Dictionary):
+		return ""
+	var raw: Variant = (data as Dictionary).get("zone", "")
+	return String(raw) if raw is String else ""
 
 
 func _try_backup(slot: int) -> Dictionary:

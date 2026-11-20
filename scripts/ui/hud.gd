@@ -60,6 +60,7 @@ var _mp_label: Label
 var _level_label: Label
 var _gold_label: Label
 var _clock_label: Label
+var _zone_label: Label
 var _quest_label: Label
 var _skill_label: Label
 var _prompt_label: Label
@@ -103,6 +104,11 @@ var _craft_open := false
 var _tab_held: bool = false
 var _day_clock: Node = null
 var _clock_refresh_left := 0.0
+
+## The zone the HUD currently shows and the map panel currently draws. Travel
+## replaces the `World` node outright, so this is refreshed through
+## `rebind_world()` rather than resolved once at `_ready`.
+var _world: Node2D = null
 
 ## Boss bar state (spec §10.4). The boss is found through the `boss` group rather
 ## than a node path or a class reference, exactly like the day clock is found
@@ -180,6 +186,18 @@ func _build_ui() -> void:
 	_xp_bar = _make_bar(Color(0.62, 0.78, 0.32))
 	_xp_bar.custom_minimum_size = Vector2(BAR_W + 20, 3)
 	stats.add_child(_xp_bar)
+
+	# Zone line, the fourth row of the left column, under the experience bar. It
+	# lives here rather than in the right column because that one is only 58 px
+	# wide and would clip a zone name to an ellipsis; the stats column is
+	# BAR_W + 20 px, which fits the longest name in data/zones.json at the 8 px
+	# theme font. The column grows by one row and the expanding middle spacer
+	# below gives the height back, so no existing line shifts sideways or
+	# overlaps another.
+	_zone_label = _make_text("", Color(0.66, 0.80, 0.68))
+	_zone_label.clip_text = true
+	_zone_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	stats.add_child(_zone_label)
 
 	var top_spacer := Control.new()
 	top_spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -319,11 +337,57 @@ func _build_settings_panel() -> void:
 func _build_map_panel() -> void:
 	var parent := get_parent()
 	var world: Node = parent.get_node_or_null("World") if parent != null else null
+	_world = world as Node2D
 	_map_panel = MapPanel.new()
 	_map_panel.name = "MapPanel"
 	_map_panel.setup(world)
 	_map_panel.visible = false
 	_root.add_child(_map_panel)
+
+
+## Travel replaced the `World` node, so every reference the HUD holds to the old
+## zone has to go in the same call — the map panel's world, the day clock it
+## cached from the freed zone, and the zone line. `ZoneManager.travel` calls this
+## right after the new world is in the tree and before it toasts the zone name.
+func rebind_world(world: Node2D) -> void:
+	_world = world
+	if _map_panel != null:
+		_map_panel.set_world(world)
+		_map_panel.refresh()
+	# The day clock is owned by its zone and found through the `day_clock` group,
+	# and the zone it belonged to was freed with it, so the cached node is a freed
+	# instance from here on. Dropping it lets `refresh_clock_line` resolve the new
+	# zone's clock on the next tick instead of holding a dead reference.
+	_day_clock = null
+	refresh_zone_line()
+
+
+## Rebuilds the zone line. The live world is the authority on what the player
+## sees, because it is the thing travel replaces; the zone table is only the
+## fallback for a scene with no world at all, where `GameState.zone` is the last
+## place the run is known to have been.
+func refresh_zone_line() -> void:
+	if _zone_label == null:
+		return
+	var shown := ""
+	if _world != null and is_instance_valid(_world) and _world.has_method("zone_name"):
+		shown = String(_world.call("zone_name"))
+	if shown == "":
+		shown = ZoneManager.zone_display_name(String(GameState.zone))
+	_zone_label.text = "Зона: %s" % shown
+
+
+## Read-only view of the zone line, so a test or a screenshot probe can read what
+## the player sees without reaching into the HUD's private node tree — the same
+## contract `clock_line_text` gives.
+func zone_line_text() -> String:
+	return _zone_label.text if _zone_label != null else ""
+
+
+## The world the map panel is bound to right now, so a test can prove a travel
+## rebound it rather than trusting the toast that says so.
+func map_bound_world() -> Node:
+	return _map_panel.bound_world() if _map_panel != null else null
 
 
 ## The boss bar is its own centred row in the top column, between the stat row and
@@ -593,6 +657,7 @@ func _refresh_all() -> void:
 	_refresh_inventory()
 	_refresh_quest()
 	_refresh_skill()
+	refresh_zone_line()
 
 
 func _on_health(current: int, maximum: int) -> void:
@@ -1456,6 +1521,17 @@ func _process(_delta: float) -> void:
 		EventBus.toast.emit("Сохранено" if bool(res.get("ok", false)) else "Ошибка сохранения")
 		return
 	if InputSource.is_action_just_pressed(&"load_game"):
+		# Travel first, load second. `load_game` hands the saved position to the
+		# player standing in the tree at that moment, and travelling afterwards
+		# would free that player along with the zone it lives in, dropping the run
+		# on the new zone's entry tile instead of where the save left the player.
+		# Going the other way round, the position lands on a player that already
+		# belongs to the saved zone. `travel` refuses the zone already stood in, so
+		# a same-zone load costs nothing.
+		var saved_zone := SaveManager.slot_zone(1)
+		var zone_manager := get_tree().get_first_node_in_group(ZoneManager.GROUP)
+		if saved_zone != "" and zone_manager != null and zone_manager.has_method("travel"):
+			zone_manager.call("travel", saved_zone)
 		var res2: Dictionary = SaveManager.load_game(1)
 		EventBus.toast.emit("Загружено" if bool(res2.get("ok", false)) else "Слот пуст")
 		_refresh_all()

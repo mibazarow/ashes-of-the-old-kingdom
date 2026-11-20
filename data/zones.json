@@ -1,0 +1,14 @@
+{
+	"zones": {
+		"forest": {
+			"name": "Лесной край",
+			"script": "res://scripts/world/forest.gd",
+			"entry_tile": [4, 9]
+		},
+		"ruins": {
+			"name": "Руины у опушки",
+			"script": "res://scripts/world/ruins.gd",
+			"entry_tile": [3, 8]
+		}
+	}
+}

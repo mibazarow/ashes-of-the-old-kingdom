@@ -61,6 +61,15 @@ const MAGIC_MULTIPLIER_CAP := 2.5
 
 const PROGRESSION_PATH := "res://data/progression.json"
 
+## Where the player is standing. The id is one of the keys of `data/zones.json`,
+## and `forest` is both the starting value and the fallback for a save that names
+## nothing usable, so a corrupt or pre-zone save can never leave the run without
+## a zone to load into.
+const ZONES_PATH := "res://data/zones.json"
+const DEFAULT_ZONE := "forest"
+
+var zone: String = DEFAULT_ZONE
+
 var level: int = 1
 var xp: int = 0
 var xp_to_next: int = 100
@@ -86,6 +95,13 @@ var _control_resistance: float = 0.0
 
 var _progression_data: Dictionary = {}
 var _progression_loaded: bool = false
+
+## The zone ids read from `data/zones.json`, cached on first use. Held here as a
+## plain list rather than reached through `ZoneManager` on purpose: the manager is
+## a scene node that reads this very autoload, and pointing the other way too
+## would close a compile-time cycle between the two scripts.
+var _zone_ids: Array[String] = []
+var _zones_loaded := false
 
 var inventory: Array[Dictionary] = []
 
@@ -158,6 +174,7 @@ func reset() -> void:
 	kills = {}
 	play_time_ms = 0
 	dialogue_read = []
+	zone = DEFAULT_ZONE
 	recompute_derived()
 	hp = max_hp
 	mana = max_mana
@@ -767,6 +784,59 @@ func learn_skill(skill_id: String) -> bool:
 	return true
 
 
+# --- zone ---------------------------------------------------------------------
+
+## Records which zone the player stands in. Only an id declared in
+## `data/zones.json` is accepted: an unknown one is refused and changes nothing,
+## so a typo in a save or a call from a stale exit can never leave the run
+## pointing at a zone that has no script, no name and no way back.
+func set_zone(zone_id: String) -> bool:
+	if not _zone_ids_known().has(zone_id):
+		return false
+	zone = zone_id
+	return true
+
+
+## Whether `zone_id` names a declared zone.
+func has_zone(zone_id: String) -> bool:
+	return _zone_ids_known().has(zone_id)
+
+
+## The ids of `data/zones.json`, loaded once and cached. Read defensively: a
+## missing file, unparseable JSON or a `zones` block that is not an object each
+## leave the list empty rather than throwing, and the empty list simply refuses
+## every zone — which is the same outcome as the default zone, not a crash.
+func _zone_ids_known() -> Array[String]:
+	if _zones_loaded:
+		return _zone_ids
+	_zones_loaded = true
+	_zone_ids = []
+	if not FileAccess.file_exists(ZONES_PATH):
+		push_error("GameState: missing %s" % ZONES_PATH)
+		return _zone_ids
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(ZONES_PATH))
+	if not (parsed is Dictionary):
+		push_error("GameState: cannot parse %s" % ZONES_PATH)
+		return _zone_ids
+	var zones: Variant = (parsed as Dictionary).get("zones", {})
+	if not (zones is Dictionary):
+		push_error("GameState: %s has no 'zones' object" % ZONES_PATH)
+		return _zone_ids
+	for raw_id: Variant in (zones as Dictionary):
+		if raw_id is String and String(raw_id) != "" and not _zone_ids.has(String(raw_id)):
+			_zone_ids.append(String(raw_id))
+	return _zone_ids
+
+
+## A save written before zones existed has no `zone` key, and a hand-edited one
+## may name a zone the table no longer declares, so anything unusable restores
+## the default rather than failing the load.
+func _restore_zone(raw: Variant) -> String:
+	if raw is String and _zone_ids_known().has(String(raw)):
+		return String(raw)
+	return DEFAULT_ZONE
+
+
 # --- flags / counters ---------------------------------------------------------
 
 func set_flag(key: String, value: Variant = true) -> void:
@@ -841,6 +911,7 @@ func to_dict() -> Dictionary:
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
 		"dialogue_read": dialogue_read.duplicate(),
+		"zone": zone,
 	}
 
 
@@ -875,6 +946,7 @@ func from_dict(d: Dictionary) -> void:
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
 	dialogue_read = _restore_dialogue_read(d.get("dialogue_read", null))
+	zone = _restore_zone(d.get("zone", null))
 	recompute_derived()
 	_emit_all()
 

@@ -16,6 +16,7 @@ const COLOR_NPC := Color(0.95, 0.80, 0.35)
 const COLOR_CHEST := Color(0.98, 0.84, 0.30)
 const COLOR_TRAP := Color(0.85, 0.25, 0.22)
 const COLOR_SHORTCUT := Color(0.72, 0.62, 0.45)
+const COLOR_GATE := Color(0.55, 0.46, 0.86)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -46,6 +47,32 @@ func _ready() -> void:
 	if _title != null:
 		_title.reset_size()
 		_title.position = Vector2(0, -_title.size.y - 1)
+
+
+## Re-points the panel at a different world without rebuilding it. Travel frees
+## the zone this panel was drawn from, so the stale reference has to go in the
+## same frame the new world appears — otherwise the next map open draws the
+## explored set of a freed node, or nothing at all.
+##
+## Separate from `setup()` because that one builds the title label: calling it
+## again would add a second title on top of the first. Everything the panel reads
+## from the world goes through the method calls in `_draw`, so swapping the
+## reference and resizing is the whole rebind.
+func set_world(world: Node) -> void:
+	_world = world
+	_size_tiles = Vector2i(0, 0)
+	if _world != null and _world.has_method("map_size"):
+		_size_tiles = _world.call("map_size")
+	custom_minimum_size = Vector2(_size_tiles.x * PX, _size_tiles.y * PX)
+	size = custom_minimum_size
+	_center()
+	queue_redraw()
+
+
+## The world this panel currently draws, for a test or a screenshot probe that has
+## to prove the rebind happened rather than trust that it did.
+func bound_world() -> Node:
+	return _world
 
 
 func _center() -> void:
@@ -105,6 +132,10 @@ func _draw() -> void:
 				# is broken, so this marker only ever marks ground still to dig.
 				"shortcut":
 					color = COLOR_SHORTCUT
+				# A zone exit. Drawn like any other landmark so the way out is
+				# findable on the map once the player has walked near it.
+				"gate":
+					color = COLOR_GATE
 				_:
 					continue
 			_draw_marker(tile, color)

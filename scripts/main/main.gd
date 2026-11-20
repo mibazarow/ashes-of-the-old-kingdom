@@ -1,17 +1,42 @@
 extends Node2D
-## Entry point: wires the world, HUD and optional debug bot.
+## Entry point: wires the world, HUD, zone manager and optional debug bot.
 
-@onready var world: Node2D = $World
+## Resolved from the tree on every read rather than cached in `_ready`: travel
+## replaces the `World` node outright, so a reference taken once would keep
+## pointing at the zone the player left.
+var world: Node2D:
+	get:
+		return get_node_or_null("World") as Node2D
+
 @onready var hud: CanvasLayer = $HUD
 @onready var bot: Node = $Bot
 
 
 func _ready() -> void:
+	_ensure_zone_manager()
 	Telemetry.event(&"scene_ready", {"scene": "main"})
 	Telemetry.write_run_meta({"main_scene": "main"})
 	_apply_pending_load()
 	bot.call("start_from_cmdline")
 	_maybe_capture_screenshot()
+
+
+## The zone manager is a plain child node rather than an autoload: it owns the
+## `World` node, so it belongs to the scene that holds the world. Built here
+## instead of edited into main.tscn, and only when one is not already there, so a
+## scene that ships its own `ZoneManager` keeps it.
+##
+## It is appended after `Bot`, and travel moves the new world onto the HUD's
+## index, so the child order stays World, HUD, Bot, ZoneManager: the CanvasLayer
+## keeps drawing over the world no matter how many times the zone changes.
+func _ensure_zone_manager() -> ZoneManager:
+	var existing := get_node_or_null("ZoneManager") as ZoneManager
+	if existing != null:
+		return existing
+	var manager := ZoneManager.new()
+	manager.name = "ZoneManager"
+	add_child(manager)
+	return manager
 
 
 ## Debug aid: PEPEL_SCREENSHOT=<path> renders a few frames, saves a PNG and quits.
@@ -81,6 +106,13 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_craft_for_shot")
+	elif ui_probe == "ruins":
+		# The second zone, reached the way a player reaches it: through the zone
+		# manager rather than by editing the scene. The capture then shows both the
+		# ruins themselves and the zone line following the travel.
+		var manager := get_node_or_null("ZoneManager")
+		if manager != null:
+			manager.call("travel", "ruins")
 	for i in range(20):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
@@ -94,9 +126,20 @@ func _apply_pending_load() -> void:
 	var slot: int = int(OS.get_environment("PEPEL_LOAD_SLOT"))
 	if slot <= 0:
 		return
+	# Travel before the load, never after. `load_game` hands the saved position to
+	# whichever player is in the tree at that moment, so travelling afterwards
+	# would free that player along with the zone it lives in and leave the run on
+	# the new zone's entry tile instead of the spot the save recorded. Travelling
+	# first puts the player in the zone the position was measured in, and the
+	# position lands on them exactly. `travel` refuses the zone already stood in,
+	# so a same-zone load — every load written before zones existed — costs
+	# nothing and changes nothing.
+	var saved_zone := SaveManager.slot_zone(slot)
+	if saved_zone != "":
+		_ensure_zone_manager().call("travel", saved_zone)
 	var res: Dictionary = SaveManager.load_game(slot)
 	if bool(res.get("ok", false)):
-		Telemetry.event(&"load_on_start", {"slot": slot})
+		Telemetry.event(&"load_on_start", {"slot": slot, "zone": String(GameState.zone)})
 
 
 func _unhandled_input(event: InputEvent) -> void:

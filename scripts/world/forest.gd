@@ -33,6 +33,7 @@ var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
 var _rubble_node: Node2D
+var _ruins_gate_node: Node2D
 
 ## Fixed anchor for the spear chest, on the south-west side away from the sword
 ## chest in the east clearing. The exact tile is derived from the generated grid
@@ -133,6 +134,15 @@ const PICKUP_HERB_ANCHOR := Vector2i(46, 13)
 const PICKUP_COIN_ANCHOR := Vector2i(9, 26)
 const PICKUP_FLASK_TILE := Vector2i(20, 30)
 
+## The gate to the second zone, at the eastern end of the dirt road. The road is
+## painted for x in 2..MAP_W-3 and drifts one tile per column, so with this seed
+## its last tile is (MAP_W-3, 13) — the easternmost `,` on the map, two columns
+## short of the border wall. The tile is checked for walkability by a radius-0
+## scan rather than snapped by a wide one, because a scan free to move the gate
+## would quietly relocate the only way out; if the road ever stops being walkable
+## there, the spawn falls back to the anchor and the zone test notices.
+const RUINS_GATE_TILE := Vector2i(MAP_W - 3, 13)
+
 
 func zone_id() -> String:
 	return "forest"
@@ -178,6 +188,11 @@ func landmarks() -> Array[Dictionary]:
 		# first landmark that ever frees itself, so every map open after it broke
 		# used to log one.
 		["Rubble", "shortcut", _rubble_node],
+		# The way out to the second zone. A gate is a landmark like any other so
+		# the player can find the road's end on the map, and it is a live node
+		# reference like the rest, so it drops out of the list the moment the
+		# world that owns it goes away.
+		["RuinsGate", "gate", _ruins_gate_node],
 	]:
 		if not is_instance_valid(entry[2]):
 			continue
@@ -376,6 +391,27 @@ func _spawn_actors() -> void:
 		"health_potion", 1, 0)
 
 	_spawn_rubble()
+	_spawn_ruins_gate()
+
+
+## The gate to `ruins`, at the eastern end of the road.
+##
+## It is appended after every other interactable in the zone — Edrik, Yorek,
+## Bran, Mila, both chests, the trap and the rubble — for the same reason each
+## villager joined after the one before: the debug bot walks the FIRST node of the
+## `interactable` group, so Edrik has to stay first or the quest bots would open a
+## gate instead of the dialogue. The gate is also 42 tiles from Edrik, far outside
+## the 26 px interact radius, and `ZoneExit` owns no overlap handler at all, so no
+## bot route can reach it and nothing can travel by walking over it.
+func _spawn_ruins_gate() -> void:
+	var tile := _find_walkable_near(RUINS_GATE_TILE, 0)
+	var gate := ZoneExit.new()
+	gate.name = "RuinsGate"
+	gate.target_zone = "ruins"
+	gate.prompt = "Войти в руины"
+	gate.position = _tile_center(tile.x, tile.y)
+	add_child(gate)
+	_ruins_gate_node = gate
 
 
 ## Places one `Pickup` on a tile this function is handed, with its payload set

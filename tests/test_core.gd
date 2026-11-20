@@ -302,12 +302,18 @@ func _run() -> void:
 	print("== settings sound ==")
 	await _test_settings_sound()
 
+	print("== zones ==")
+	await _test_zone_registry()
+	await _test_zone_state()
+	await _test_zone_travel()
+	await _test_zone_save_restore()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 47, "every test group ran to completion (got %d/47)" % completed.size())
+	_check(completed.size() == 51, "every test group ran to completion (got %d/51)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -7074,3 +7080,395 @@ func _test_settings_sound() -> void:
 func _reset_buses_to_engine_default(am: Node) -> void:
 	for bus in ["Music", "SFX", "UI"]:
 		am.call("set_volume", bus, 1.0)
+
+
+# --- zones -------------------------------------------------------------------
+
+## The zone table: two declared zones, each naming a script that exists and an
+## entry tile inside it. Everything else about travel resolves through these
+## rows, so a typo here is the one mistake that cannot be recovered from code.
+func _test_zone_registry() -> void:
+	var text := FileAccess.get_file_as_string("res://data/zones.json")
+	_check(text != "", "data/zones.json is readable")
+	var parsed: Variant = JSON.parse_string(text)
+	_check(parsed is Dictionary, "data/zones.json parses as a JSON object")
+	if not (parsed is Dictionary):
+		completed["zone_registry"] = true
+		return
+	var zones: Variant = (parsed as Dictionary).get("zones", {})
+	_check(zones is Dictionary, "data/zones.json has a 'zones' object")
+	if not (zones is Dictionary):
+		completed["zone_registry"] = true
+		return
+	var table: Dictionary = zones as Dictionary
+	_check(table.size() == 2, "data/zones.json declares 2 zones (got %d)" % table.size())
+	_check(table.has("forest") and table.has("ruins"),
+		"the table declares both forest and ruins (got %s)" % str(table.keys()))
+
+	var expected := {
+		"forest": {"name": "Лесной край", "script": "res://scripts/world/forest.gd", "entry": Vector2i(4, 9)},
+		"ruins": {"name": "Руины у опушки", "script": "res://scripts/world/ruins.gd", "entry": Vector2i(3, 8)},
+	}
+	for zone_id: String in expected:
+		var def: Variant = table.get(zone_id, {})
+		if not (def is Dictionary):
+			_check(false, "zone '%s' is an object" % zone_id)
+			continue
+		var block: Dictionary = def as Dictionary
+		var want: Dictionary = expected[zone_id]
+		_check(String(block.get("name", "")) == String(want["name"]),
+			"zone '%s' is named '%s' (got '%s')" % [zone_id, String(want["name"]), String(block.get("name", ""))])
+		var script_path := String(block.get("script", ""))
+		_check(script_path == String(want["script"]),
+			"zone '%s' names %s (got '%s')" % [zone_id, String(want["script"]), script_path])
+		_check(FileAccess.file_exists(script_path),
+			"zone '%s' names a script that exists (%s)" % [zone_id, script_path])
+		var entry: Variant = block.get("entry_tile", [])
+		var usable := entry is Array and (entry as Array).size() == 2
+		for value: Variant in (entry as Array if entry is Array else []):
+			if not (value is int or value is float):
+				usable = false
+		_check(usable, "zone '%s' declares a two-number entry_tile" % zone_id)
+		if usable:
+			var arr: Array = entry as Array
+			_check(Vector2i(int(arr[0]), int(arr[1])) == Vector2i(want["entry"]),
+				"zone '%s' entry_tile is %s (got %s)" % [
+					zone_id, str(want["entry"]), str(Vector2i(int(arr[0]), int(arr[1])))])
+
+	# The manager and the state each read this table on their own; both have to
+	# agree with it, or a zone the save accepts would be one travel refuses.
+	var manager_script := load("res://scripts/world/zone_manager.gd") as GDScript
+	_check(manager_script != null, "scripts/world/zone_manager.gd loads")
+	if manager_script != null:
+		var manager_class := manager_script as GDScript
+		_check(bool(manager_class.call("has_zone", "forest")),
+			"ZoneManager knows the forest from the table")
+		_check(bool(manager_class.call("has_zone", "ruins")),
+			"ZoneManager knows the ruins from the table")
+		_check(not bool(manager_class.call("has_zone", "atlantis")),
+			"ZoneManager refuses a zone the table does not declare")
+		_check(Vector2i(manager_class.call("entry_tile", "ruins")) == Vector2i(3, 8),
+			"ZoneManager reads the ruins entry tile from the table")
+		_check(String(manager_class.call("zone_display_name", "ruins")) == "Руины у опушки",
+			"ZoneManager reads the ruins display name from the table")
+	completed["zone_registry"] = true
+
+
+## `GameState.zone` is real state: it validates against the table, survives a
+## round trip, and falls back to the forest for a save that names nothing usable.
+func _test_zone_state() -> void:
+	gs.reset()
+	_check(String(gs.zone) == "forest", "GameState.zone starts in the forest")
+	_check(gs.set_zone("ruins"), "set_zone accepts a declared zone")
+	_check(String(gs.zone) == "ruins", "the accepted zone is recorded")
+	_check(not gs.set_zone("atlantis"), "set_zone refuses an undeclared zone")
+	_check(String(gs.zone) == "ruins", "a refused set_zone leaves the value untouched")
+	_check(not gs.set_zone(""), "set_zone refuses an empty zone id")
+	_check(String(gs.zone) == "ruins", "the empty id changed nothing")
+
+	var payload: Dictionary = gs.to_dict()
+	_check(String(payload.get("zone", "")) == "ruins", "to_dict carries the zone")
+	gs.reset()
+	_check(String(gs.zone) == "forest", "reset returns the run to the forest")
+
+	gs.from_dict({"zone": "ruins"})
+	_check(String(gs.zone) == "ruins", "from_dict restores the zone")
+	gs.reset()
+	gs.from_dict({"zone": "atlantis"})
+	_check(String(gs.zone) == "forest", "an undeclared zone in a save falls back to the forest")
+	gs.from_dict({"zone": 7})
+	_check(String(gs.zone) == "forest", "a non-string zone in a save falls back to the forest")
+	gs.from_dict({})
+	_check(String(gs.zone) == "forest", "a save written without the zone key restores the forest")
+
+	# A real slot, written and read back through SaveManager rather than through
+	# the dictionary helpers, because the zone is also recorded at the top level
+	# of the payload — that is the copy the restore path reads.
+	_clear_slot(2)
+	gs.reset()
+	gs.set_zone("ruins")
+	var saved: Dictionary = sm.save_game(2)
+	_check(bool(saved.get("ok", false)), "save slot 2 ok with the ruins zone")
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string(String(sm.slot_path(2))))
+	_check(raw is Dictionary and String((raw as Dictionary).get("zone", "")) == "ruins",
+		"the save writes the live zone, not a hardcoded forest")
+	gs.reset()
+	_check(String(gs.zone) == "forest", "state reset before the zone load")
+	var loaded: Dictionary = sm.load_game(2)
+	_check(bool(loaded.get("ok", false)), "load slot 2 ok")
+	_check(String(gs.zone) == "ruins", "the load restores the saved zone")
+	_check(String(loaded.get("zone", "")) == "ruins", "the load reports the zone it restored")
+	_check(String(sm.call("slot_zone", 2)) == "ruins", "slot_zone reads the zone without loading")
+
+	# A slot with no zone at all — a save from before zones existed — must restore
+	# the forest rather than leave whatever the previous run was standing in.
+	_clear_slot(2)
+	var legacy := {
+		"schema_version": 1,
+		"saved_at": "2026-01-01T00:00:00",
+		"play_time_ms": 0,
+		"player_position": [],
+		"game_state": {"level": 1},
+		"quests": {},
+	}
+	var f := FileAccess.open(String(sm.slot_path(2)), FileAccess.WRITE)
+	_check(f != null, "legacy slot fixture opens for writing")
+	if f != null:
+		f.store_string(JSON.stringify(legacy))
+		f.close()
+		gs.set_zone("ruins")
+		var legacy_load: Dictionary = sm.load_game(2)
+		_check(bool(legacy_load.get("ok", false)), "a pre-zone save still loads")
+		_check(String(gs.zone) == "forest", "a pre-zone save restores the forest")
+		_check(String(sm.call("slot_zone", 2)) == "", "slot_zone reports nothing for a zone-less slot")
+	_check(String(sm.call("slot_zone", 99)) == "", "slot_zone refuses an out-of-range slot")
+	_clear_slot(2)
+	gs.reset()
+	completed["zone_state"] = true
+
+
+## The travel itself, on a live main scene: the world node is replaced, the state
+## follows, the map rebinds, the player is the new zone's own, and the bot is
+## left alone. Ends back in the forest so no later group sees a foreign world.
+func _test_zone_travel() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	_check(manager != null, "Main owns a ZoneManager")
+	_check(manager != null and manager.is_in_group("zone_manager"),
+		"the ZoneManager is reachable through its group")
+	var forest := scene.get_node_or_null("World")
+	_check(forest != null and String(forest.call("zone_id")) == "forest",
+		"the run starts in the forest")
+	var hud := scene.get_node_or_null("HUD")
+	_check(hud != null, "the HUD is present for the travel test")
+	if manager == null or forest == null or hud == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		completed["zone_travel"] = true
+		return
+
+	# --- the gate, and who is first in the interactable group ------------------
+	var gate := forest.get_node_or_null("RuinsGate")
+	_check(gate != null, "the forest places a RuinsGate")
+	_check(gate != null and String(gate.get("target_zone")) == "ruins",
+		"the gate leads to the ruins")
+	_check(gate != null and gate.is_in_group("interactable"), "the gate is an interactable")
+	_check(gate != null and String(gate.call("prompt_text")) != "",
+		"the gate shows a prompt rather than an empty line")
+	var gate_tile := Vector2i(
+		floori((gate as Node2D).global_position.x / 16.0),
+		floori((gate as Node2D).global_position.y / 16.0))
+	_check(gate_tile.x >= 45, "the gate sits at the far east edge (tile %s)" % str(gate_tile))
+	_check(String(forest.call("cell_at", gate_tile)) in [".", ","],
+		"the gate stands on a walkable tile ('%s' at %s)" % [String(forest.call("cell_at", gate_tile)), str(gate_tile)])
+
+	var interactables := get_nodes_in_group("interactable")
+	_check(not interactables.is_empty(), "the forest has interactables")
+	_check(String(interactables[0].name) == "Edrik",
+		"Edrik is still the first interactable after the gate was added (got %s)" % str(interactables[0].name))
+	_check(interactables.find(gate) > 0,
+		"the gate is not the first interactable (index %d)" % interactables.find(gate))
+	var edrik := forest.get_node_or_null("Edrik") as Node2D
+	_check(edrik != null
+			and edrik.global_position.distance_to((gate as Node2D).global_position) > 26.0,
+		"the gate is outside the interact radius of Edrik, so no bot route reaches it")
+	# The gate owns no handler that could fire on its own: no incoming signal
+	# connection means the only way through it is the interact key the player
+	# presses, so a bot walking its route can never leave the map by accident.
+	_check(gate != null and gate.get_incoming_connections().is_empty(),
+		"the gate has no overlap handler: nothing travels by walking onto it")
+
+	# --- the zone line before travel ------------------------------------------
+	hud.call("refresh_zone_line")
+	_check(String(hud.call("zone_line_text")) == "Зона: Лесной край",
+		"the HUD names the forest in the zone line (got '%s')" % String(hud.call("zone_line_text")))
+	_check(hud.call("map_bound_world") == forest, "the map panel starts bound to the forest")
+
+	# --- forest -> ruins -------------------------------------------------------
+	bus.toast.connect(_count_toast)
+	_toast_count = 0
+	_check(bool(manager.call("travel", "ruins")), "travel forest -> ruins succeeds")
+	await process_frame
+	await process_frame
+	_check(_toast_count == 1, "the travel announced itself with exactly one toast (got %d)" % _toast_count)
+
+	var ruins := scene.get_node_or_null("World")
+	_check(ruins != null, "travel left a World node behind")
+	_check(ruins != null and ruins != forest, "travel rebuilt the World node rather than reusing it")
+	_check(ruins != null and String(ruins.call("zone_id")) == "ruins",
+		"the live world is now the ruins")
+	_check(ruins != null and ruins.get_script() == load("res://scripts/world/ruins.gd"),
+		"the new World runs scripts/world/ruins.gd")
+	_check(String(gs.zone) == "ruins", "GameState.zone followed the travel")
+	_check(not is_instance_valid(forest), "the old zone was freed, not parked")
+
+	var ruins_player := ruins.get_node_or_null("Player") as Node2D
+	_check(ruins_player != null, "the new zone spawned its own Player")
+	_check(ruins_player != null and ruins_player.is_in_group("player"),
+		"the new player is in the player group")
+	_check(get_nodes_in_group("player").size() == 1,
+		"exactly one player is in the tree after travel (got %d)" % get_nodes_in_group("player").size())
+	_check(ruins_player != null
+			and Vector2i(floori(ruins_player.global_position.x / 16.0), floori(ruins_player.global_position.y / 16.0))
+				== Vector2i(3, 8),
+		"the new player stands on the ruins entry tile")
+
+	# Sibling order: the world has to stay where the old one was, ahead of the HUD.
+	var world_index: int = ruins.get_index()
+	var hud_index: int = hud.get_index()
+	_check(world_index >= 0 and hud_index >= 0 and world_index < hud_index,
+		"World sits before HUD among Main's children (%d < %d)" % [world_index, hud_index])
+	_check(String(scene.get_child(world_index).name) == "World",
+		"the node at that position is named World")
+
+	# --- the map rebinds -------------------------------------------------------
+	var bound: Node = hud.call("map_bound_world")
+	_check(bound == ruins, "the map panel rebound to the new zone")
+	_check(bound != null and Vector2i(bound.call("map_size")) == Vector2i(40, 26),
+		"the rebound map reports the ruins size (got %s)"
+			% str(Vector2i(bound.call("map_size")) if bound != null else Vector2i.ZERO))
+	hud.call("refresh_zone_line")
+	_check(String(hud.call("zone_line_text")) == "Зона: Руины у опушки",
+		"the zone line follows the travel (got '%s')" % String(hud.call("zone_line_text")))
+
+	# --- the ruins are a real, deterministic, empty-but-playable zone ----------
+	_check(String(ruins.call("cell_at", Vector2i(0, 0))) == "#", "the ruins have a border wall")
+	_check(String(ruins.call("cell_at", Vector2i(3, 8))) in [".", ","],
+		"the ruins entry tile is walkable")
+	_check(ruins.get_node_or_null("ForestGate") != null, "the ruins place a gate back to the forest")
+	_check(ruins.get_node_or_null("ForestGate") != null
+			and String((ruins.get_node_or_null("ForestGate") as Node).get("target_zone")) == "forest",
+		"the ruins gate leads back to the forest")
+	_check(get_nodes_in_group("enemy").is_empty(), "the ruins spawn no enemies yet")
+	var ruins_lms: Array = ruins.call("landmarks")
+	_check(ruins_lms.size() == 1, "the ruins list exactly one landmark (got %d)" % ruins_lms.size())
+	var gate_lm_found := false
+	for lm: Dictionary in ruins_lms:
+		if String(lm.get("id", "")) == "ForestGate" and String(lm.get("kind", "")) == "gate":
+			gate_lm_found = true
+	_check(gate_lm_found, "the ruins landmark is the gate, of kind 'gate'")
+	_check(not bool(ruins.call("is_in_safe_zone", Vector2i(3, 8))),
+		"the ruins declare no safe zone")
+
+	# The bot survives a travel untouched and never starts a scenario of its own,
+	# which is the whole reason travel only ever replaces the World node.
+	var bot_node := scene.get_node_or_null("Bot")
+	_check(bot_node != null, "the Bot node survives travel")
+	_check(bot_node != null and String(bot_node.get("scenario")) == "",
+		"travel did not start a bot scenario")
+	_check(bot_node != null and not bool(bot_node.get("_running")),
+		"the bot is not running, so it cannot have travelled")
+
+	# --- refusals --------------------------------------------------------------
+	_toast_count = 0
+	_check(not bool(manager.call("travel", "ruins")), "travelling to the current zone is refused")
+	_check(not bool(manager.call("travel", "atlantis")), "travelling to an undeclared zone is refused")
+	_check(not bool(manager.call("travel", "")), "travelling to an empty zone id is refused")
+	_check(_toast_count == 0, "a refused travel announces nothing (got %d toasts)" % _toast_count)
+	_check(scene.get_node_or_null("World") == ruins, "a refused travel left the world standing")
+	_check(String(gs.zone) == "ruins", "a refused travel left GameState.zone alone")
+
+	# --- ruins -> forest -------------------------------------------------------
+	_check(bool(manager.call("travel", "forest")), "travel ruins -> forest succeeds")
+	await process_frame
+	await process_frame
+	var back := scene.get_node_or_null("World")
+	_check(back != null and String(back.call("zone_id")) == "forest",
+		"the way back rebuilds the forest")
+	_check(back != null and back.get_node_or_null("Player") != null,
+		"the forest respawned its player")
+	_check(String(gs.zone) == "forest", "GameState.zone came back with the player")
+	_check(hud.call("map_bound_world") == back, "the map panel rebound back to the forest")
+	_check(not get_nodes_in_group("enemy").is_empty(), "the forest respawned its enemies")
+	var back_interactables := get_nodes_in_group("interactable")
+	_check(not back_interactables.is_empty() and String(back_interactables[0].name) == "Edrik",
+		"Edrik is still the first interactable after a round trip")
+	_check(back != null and back.get_node_or_null("RuinsGate") != null,
+		"the rebuilt forest has its gate again")
+	bus.toast.disconnect(_count_toast)
+
+	# A loaded save must not be re-applied by travel, and travel must not re-run
+	# the load: the state the player carries is GameState's, and it survived.
+	gs.add_gold(40)
+	_check(bool(manager.call("travel", "ruins")), "travel works again after coming back")
+	_check(gs.gold == 40, "travel carried the gold over instead of reloading the run")
+	_check(bool(manager.call("travel", "forest")), "and back to the forest again")
+	await process_frame
+
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
+	completed["zone_travel"] = true
+
+
+## The restore order main.gd commits to: travel to the zone the slot names, and
+## only then apply the load, so the saved position lands on a player that already
+## lives in the saved zone. Driven through a real start-of-run load, which is the
+## path a player actually takes.
+func _test_zone_save_restore() -> void:
+	gs.reset()
+	_clear_slot(2)
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	var saved_pos := Vector2(21 * 16 + 8, 12 * 16 + 8)
+	var wrote_save := false
+	if manager != null and bool(manager.call("travel", "ruins")):
+		await process_frame
+		var ruins := scene.get_node_or_null("World")
+		var player: Node2D = null
+		if ruins != null:
+			player = ruins.get_node_or_null("Player") as Node2D
+		_check(player != null, "the ruins have a player to move before saving")
+		if player != null:
+			player.global_position = saved_pos
+			var saved: Dictionary = sm.save_game(2)
+			_check(bool(saved.get("ok", false)), "save slot 2 ok from inside the ruins")
+			wrote_save = bool(saved.get("ok", false))
+	_check(wrote_save, "the ruins save fixture was written")
+	scene.queue_free()
+	await process_frame
+
+	gs.reset()
+	_check(String(gs.zone) == "forest", "the run is back in the forest before the restore")
+	OS.set_environment("PEPEL_LOAD_SLOT", "2")
+	var restored := packed.instantiate()
+	root.add_child(restored)
+	await process_frame
+	await process_frame
+	OS.set_environment("PEPEL_LOAD_SLOT", "")
+
+	var world := restored.get_node_or_null("World")
+	_check(world != null and String(world.call("zone_id")) == "ruins",
+		"a load on start puts the run in the saved zone (got %s)"
+			% str(String(world.call("zone_id")) if world != null else "<no world>"))
+	_check(String(gs.zone) == "ruins", "GameState.zone matches the zone the load restored")
+	var player2: Node2D = null
+	if world != null:
+		player2 = world.get_node_or_null("Player") as Node2D
+	_check(player2 != null, "the restored zone has a player")
+	if player2 != null:
+		_check(player2.global_position.distance_to(saved_pos) < 0.5,
+			"the saved position landed on the player in the saved zone (got %s, want %s)"
+				% [str(player2.global_position), str(saved_pos)])
+	_check(String(restored.get_node_or_null("ZoneManager").call("current_zone").call("zone_id")) == "ruins",
+		"the manager reports the zone the restore put the run in")
+
+	restored.queue_free()
+	await process_frame
+	_clear_slot(2)
+	gs.reset()
+	_check(String(gs.zone) == "forest", "the group leaves no zone behind")
+	completed["zone_save_restore"] = true
