@@ -128,6 +128,19 @@ var item_upgrades: Dictionary = {}
 var known_skills: Array[String] = ["fire_bolt", "ice_bolt", "shock", "heal_impulse"]
 var selected_skill: String = "fire_bolt"
 
+## Unspent skill points (spec §16.1 "Навыки"). A separate pool from
+## `attribute_points`: learning a skill spends one of these, spending an
+## attribute point never touches it. The player starts with one so the skills
+## screen has something to spend on the first run, and `add_xp` grants
+## `skill_points_per_level()` more on every level alongside the attribute pool.
+var skill_points: int = 1
+
+## Starting skill-point pool and the ceiling a restored save may carry. The
+## ceiling is generous (well past the eight skills that exist) because it only
+## guards against a hand-edited or bugged save, not against legitimate play.
+const STARTING_SKILL_POINTS := 1
+const MAX_SKILL_POINTS := 64
+
 var flags: Dictionary = {}
 var kills: Dictionary = {}
 var play_time_ms: int = 0
@@ -178,6 +191,7 @@ func reset() -> void:
 	quick_slots = _default_quick_slots()
 	known_skills = _default_known_skills()
 	selected_skill = _default_selected_skill()
+	skill_points = STARTING_SKILL_POINTS
 	flags = {}
 	kills = {}
 	play_time_ms = 0
@@ -373,6 +387,7 @@ func _default_progression() -> Dictionary:
 	return {
 		"max_level": 20,
 		"points_per_level": 2,
+		"skill_points_per_level": 1,
 		"xp_curve": [0, 100, 240, 420, 640, 900, 1200, 1540, 1920, 2340, 2800,
 				3300, 3840, 4420, 5040, 5700, 6400, 7140, 7920, 8740, 9600],
 		"crit_base": 0.05,
@@ -397,6 +412,9 @@ func _sanitize_progression(raw: Dictionary) -> Dictionary:
 	var points_raw: Variant = raw.get("points_per_level", null)
 	if (points_raw is int or points_raw is float) and int(points_raw) >= 0:
 		clean["points_per_level"] = int(points_raw)
+	var skill_points_raw: Variant = raw.get("skill_points_per_level", null)
+	if (skill_points_raw is int or skill_points_raw is float) and int(skill_points_raw) >= 0:
+		clean["skill_points_per_level"] = int(skill_points_raw)
 	var curve_raw: Variant = raw.get("xp_curve", null)
 	if curve_raw is Array:
 		var curve: Array = curve_raw as Array
@@ -438,6 +456,12 @@ func points_per_level() -> int:
 	return _int_setting("points_per_level", 2)
 
 
+## Skill points granted per level-up (spec §16.1). Independent of the attribute
+## pool: a level gives both, and neither pool can pay for the other's purchase.
+func skill_points_per_level() -> int:
+	return _int_setting("skill_points_per_level", 1)
+
+
 func xp_curve() -> Array:
 	return _progression().get("xp_curve", []) as Array
 
@@ -462,6 +486,7 @@ func add_xp(amount: int) -> void:
 		xp -= xp_to_next
 		level += 1
 		attribute_points += points_per_level()
+		skill_points += skill_points_per_level()
 		xp_to_next = xp_needed_for(level)
 		leveled = true
 		EventBus.toast.emit("Уровень %d" % level)
@@ -781,13 +806,19 @@ func select_skill(skill_id: String) -> bool:
 	return true
 
 
-## Adds a skill to the known list. Rejects an id that is not in the data and a
-## skill already known (so the call is idempotent and never duplicates).
+## Adds a skill to the known list, spending one skill point (spec §16.1). The
+## checks run in this order so a refusal never spends anything: an id that is not
+## in the data is refused, a skill already known is refused (idempotent, and it
+## must not burn a point on something already owned), and only then an empty pool
+## is refused. A successful learn is the only path that decrements `skill_points`.
 func learn_skill(skill_id: String) -> bool:
 	if not SkillDB.has_skill(skill_id):
 		return false
 	if known_skills.has(skill_id):
 		return false
+	if skill_points <= 0:
+		return false
+	skill_points -= 1
 	known_skills.append(skill_id)
 	return true
 
@@ -915,6 +946,7 @@ func to_dict() -> Dictionary:
 		"quick_slots": quick_slots.duplicate(),
 		"known_skills": known_skills.duplicate(),
 		"selected_skill": selected_skill,
+		"skill_points": skill_points,
 		"flags": flags.duplicate(true),
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
@@ -950,6 +982,7 @@ func from_dict(d: Dictionary) -> void:
 	# unknown ids (a skill removed from the data), so no schema bump is needed.
 	known_skills = _restore_known_skills(d.get("known_skills", null))
 	selected_skill = _restore_selected_skill(d.get("selected_skill", null), known_skills)
+	skill_points = _restore_skill_points(d.get("skill_points", null))
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
@@ -1077,3 +1110,13 @@ func _restore_selected_skill(raw: Variant, known: Array[String]) -> String:
 		if known.has(id):
 			return id
 	return known[0] if not known.is_empty() else _default_selected_skill()
+
+
+## A save written before skill points existed has no `skill_points` key, so it
+## falls back to the starting pool rather than leaving an old player unable to
+## learn anything; a hand-edited negative or absurd number is clamped into range
+## so a save cannot mint points the player never earned.
+func _restore_skill_points(raw: Variant) -> int:
+	if not (raw is int or raw is float):
+		return STARTING_SKILL_POINTS
+	return clampi(int(raw), 0, MAX_SKILL_POINTS)

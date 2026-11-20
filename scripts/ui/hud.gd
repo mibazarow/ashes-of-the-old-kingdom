@@ -107,6 +107,7 @@ var _shop_panel: ShopPanel
 var _shop_manager: ShopManager
 var _craft_panel: CraftPanel
 var _craft_manager: CraftManager
+var _skills_panel: SkillsPanel
 var _toast_tween: Tween
 var _dialogue_open := false
 var _inventory_open := false
@@ -118,6 +119,8 @@ var _settings_just_closed := false
 var _character_open := false
 var _shop_open := false
 var _craft_open := false
+var _skills_open := false
+var _skills_l_held := false
 var _tab_held: bool = false
 var _day_clock: Node = null
 var _clock_refresh_left := 0.0
@@ -315,7 +318,7 @@ func _build_ui() -> void:
 	column.add_child(_skill_label)
 
 	_hint_label = _make_text(
-		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · F5/F9",
+		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · K навыки · F5/F9",
 		Color(0.72, 0.74, 0.7)
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -331,6 +334,7 @@ func _build_ui() -> void:
 	_build_character_panel()
 	_build_shop_panel()
 	_build_craft_panel()
+	_build_skills_panel()
 	_build_defeat_panel()
 	_build_victory_panel()
 
@@ -433,6 +437,16 @@ func _build_craft_panel() -> void:
 	_craft_panel.name = "CraftPanel"
 	_craft_panel.visible = false
 	_root.add_child(_craft_panel)
+
+
+## The skills screen lives in its own script (like CharacterPanel): it owns its
+## layout and centring, and hud.gd only opens, closes and gates it. It reads
+## GameState and SkillDB directly, so the HUD passes it nothing.
+func _build_skills_panel() -> void:
+	_skills_panel = SkillsPanel.new()
+	_skills_panel.name = "SkillsPanel"
+	_skills_panel.visible = false
+	_root.add_child(_skills_panel)
 
 
 ## Rebinding lives in its own script (like MapPanel): it has its own raw-event
@@ -682,6 +696,7 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("F9 — загрузить", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("E — Настройки управления", Color(0.9, 0.9, 0.86)))
 	box.add_child(_make_text("C — Персонаж", Color(0.9, 0.9, 0.86)))
+	box.add_child(_make_text("K — Навыки", Color(0.9, 0.9, 0.86)))
 	# Saves happen on F5, so leaving needs no prompt of its own: the item simply
 	# hands the run back to the menu, and whatever was saved is what «Продолжить»
 	# and «Загрузка» will find there.
@@ -1014,6 +1029,10 @@ func _toggle_character() -> void:
 		# stay open under the character panel.
 		if _craft_open:
 			close_craft()
+		# The skills screen is a sibling modal as well; C switches to the character
+		# panel from it the same way it does from the bench.
+		if _skills_open:
+			_close_skills()
 		# The pause menu advertises "C — Персонаж", so C can arrive while it is
 		# on screen. Hide it, otherwise the two centred panels overlap.
 		if _paused:
@@ -1023,8 +1042,7 @@ func _toggle_character() -> void:
 		if _character_panel != null:
 			_character_panel.visible = true
 			_character_panel.open()
-	GameState.ui_blocking = _character_open or _inventory_open or _dialogue_open \
-			or _journal_open or _paused or _map_open or _settings_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 ## One close path for the character screen, so every sibling modal (inventory,
@@ -1036,8 +1054,7 @@ func _close_character() -> void:
 	_enter_held = false
 	if _character_panel != null:
 		_character_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 ## The character screen owns the input while it is open: the cursor walks the
@@ -1085,6 +1102,7 @@ func open_shop(shop_manager: ShopManager) -> void:
 	if _craft_open:
 		close_craft()
 	_close_character()
+	_close_skills()
 	if _paused:
 		_close_pause()
 	_shop_manager = shop_manager
@@ -1103,8 +1121,7 @@ func close_shop() -> void:
 	_tab_held = false
 	if _shop_panel != null:
 		_shop_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _character_open or _craft_open
+	_recompute_ui_blocking()
 
 
 func is_shop_open() -> bool:
@@ -1137,6 +1154,7 @@ func open_craft(craft_manager: CraftManager) -> void:
 	if _shop_open:
 		close_shop()
 	_close_character()
+	_close_skills()
 	if _paused:
 		_close_pause()
 	_craft_manager = craft_manager
@@ -1153,8 +1171,7 @@ func close_craft() -> void:
 	_craft_open = false
 	if _craft_panel != null:
 		_craft_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _character_open or _shop_open
+	_recompute_ui_blocking()
 
 
 func is_craft_open() -> bool:
@@ -1194,6 +1211,132 @@ func craft_reason_text() -> String:
 func craft_select_row(index: int) -> void:
 	if _craft_panel != null:
 		_craft_panel.select_row(index)
+
+
+# --- skills screen (spec §16.1) -----------------------------------------------
+
+## The single source of truth for the modal input gate. Every open/close path routes
+## through here so the flag can never disagree with the set of panels that are
+## actually open: a panel that forgot to list one sibling would clear the block while
+## that sibling still owned the screen. `_skills_open` is one term among equals here,
+## exactly like the shop and the bench.
+func _recompute_ui_blocking() -> void:
+	GameState.ui_blocking = _skills_open or _inventory_open or _dialogue_open or _journal_open \
+			or _paused or _map_open or _settings_open or _shop_open or _craft_open or _character_open
+
+
+## K opens the skills screen over everything else: every modal it could visually
+## collide with is closed first (the same way the character screen does it), then it
+## takes the screen. The pause menu advertises "K — Навыки", so K can arrive while the
+## game is paused; the pause is dropped on the way in so the world is not left frozen
+## under a panel that does not pause anything itself.
+func _toggle_skills() -> void:
+	if _skills_open:
+		_close_skills()
+		return
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	if _settings_open:
+		_close_settings()
+	if _shop_open:
+		close_shop()
+	if _craft_open:
+		close_craft()
+	_close_character()
+	if _paused:
+		_close_pause()
+	_skills_open = true
+	_enter_held = false
+	_skills_l_held = false
+	if _skills_panel != null:
+		_skills_panel.visible = true
+		_skills_panel.open()
+	_recompute_ui_blocking()
+
+
+## One close path for the skills screen, so every sibling modal and Esc leave both the
+## flag and the node in the same state.
+func _close_skills() -> void:
+	if not _skills_open:
+		return
+	_skills_open = false
+	_enter_held = false
+	_skills_l_held = false
+	if _skills_panel != null:
+		_skills_panel.visible = false
+	_recompute_ui_blocking()
+
+
+## The skills screen owns the input while it is open, exactly like the shop and the
+## bench: Esc or K closes it (never pausing underneath), the movement actions walk the
+## list, E selects a known skill, and L learns the locked one. Enter and L have no
+## InputMap action, so both are edge-detected by hand the way Enter is in the
+## inventory; the bot drives selection through `interact` alone.
+func _process_skills_navigation() -> void:
+	if InputSource.is_action_just_pressed(&"pause") or InputSource.is_action_just_pressed(&"skills"):
+		_close_skills()
+		return
+	if _skills_panel != null:
+		var delta := 0
+		if InputSource.is_action_just_pressed(&"move_up"):
+			delta -= 1
+		if InputSource.is_action_just_pressed(&"move_down"):
+			delta += 1
+		if delta != 0:
+			_skills_panel.move_selection(delta)
+		var enter_now := Input.is_key_pressed(KEY_ENTER)
+		var enter_edge := enter_now and not _enter_held
+		_enter_held = enter_now
+		if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+			_skills_panel.activate()
+		var l_now := Input.is_key_pressed(KEY_L)
+		if l_now and not _skills_l_held:
+			_skills_panel.learn_selected()
+		_skills_l_held = l_now
+
+
+func is_skills_open() -> bool:
+	return _skills_open
+
+
+## Screenshot hook: opens the panel showing the current state without learning or
+## selecting anything, so the capture reflects whatever the player actually owns.
+func open_skills_for_shot() -> void:
+	if _skills_open:
+		return
+	_toggle_skills()
+
+
+# Read-only views of the skills panel, so a test or a screenshot probe can read the
+# list, the detail block and the points line without reaching into the panel's private
+# node tree — the same contract `craft_row_texts` gives.
+
+func skills_row_texts() -> PackedStringArray:
+	return _skills_panel.row_texts() if _skills_panel != null else PackedStringArray()
+
+
+func skills_detail_text() -> String:
+	return _skills_panel.detail_text() if _skills_panel != null else ""
+
+
+func skills_points_text() -> String:
+	return _skills_panel.points_text() if _skills_panel != null else ""
+
+
+func skills_selected_id() -> String:
+	return _skills_panel.selected_skill_id() if _skills_panel != null else ""
+
+
+## Parks the skills cursor on one row without simulating keys (test/screenshot).
+func skills_select_row(index: int) -> void:
+	if _skills_panel != null:
+		_skills_panel.select_row(index)
 
 
 ## One line per quick slot: "1: Настой здоровья", empty slots show "—".
@@ -1287,7 +1430,7 @@ func close_dialogue() -> void:
 	_dialogue_lock_input = false
 	_dialogue_tab_held = false
 	_dialogue_space_held = false
-	GameState.ui_blocking = _inventory_open or _journal_open or _paused or _map_open or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 	EventBus.dialogue_closed.emit()
 
 
@@ -1309,6 +1452,7 @@ func open_dialogue_runner(runner: DialogueRunner) -> void:
 	if _craft_open:
 		close_craft()
 	_close_character()
+	_close_skills()
 	if _paused:
 		_close_pause()
 	_dialogue_runner = runner
@@ -1461,7 +1605,7 @@ func _toggle_inventory() -> void:
 	else:
 		_enter_held = false
 	_inventory_panel.visible = _inventory_open
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _map_open or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 func _toggle_journal() -> void:
@@ -1473,7 +1617,7 @@ func _toggle_journal() -> void:
 			_close_character()
 		_refresh_journal()
 	_journal_panel.visible = _journal_open
-	GameState.ui_blocking = _journal_open or _dialogue_open or _inventory_open or _paused or _map_open or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 func _refresh_journal() -> void:
@@ -1507,7 +1651,7 @@ func _toggle_pause() -> void:
 	_menu_key_held = false
 	_pause_panel.visible = _paused
 	get_tree().paused = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 	EventBus.game_paused.emit(_paused)
 
 
@@ -1618,6 +1762,13 @@ func _process(_delta: float) -> void:
 		if InputSource.is_action_just_pressed(&"pause"):
 			_toggle_character()
 			return
+	# The skills screen owns the input while it is open, exactly like the shop and
+	# the bench: Esc or K closes it (never pausing underneath), the movement actions
+	# walk the list, E selects, L learns. Every other key is swallowed, so a player
+	# in the skills screen cannot open the inventory or the map over it.
+	if _skills_open:
+		_process_skills_navigation()
+		return
 	if InputSource.is_action_just_pressed(&"map"):
 		_open_map()
 		return
@@ -1631,6 +1782,15 @@ func _process(_delta: float) -> void:
 		return
 	if InputSource.is_action_just_pressed(&"character"):
 		_toggle_character()
+		return
+	# K opens the skills screen. It sits here, alongside the other panel keys and
+	# ahead of the pause block, so the pause menu's advertised "K — Навыки" works.
+	# It is refused while the inventory, journal or a dialogue owns the screen (the
+	# map, shop, bench and settings already returned above), so K never stacks a
+	# second modal over one that is open.
+	if InputSource.is_action_just_pressed(&"skills"):
+		if not _inventory_open and not _journal_open and not _dialogue_open:
+			_toggle_skills()
 		return
 	if _paused:
 		# Q leaves to the menu. It owns no InputMap action, so it is edge-detected by
@@ -1716,6 +1876,7 @@ func _open_map() -> void:
 	if _craft_open:
 		close_craft()
 	_close_character()
+	_close_skills()
 	_map_open = true
 	if _map_panel != null:
 		_map_panel.visible = true
@@ -1727,7 +1888,7 @@ func _close_map() -> void:
 	_map_open = false
 	if _map_panel != null:
 		_map_panel.visible = false
-	GameState.ui_blocking = _inventory_open or _dialogue_open or _journal_open or _paused or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 func is_map_open() -> bool:
@@ -1754,7 +1915,7 @@ func _close_settings() -> void:
 	_settings_just_closed = true
 	_settings_panel.visible = false
 	_pause_panel.visible = _paused
-	GameState.ui_blocking = _paused or _inventory_open or _dialogue_open or _journal_open or _map_open or _character_open or _shop_open or _craft_open
+	_recompute_ui_blocking()
 
 
 func is_settings_open() -> bool:
@@ -1963,6 +2124,7 @@ func _open_defeat() -> void:
 	if _craft_open:
 		close_craft()
 	_close_character()
+	_close_skills()
 	if _settings_open:
 		_close_settings()
 	_close_pause()
@@ -2021,6 +2183,7 @@ func return_to_menu() -> void:
 	_close_defeat()
 	close_victory()
 	_close_pause()
+	_close_skills()
 	GameState.ui_blocking = false
 	var loop := get_tree()
 	loop.paused = false

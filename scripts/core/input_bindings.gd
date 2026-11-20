@@ -13,6 +13,7 @@ const VERSION := 1
 const REBINDABLE: Array[String] = [
 	"move_up", "move_down", "move_left", "move_right",
 	"attack", "dash", "interact", "inventory", "journal", "map", "character", "pause",
+	"skills",
 	"ability", "quick_slot_1", "quick_slot_2", "quick_slot_3", "quick_slot_4",
 ]
 

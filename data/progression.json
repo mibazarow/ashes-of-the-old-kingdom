@@ -1,6 +1,7 @@
 {
 	"max_level": 20,
 	"points_per_level": 2,
+	"skill_points_per_level": 1,
 	"xp_curve": [
 		0,
 		100,

@@ -16,6 +16,7 @@ const ACTIONS := {
 	"journal": [KEY_J],
 	"map": [KEY_M],
 	"character": [KEY_C],
+	"skills": [KEY_K],
 	"pause": [KEY_ESCAPE],
 	"quick_slot_1": [KEY_1],
 	"quick_slot_2": [KEY_2],

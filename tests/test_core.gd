@@ -327,12 +327,15 @@ func _run() -> void:
 	print("== main menu ==")
 	await _test_main_menu()
 
+	print("== skills panel ==")
+	await _test_skills_panel()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 54, "every test group ran to completion (got %d/54)" % completed.size())
+	_check(completed.size() == 55, "every test group ran to completion (got %d/55)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -740,6 +743,7 @@ func _test_attributes() -> void:
 	# integer rounding of the final damage, hence the 1-point tolerance.
 	DamageResolver.reset()
 	gs.mana = gs.max_mana
+	gs.skill_points = 10
 	gs.learn_skill("fire_burst")
 	gs.select_skill("fire_burst")
 	var cds: Dictionary = hero.get("_skill_cooldowns")
@@ -2326,6 +2330,9 @@ func _test_ability() -> void:
 func _test_skills() -> void:
 	DamageResolver.reset()
 	gs.reset()
+	# learn_skill now spends a skill point, so this group grants a pool up front;
+	# the dedicated point-accounting lives in the skills-panel group.
+	gs.skill_points = 10
 
 	# --- SkillDB schema --------------------------------------------------------
 	_check(SkillDB.all_skills().size() == 8, "SkillDB loads exactly 8 skills")
@@ -2395,6 +2402,7 @@ func _test_skills() -> void:
 	arena.add_child(player)
 	await process_frame
 	gs.reset()
+	gs.skill_points = 10
 	gs.mana = gs.max_mana
 	var cds: Dictionary = player.get("_skill_cooldowns")
 
@@ -8386,6 +8394,186 @@ func _clear_all_save_slots() -> void:
 		for path in [sm.slot_path(slot), sm.slot_backup_path(slot), sm.slot_temp_path(slot)]:
 			if FileAccess.file_exists(path):
 				DirAccess.remove_absolute(path)
+
+
+## Skills screen (spec §16.1): the four schools, every skill with its cost, the
+## known/locked/active markers, selecting the skill the right mouse button casts,
+## learning a locked skill for a skill point, the skill-point economy (start, level-up
+## grant, spend, refusal at zero, idempotency), save persistence, and the modal gate
+## including the rule that K never stacks the panel over an open inventory.
+##
+## The pure state (points, level-up, save) is checked on the autoload directly; the
+## rendering and the input path are checked on a live main scene through the same
+## `_tap_key` path a human and the bot use, exactly like the character-panel group.
+func _test_skills_panel() -> void:
+	gs.reset()
+	qm.reset()
+	paused = false
+	gs.ui_blocking = false
+
+	# --- the action exists and is bound to K, and is rebindable ----------------
+	_check(InputMap.has_action(&"skills"), "skills action exists")
+	_check(_action_has_key("skills", KEY_K), "skills action is bound to key K")
+	_check(InputBindings.REBINDABLE.has("skills"), "skills is in the rebindable list")
+
+	# --- the skill-point economy, on the autoload ------------------------------
+	_check(gs.skill_points == 1, "the player starts with exactly 1 skill point (got %d)" % gs.skill_points)
+	var sp_before: int = gs.skill_points
+	var ap_before: int = gs.attribute_points
+	gs.add_xp(gs.xp_to_next)
+	_check(gs.level == 2, "one level-up happened")
+	_check(gs.attribute_points == ap_before + 2, "a level grants 2 attribute points (got %d)" % gs.attribute_points)
+	_check(gs.skill_points == sp_before + 1, "a level grants exactly 1 skill point on top (got %d)" % gs.skill_points)
+
+	gs.skill_points = 3
+	_check(gs.learn_skill("fire_burst"), "learn_skill succeeds while points are available")
+	_check(gs.skill_points == 2, "learn_skill spent exactly one point (got %d)" % gs.skill_points)
+	_check(gs.known_skills.has("fire_burst"), "the learned skill is now known")
+	_check(not gs.learn_skill("fire_burst"), "learn_skill is a no-op for an already-known skill")
+	_check(gs.skill_points == 2, "an already-known learn spent no point (got %d)" % gs.skill_points)
+	gs.skill_points = 0
+	_check(not gs.learn_skill("roots"), "learn_skill is refused at zero points")
+	_check(gs.skill_points == 0, "a refused learn leaves the pool at zero")
+	_check(not gs.known_skills.has("roots"), "the refused skill stayed locked")
+
+	# --- skill_points and selected_skill survive a save round-trip -------------
+	gs.reset()
+	gs.skill_points = 5
+	_check(gs.select_skill("shock"), "shock is selectable (known by default)")
+	var snap: Dictionary = gs.to_dict()
+	gs.reset()
+	_check(gs.skill_points == 1, "reset returns the pool to 1 before the load")
+	gs.from_dict(snap)
+	_check(gs.skill_points == 5, "skill_points survive a save round-trip (got %d)" % gs.skill_points)
+	_check(gs.selected_skill == "shock", "selected_skill survives a save round-trip")
+
+	# --- the panel on a live scene ---------------------------------------------
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var hud := scene.get_node_or_null("HUD")
+	var player := get_first_node_in_group("player") as Node2D
+	_check(hud != null and player != null, "hud and player present for the skills panel test")
+	if hud == null or player == null:
+		gs.ui_blocking = false
+		paused = false
+		gs.reset()
+		completed["skills_panel"] = true
+		return
+
+	# K opens the panel and the modal gate holds.
+	await _tap_key(KEY_K)
+	_check(bool(hud.call("is_skills_open")), "key K opens the skills panel")
+	_check(gs.ui_blocking, "ui_blocking is true while the skills panel is open")
+
+	# All eight skills, grouped under four school headers, with the right mana cost.
+	var rows: PackedStringArray = hud.call("skills_row_texts")
+	var school_headers := 0
+	for line in rows:
+		if line.begins_with("— ") and line.ends_with(" —"):
+			school_headers += 1
+	_check(school_headers == 4, "the panel shows four school headers (got %d)" % school_headers)
+	_check(rows.size() - school_headers == 8, "the panel lists all eight skills (got %d)" % (rows.size() - school_headers))
+	_check(_row_has_mana(rows, "Огненный снаряд", 8), "the fire_bolt row shows 8 маны")
+	_check(_row_has_mana(rows, "Разряд", 7), "the shock row shows 7 маны")
+	_check(_row_has_mana(rows, "Вспышка", 16), "the locked fire_burst row shows 16 маны")
+
+	# known vs locked vs active markers, read straight off GameState.known_skills.
+	_check(_row_contains(rows, "Огненный снаряд", "[выбрано]"), "the active skill shows [выбрано]")
+	_check(_row_contains(rows, "Ледяной снаряд", "[изучено]"), "a known inactive skill shows [изучено]")
+	_check(_row_contains(rows, "Вспышка", "[закрыто]"), "a locked skill shows [закрыто]")
+
+	# Selecting a known skill really changes what the right mouse button casts.
+	hud.call("skills_select_row", 4)  # shock (known, 7 mana — distinct from fire_bolt's 8)
+	await _tap_key(KEY_E)
+	_check(gs.selected_skill == "shock", "E on a known skill selects it (got %s)" % gs.selected_skill)
+	var cds: Dictionary = player.get("_skill_cooldowns")
+	cds["shock"] = 0.0
+	gs.mana = gs.max_mana
+	var mana_before: int = gs.mana
+	_check(player.try_ability(), "try_ability casts the newly selected skill")
+	_check(gs.mana == mana_before - 7,
+		"the cast spent shock's 7 mana, not fire_bolt's 8 (spent %d)" % (mana_before - gs.mana))
+
+	# Selecting a locked skill changes nothing.
+	var sel_before: String = gs.selected_skill
+	hud.call("skills_select_row", 5)  # chain_lightning (locked)
+	await _tap_key(KEY_E)
+	_check(gs.selected_skill == sel_before, "E on a locked skill leaves the selection unchanged")
+
+	# L learns the locked skill and spends exactly one point.
+	gs.skill_points = 1
+	hud.call("skills_select_row", 5)  # chain_lightning (locked)
+	await _tap_key(KEY_L)
+	_check(gs.known_skills.has("chain_lightning"), "L learns the selected locked skill")
+	_check(gs.skill_points == 0, "L spent the one available skill point (got %d)" % gs.skill_points)
+
+	# L with no points learns nothing and toasts the reason.
+	gs.skill_points = 0
+	hud.call("skills_select_row", 7)  # roots (locked)
+	var toasts: Array[String] = []
+	var listener := func(message: String) -> void: toasts.append(message)
+	bus.toast.connect(listener)
+	await _tap_key(KEY_L)
+	_check(not gs.known_skills.has("roots"), "L with no points learns nothing")
+	_check(toasts.has("Нет очков навыков"), "L with no points toasts Нет очков навыков")
+	bus.toast.disconnect(listener)
+
+	# Esc closes the panel and does not pause underneath.
+	await _tap_key(KEY_ESCAPE)
+	_check(not bool(hud.call("is_skills_open")), "Esc closes the skills panel")
+	_check(not gs.ui_blocking, "ui_blocking cleared after Esc closed the panel")
+	_check(not paused, "Esc closing the panel does not pause the game")
+
+	# Opening the panel closes every sibling modal (the open path, not the K guard).
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "I opens the inventory")
+	hud.call("open_skills_for_shot")
+	_check(bool(hud.call("is_skills_open")), "opening the skills panel takes the screen")
+	_check(not bool(hud.call("is_inventory_open")), "opening the skills panel closed the inventory")
+	_check(gs.ui_blocking, "ui_blocking stays true while the skills panel owns the screen")
+
+	# K closes it again.
+	await _tap_key(KEY_K)
+	_check(not bool(hud.call("is_skills_open")), "K closes the skills panel")
+	_check(not gs.ui_blocking, "ui_blocking cleared after K closed the panel")
+
+	# K never stacks the panel over an open inventory.
+	await _tap_key(KEY_I)
+	_check(bool(hud.call("is_inventory_open")), "I opens the inventory again")
+	await _tap_key(KEY_K)
+	_check(not bool(hud.call("is_skills_open")), "K does not open the skills panel while the inventory is open")
+	_check(bool(hud.call("is_inventory_open")), "the inventory stayed open under the swallowed K")
+
+	# --- leave no residue for later groups -------------------------------------
+	if bool(hud.call("is_skills_open")):
+		await _tap_key(KEY_K)
+	if bool(hud.call("is_inventory_open")):
+		await _tap_key(KEY_I)
+	gs.ui_blocking = false
+	paused = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	completed["skills_panel"] = true
+
+
+## True when the rendered row naming `needle` also contains `marker`. The rows are
+## read through the HUD's read-only view, so this asserts what the player sees rather
+## than reaching into the panel's private node tree.
+func _row_contains(rows: PackedStringArray, needle: String, marker: String) -> bool:
+	for line in rows:
+		if line.contains(needle):
+			return line.contains(marker)
+	return false
+
+
+## True when the rendered row naming `needle` shows the given mana cost.
+func _row_has_mana(rows: PackedStringArray, needle: String, mana: int) -> bool:
+	return _row_contains(rows, needle, "%d маны" % mana)
 
 
 ## The main menu, the defeat screen and the victory screen (spec §16.1).

@@ -75,6 +75,14 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_character_for_shot")
+	elif ui_probe == "skills":
+		# Show the skills screen exactly as the player left it: the default known
+		# loadout, the active skill, the locked rest and the starting skill point.
+		# Nothing is learned or selected here, so the capture reflects real state
+		# rather than a rigged one.
+		var hud := get_node_or_null("HUD")
+		if hud != null:
+			hud.call("open_skills_for_shot")
 	elif ui_probe == "map":
 		# Walk the player east along the road so the explored area grows past the
 		# spawn clearing and the trap landmark falls inside the visited radius.
