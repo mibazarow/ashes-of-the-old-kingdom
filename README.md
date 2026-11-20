@@ -78,13 +78,16 @@ Godot 4.7.2 уже установлен: `/Applications/Godot.app`, CLI —
   мокрой цели бьёт по соседям с потолком в 3 цели, лечение снимает стек порчи и
   проходит вполовину. Единая точка входа в `DamageResolver`, защита от цепной
   рекурсии и от бесконечных частиц.
-- **Враги** — пять типов (5 ближних волка, 1 дальний культист, 2 кабана,
-  2 огонька и мини-босс Хранитель леса) с FSM
+- **Враги** — семь типов (5 ближних волка, 1 дальний культист, 2 кабана,
+  2 огонька, мини-босс Хранитель леса и два скелета руин — стражник и лучник)
+  с FSM
   IDLE → PATROL → INVESTIGATE → CHASE → ATTACK → STAGGER → DEAD, leash range,
   потеря цели, телеграф перед ударом, труп не атакует и не даёт лут дважды.
   Кабан замечает игрока с полуторной дистанции, настигает быстрее и бьёт
   сильнее, зато дольше замахивается и дольше отдыхает; огонёк — хрупкий стрелок,
-  который держит дистанцию и стреляет часто, но слабо.
+  который держит дистанцию и стреляет часто, но слабо; скелеты держат зал за
+  дверью руин: четверо стражников вблизи, двое лучников издали, все шестеро
+  роняют `bone_shard`.
 - **Мини-босс** — Хранитель леса (`scenes/enemies/forest_warden.tscn`,
   `Boss extends Enemy`) стоит в дальней восточной части карты: 180 hp, ниже
   половины порога уходит в ярость (на 30% быстрее, откат короче на 40%), каждый
@@ -202,13 +205,15 @@ godot --headless --path . --export-release "Windows Desktop" build/windows/pepl.
 ```
 scenes/     main, world, player, enemies, npcs, interactables, items, ui
 scripts/    core, save, player, combat, ai, npc, npcs, shop, craft, quests, inventory, world, ui, debug_bot
-data/       items.json, quests.json, shop.json, recipes.json
+data/       items.json, quests.json, zones.json, skills.json, dialogue.json,
+            schedules.json, progression.json, shop.json, recipes.json
 assets/     сгенерированные 16x16 спрайты и звуки (см. docs/TODO_TEMP_ASSETS.md
             и docs/ASSET_CREDITS.md)
 tests/      test_core.gd, fixtures/saves/ — три фикстуры сохранений для теста
             загрузки и миграции схемы (без персональных данных, см. README там же)
 tools/      генератор спрайтов, генератор звуков, генератор InputMap
-docs/       ARCHITECTURE.md, TEST_REPORT.md, ASSET_CREDITS.md, TODO_TEMP_ASSETS.md
+docs/       ARCHITECTURE.md, TEST_REPORT.md, BUILD_WINDOWS.md, ASSET_CREDITS.md,
+            TODO_TEMP_ASSETS.md
 ```
 
 ## Ограничения этого среза
