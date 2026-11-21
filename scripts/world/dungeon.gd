@@ -31,6 +31,10 @@ const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 ## corpse turns the ground it fell on into `blight` for anyone standing there.
 const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
 const PLAGUE_BEARER_SCENE := "res://scenes/enemies/plague_bearer.tscn"
+## The undercroft's boss (spec §11): the Bell Ringer of the Empty Crypt, met deep
+## past the trap plates. Its ringing shock wave and phase-two hazard circles make it
+## a fight about ground and spacing, not another skeleton with a bigger pool.
+const BELL_RINGER_SCENE := "res://scenes/enemies/bell_ringer.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 
 const MAP_W := 44
@@ -172,6 +176,16 @@ const BONE_CRAWLER_A_ANCHOR := Vector2i(7, 25)
 const BONE_CRAWLER_B_ANCHOR := Vector2i(34, 26)
 const PLAGUE_BEARER_A_ANCHOR := Vector2i(21, 2)
 
+## The Bell Ringer's post (spec §11), deep in the south corridor past both trap
+## plates and clear of every post, plate, column and the two stairs. It keeps ten
+## tiles from the arrival crossing — past the six the guards keep — so the boss that
+## owns the undercroft is well down the longest road, exactly where a bell that rings
+## the whole crypt should stand. Snapped by `_find_prop_tile`, so it cannot land on a
+## trap, a stair or another post.
+const BELL_RINGER_ANCHOR := Vector2i(32, 25)
+const BELL_RINGER_SCAN_RADIUS := 2
+const BELL_RINGER_CLEAR_FROM_ENTRY := 10
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the
@@ -186,6 +200,7 @@ const ENEMY_CLEAR_FROM_ENTRY := 6
 var _exit_node: Node2D
 var _trap_a_node: Node2D
 var _trap_b_node: Node2D
+var _bell_ringer_node: Node2D
 
 
 func zone_id() -> String:
@@ -208,6 +223,10 @@ func landmarks() -> Array[Dictionary]:
 		# road back, and the map is where he will look for it.
 		["TrapA", "trap", _trap_a_node],
 		["TrapB", "trap", _trap_b_node],
+		# The Bell Ringer is marked so the player can find the undercroft's boss on
+		# the map. It stays marked for the life of the zone: the boss outlives the
+		# plates on the road to it, and a cleared crypt is still the room he came for.
+		["BellRinger", "boss", _bell_ringer_node],
 	]:
 		# The validity check comes before the typed binding: assigning a freed
 		# instance to `var node: Node2D` is itself a script error.
@@ -303,6 +322,10 @@ func _spawn_actors() -> void:
 	_spawn_traps(spawn_tile, reserved)
 	_spawn_enemies(spawn_tile, reserved)
 	_spawn_new_posts(spawn_tile, reserved)
+	# The Bell Ringer is placed after every plate and post so it inherits the reserved
+	# set they claimed and cannot be parked on a trap or a guard, and before the door
+	# to the fortress so its tile is visible to the collision check that door makes.
+	_spawn_bell_ringer(spawn_tile, reserved)
 	# Last, after every plate and post has had its turn at the reserved set. The
 	# door's tile is a fixed constant rather than a scan, so the order cannot move
 	# it, but the reserved set is the only thing here that knows which tiles the
@@ -388,6 +411,16 @@ func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
 		reserved[tile] = true
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The undercroft's boss (spec §11), snapped against the reserved set the plates and
+## the posts already claimed and kept ten tiles from the arrival crossing. Its node is
+## kept as a live landmark reference so the map can mark the boss.
+func _spawn_bell_ringer(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		BELL_RINGER_ANCHOR, BELL_RINGER_SCAN_RADIUS, entry, reserved, BELL_RINGER_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	_bell_ringer_node = _instantiate(BELL_RINGER_SCENE, _tile_center(tile.x, tile.y), "BellRinger")
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules

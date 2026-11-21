@@ -23,6 +23,10 @@ const SHIELDBEARER_SCENE := "res://scenes/enemies/shieldbearer.tscn"
 const CULTIST_CASTER_SCENE := "res://scenes/enemies/cultist_caster.tscn"
 const ROYAL_GUARD_SCENE := "res://scenes/enemies/royal_guard.tscn"
 const GRAVE_HOUND_SCENE := "res://scenes/enemies/grave_hound.tscn"
+## The ruins' boss (spec §11): the Captain of the Funeral Guard, met in the hall the
+## locked door keeps shut. Its shield defines phase one and its fall defines phase
+## two, so it is a different fight from the hall guards rather than a tougher one.
+const CAPTAIN_SCENE := "res://scenes/enemies/captain_of_the_guard.tscn"
 const PICKUP_SCENE := "res://scenes/items/pickup.tscn"
 
 const MAP_W := 40
@@ -169,6 +173,15 @@ const ROYAL_GUARD_A_ANCHOR := Vector2i(30, 11)
 const GRAVE_HOUND_A_ANCHOR := Vector2i(21, 19)
 const GRAVE_HOUND_B_ANCHOR := Vector2i(25, 17)
 
+## The Captain's post (spec §11), deep in the hall behind the door and clear of every
+## guard post, pillar and the descent. It is placed after the new posts so it inherits
+## the reserved set they claimed, and it keeps ten tiles from the entry — twice the
+## six the guards keep — so the boss that owns the hall is never the first thing the
+## player meets on arrival. Snapped by `_find_prop_tile`, so it cannot land on a prop.
+const CAPTAIN_ANCHOR := Vector2i(33, 11)
+const CAPTAIN_SCAN_RADIUS := 2
+const CAPTAIN_CLEAR_FROM_ENTRY := 10
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the
@@ -202,6 +215,7 @@ var _door_node: Node2D
 var _mechanism_node: Node2D
 var _key_node: Node2D
 var _tablet_node: Node2D
+var _captain_node: Node2D
 
 
 func zone_id() -> String:
@@ -226,6 +240,10 @@ func landmarks() -> Array[Dictionary]:
 		# key: a task you have already handed in is still a place worth walking
 		# back to, and the stone never frees itself.
 		["RuinTablet", "tablet", _tablet_node],
+		# The Captain is marked so the player can find the hall's boss on the map.
+		# It stays marked for the life of the zone: the boss outlives the door that
+		# gated it, and a cleared hall is still the place the player came for.
+		["CaptainOfTheGuard", "boss", _captain_node],
 	]:
 		# The validity check comes before the typed binding: assigning a freed
 		# instance to `var node: Node2D` is itself a script error.
@@ -333,6 +351,10 @@ func _spawn_actors() -> void:
 	_spawn_tablet(tablet_tile)
 	_spawn_skeletons(spawn_tile, reserved)
 	_spawn_new_posts(spawn_tile, reserved)
+	# The Captain is placed after every guard so it inherits the reserved set they
+	# claimed and cannot be parked on a post, and before the descent so its tile is
+	# visible to the collision check the stair makes at the end.
+	_spawn_captain(spawn_tile, reserved)
 	# Last, after every post has had its turn at the reserved set. The stair's tile
 	# is a fixed constant rather than a scan, so the order cannot move it, but the
 	# reserved set is the only thing here that knows which tiles the posts ended up
@@ -450,6 +472,16 @@ func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
 		reserved[tile] = true
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The hall's boss (spec §11), snapped against the reserved set the props and the
+## guards already claimed and kept ten tiles from the arrival point. Its node is kept
+## as a live landmark reference so the map can mark the boss.
+func _spawn_captain(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		CAPTAIN_ANCHOR, CAPTAIN_SCAN_RADIUS, entry, reserved, CAPTAIN_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	_captain_node = _instantiate(CAPTAIN_SCENE, _tile_center(tile.x, tile.y), "CaptainOfTheGuard")
 
 
 ## The stair down to the third zone, at the far end of the hall the door guards.

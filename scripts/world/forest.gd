@@ -10,6 +10,10 @@ const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
 const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 const FOREST_WARDEN_SCENE := "res://scenes/enemies/forest_warden.tscn"
+## The forest's second boss (spec §11): the Root Mother, met in the south ash glade.
+## It summons spiders through phase one and grows destructible weak points through
+## phase two, so it is a different fight from the warden rather than a bigger warden.
+const ROOT_MOTHER_SCENE := "res://scenes/enemies/root_mother.tscn"
 ## The five new forest predators (spec §10). Each one is a different mechanic on
 ## the shared `Enemy` script rather than a recoloured wolf: the spider webs, the
 ## slime leaves a spore pool, the tick swarms, the lumberjack reads its axe a
@@ -43,6 +47,7 @@ var _chest_spear_node: Node2D
 var _trap_node: Node2D
 var _rubble_node: Node2D
 var _ruins_gate_node: Node2D
+var _root_mother_node: Node2D
 
 ## Fixed anchor for the spear chest, on the south-west side away from the sword
 ## chest in the east clearing. The exact tile is derived from the generated grid
@@ -146,6 +151,16 @@ const NEW_ENEMY_SCAN_RADIUS_SMALL := 3
 const FOREST_WARDEN_ANCHOR := Vector2i(MAP_W - 8, 7)
 const FOREST_WARDEN_SCAN_RADIUS := 1
 
+## Anchor for the second forest boss (spec §11), the Root Mother. It sits in the
+## open south-central ground, deliberately far from the warden's east clearing so
+## the two bosses never share a boss bar: the tile is 20 tiles from the warden (320
+## px, past the 200 px engage radius) and 20 tiles from the arrival point, so the
+## hunter bot still reaches a wolf first and the warden's own boss-bar test, which
+## walks the player up to the warden, never trips the Root Mother's bar either. The
+## tile is snapped by `_find_new_enemy_tile`, so it honours the same safe-zone and
+## spawn-clearance rules as every other predator and cannot land in a tree.
+const ROOT_MOTHER_ANCHOR := Vector2i(24, 24)
+
 ## The south-side shortcut (roadmap stage D). The generated grid leaves exactly
 ## one tile of passage between the tree block at cols 12..15 rows 27..28 and the
 ## block at cols 20..21 rows 27..28: the neck runs (19,27) -> (19,28) -> (19,29),
@@ -241,6 +256,10 @@ func landmarks() -> Array[Dictionary]:
 		# reference like the rest, so it drops out of the list the moment the
 		# world that owns it goes away.
 		["RuinsGate", "gate", _ruins_gate_node],
+		# The Root Mother is marked so the player can find the second boss on the
+		# map. The warden is not a landmark (it never was); the boss marker points at
+		# the one the player has not met yet, which is the one worth finding.
+		["RootMother", "boss", _root_mother_node],
 	]:
 		if not is_instance_valid(entry[2]):
 			continue
@@ -444,6 +463,13 @@ func _spawn_actors() -> void:
 	_spawn_enemy_walkable(FOREST_WARDEN_SCENE, FOREST_WARDEN_ANCHOR, "ForestWarden",
 		FOREST_WARDEN_SCAN_RADIUS)
 
+	# The second boss (spec §11) goes last among the enemies, after the warden, for
+	# the same reason the warden went after the predators: it is the only enemy of its
+	# type, and its tile is chosen against the set every other enemy already stands on
+	# so it cannot collapse onto a post. Its node is kept as a live landmark reference.
+	var boss_tiles := {}
+	_root_mother_node = _spawn_boss(ROOT_MOTHER_SCENE, ROOT_MOTHER_ANCHOR, "RootMother", boss_tiles)
+
 	_instantiate(PICKUP_SCENE, _tile_center(13, 10), "PickupA")
 
 	# Three more finds for roadmap stage D, one per quarter of the map that did
@@ -541,6 +567,18 @@ func _spawn_new_enemy(scene_path: String, anchor: Vector2i, node_name: String, t
 	var chosen := _find_new_enemy_tile(anchor, NEW_ENEMY_SCAN_RADIUS_SMALL, taken)
 	taken[chosen] = true
 	_spawn_enemy(scene_path, chosen.x, chosen.y, node_name)
+
+
+## `_spawn_new_enemy` for a single unique boss, returning the live node so the zone
+## can keep it as a landmark reference. Same tile rules as a new predator (walkable,
+## outside the safe zone and its buffer, clear of the arrival tile, not on a tile
+## another enemy already holds), and the same deterministic scan.
+func _spawn_boss(scene_path: String, anchor: Vector2i, node_name: String, taken: Dictionary) -> Node2D:
+	for tile: Vector2i in _occupied_enemy_tiles().keys():
+		taken[tile] = true
+	var chosen := _find_new_enemy_tile(anchor, NEW_ENEMY_SCAN_RADIUS_SMALL, taken)
+	taken[chosen] = true
+	return _instantiate(scene_path, _tile_center(chosen.x, chosen.y), node_name)
 
 
 ## The tiles the enemies already in this zone stand on, read back from the world

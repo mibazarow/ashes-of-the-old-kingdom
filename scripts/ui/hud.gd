@@ -2013,16 +2013,14 @@ func clock_line_text() -> String:
 func _tick_boss_bar(_delta: float) -> void:
 	if _boss_panel == null or _boss_bar == null or _boss_label == null:
 		return
-	var boss := _resolve_boss()
 	var player := get_tree().get_first_node_in_group("player") as Node2D
-	var engaged := boss != null and player != null and not _boss_is_dead(boss) \
-			and player.global_position.distance_to(boss.global_position) <= BOSS_ENGAGE_RADIUS
-	if not engaged:
-		_boss = null
+	var boss := _resolve_boss(player)
+	if boss == null:
 		_boss_panel.visible = false
 		return
 	var pool := boss.get_node_or_null("HealthComponent")
 	if pool == null:
+		_boss = null
 		_boss_panel.visible = false
 		return
 	var maximum := maxi(1, int(pool.get("max_health")))
@@ -2038,14 +2036,34 @@ func _tick_boss_bar(_delta: float) -> void:
 	_boss_panel.visible = true
 
 
-## The boss whose bar this is, resolved through the `boss` group and cached until
-## it leaves the tree. Re-resolved every frame it is missing, which is what lets a
-## second boss (or a respawn) take the bar over without the HUD knowing names.
-func _resolve_boss() -> Node:
-	if _boss != null and is_instance_valid(_boss):
-		return _boss
-	_boss = get_tree().get_first_node_in_group(BOSS_GROUP)
-	return _boss
+## The boss whose bar this is: the nearest LIVING boss within the engage radius of the
+## player. A zone can now hold more than one boss (the forest keeps both the warden and
+## the Root Mother), so the bar has to follow whichever boss the player actually stands
+## up to rather than whichever node the group happens to return first. A boss outside
+## the radius, or a corpse still fading out, is not a candidate; with none in range the
+## bar is off screen. Re-resolved every frame, which is what lets the bar hand over from
+## one boss to the next as the player walks between them, and what keeps the warden's
+## bar from being shadowed by a second boss standing across the map.
+func _resolve_boss(player: Node2D) -> Node:
+	_boss = null
+	if player == null:
+		return null
+	var nearest: Node = null
+	var best := INF
+	for node in get_tree().get_nodes_in_group(BOSS_GROUP):
+		if node == null or not is_instance_valid(node):
+			continue
+		if _boss_is_dead(node):
+			continue
+		var body := node as Node2D
+		if body == null:
+			continue
+		var distance := player.global_position.distance_to(body.global_position)
+		if distance <= BOSS_ENGAGE_RADIUS and distance < best:
+			best = distance
+			nearest = node
+	_boss = nearest
+	return nearest
 
 
 ## Dead answer for the bar. Read through the pool and the owner rather than

@@ -342,12 +342,15 @@ func _run() -> void:
 	print("== fortress ==")
 	await _test_fortress()
 
+	print("== three new bosses ==")
+	await _test_three_bosses()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 59, "every test group ran to completion (got %d/59)" % completed.size())
+	_check(completed.size() == 60, "every test group ran to completion (got %d/60)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -3692,10 +3695,15 @@ func _test_forest_warden_boss() -> void:
 			archer = node
 	var bosses: Array[Node] = get_nodes_in_group("boss")
 	_check(wardens.size() == 1, "the world spawns exactly one forest_warden (got %d)" % wardens.size())
-	_check(bosses.size() == 1, "exactly one enemy joins the boss group (got %d)" % bosses.size())
-	var warden: Node = bosses[0] if bosses.size() == 1 else null
+	_check(bosses.size() == 2, "the forest now spawns two bosses (got %d)" % bosses.size())
+	# The forest holds two bosses now (the warden and the Root Mother, spec §11), so the
+	# warden is found among the boss group by type rather than assumed to be the only one.
+	var warden: Node = null
+	for node: Node in bosses:
+		if String(node.get("enemy_type")) == "forest_warden":
+			warden = node
 	_check(warden != null and wardens.size() == 1 and warden == wardens[0],
-		"the one boss in the world is the one forest_warden")
+		"the forest_warden is among the bosses and is the one warden")
 	_check(warden != null and String(warden.name) == "ForestWarden", "the warden node is named ForestWarden")
 
 	if warden != null and world != null and world_player != null:
@@ -7408,7 +7416,7 @@ func _test_zone_travel() -> void:
 			ruin_posts += 1
 	_check(ruin_posts == 6, "the ruins spawn six skeletons (got %d)" % ruin_posts)
 	var ruins_lms: Array = ruins.call("landmarks")
-	_check(ruins_lms.size() == 5, "the ruins list five landmarks (got %d)" % ruins_lms.size())
+	_check(ruins_lms.size() == 6, "the ruins list six landmarks (got %d)" % ruins_lms.size())
 	var gate_lm_found := false
 	for lm: Dictionary in ruins_lms:
 		if String(lm.get("id", "")) == "ForestGate" and String(lm.get("kind", "")) == "gate":
@@ -8090,8 +8098,8 @@ func _test_ruins_mechanics() -> void:
 	for lm: Dictionary in world.call("landmarks"):
 		landmark_kinds.append(String(lm.get("kind", "")))
 	landmark_kinds.sort()
-	_check(landmark_kinds == ["door", "gate", "key", "mechanism", "tablet"],
-		"the map marks the gate, the door, the lever, the key and the tablet (got %s)"
+	_check(landmark_kinds == ["boss", "door", "gate", "key", "mechanism", "tablet"],
+		"the map marks the boss, the gate, the door, the lever, the key and the tablet (got %s)"
 			% ", ".join(landmark_kinds))
 
 	# --- empty hands: the refusal writes nothing at all ------------------------
@@ -8348,7 +8356,7 @@ func _test_ruins_mechanics() -> void:
 	_check(forest_wolves >= 5, "the forest still spawns its wolf pack (got %d)" % forest_wolves)
 	_check(forest_skeletons == 0, "no skeleton followed the player into the forest")
 	var forest_lms: Array = back.call("landmarks") if back != null else []
-	_check(forest_lms.size() == 9, "the forest still lists its nine landmarks (got %d)" % forest_lms.size())
+	_check(forest_lms.size() == 10, "the forest still lists its ten landmarks (got %d)" % forest_lms.size())
 	var forest_interactables := get_nodes_in_group("interactable")
 	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Edrik",
 		"Edrik is still the first interactable after the ruins were built and freed")
@@ -9163,10 +9171,15 @@ const ROSTER_ZONES: Dictionary = {
 	"fortress": ["ash_knight"],
 }
 
-## The boss is deliberately outside the count. Spec §10 asks for eighteen
+## The bosses are deliberately outside the count. Spec §10 asks for eighteen
 ## mechanically distinct *normal* enemy types, and a boss is not one of them, so the
-## scan has to name what it excluded rather than quietly drop a row.
-const ROSTER_BOSS_TYPE := "forest_warden"
+## scan has to name what it excluded rather than quietly drop a row. All four bosses
+## (spec §11) are listed here so none of them is scanned as a normal type — and so a
+## boss that happens to share a trait tuple with a normal enemy (the Bell Ringer reads
+## as an archer by tuple) is not mistaken for a palette-swap duplicate.
+const ROSTER_BOSS_TYPES: Array[String] = [
+	"forest_warden", "root_mother", "captain_of_the_guard", "bell_ringer",
+]
 
 
 ## The mechanical fingerprint of an enemy type: every lever the trait system has
@@ -9286,7 +9299,7 @@ func _test_enemy_roster() -> void:
 			if inst == null:
 				continue
 			var type := String(inst.get("enemy_type"))
-			if type == ROSTER_BOSS_TYPE:
+			if ROSTER_BOSS_TYPES.has(type):
 				boss_seen.append(type)
 				inst.free()
 				continue
@@ -9307,8 +9320,12 @@ func _test_enemy_roster() -> void:
 	_check(duplicates.is_empty(),
 		"no two normal types share a trait tuple (%d tuples over %d types: %s)"
 			% [signatures.size(), types_seen.size(), ", ".join(duplicates)])
-	_check(boss_seen == [ROSTER_BOSS_TYPE],
-		"exactly the boss was excluded from the count (got %s)" % ", ".join(boss_seen))
+	var boss_seen_sorted := boss_seen.duplicate()
+	boss_seen_sorted.sort()
+	var boss_types_sorted := ROSTER_BOSS_TYPES.duplicate()
+	boss_types_sorted.sort()
+	_check(boss_seen_sorted == boss_types_sorted,
+		"exactly the four bosses were excluded from the count (got %s)" % ", ".join(boss_seen_sorted))
 	for zone_id: String in ROSTER_ZONES.keys():
 		for type: String in (ROSTER_ZONES[zone_id] as Array):
 			_check(types_seen.has(type), "%s fields %s" % [zone_id, type])
@@ -9923,8 +9940,8 @@ func _test_dungeon() -> void:
 	for lm: Dictionary in world.call("landmarks"):
 		landmark_kinds.append(String(lm.get("kind", "")))
 	landmark_kinds.sort()
-	_check(landmark_kinds == ["gate", "trap", "trap"],
-		"the map marks the way back and the two plates (got %s)" % ", ".join(landmark_kinds))
+	_check(landmark_kinds == ["boss", "gate", "trap", "trap"],
+		"the map marks the boss, the way back and the two plates (got %s)" % ", ".join(landmark_kinds))
 	var lm_ids: Array[String] = []
 	for lm: Dictionary in world.call("landmarks"):
 		lm_ids.append(String(lm.get("id", "")))
@@ -10439,3 +10456,401 @@ func _test_fortress() -> void:
 	gs.reset()
 	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
 	completed["fortress"] = true
+
+
+## The single live boss of `type`, or null. Reads the boss group so it works no matter
+## which zone is currently built, and skips dead bosses so one killed earlier in the
+## run is not mistaken for the one standing in the world now.
+func _boss_of_type(type: String) -> Node2D:
+	for node in get_nodes_in_group("boss"):
+		if is_instance_valid(node) and String(node.get("enemy_type")) == type \
+				and int(node.get("state")) != 6:  # State.DEAD
+			return node as Node2D
+	return null
+
+
+## Spec §11: three more bosses — the Root Mother in the forest, the Captain of the
+## Funeral Guard in the ruins, the Bell Ringer in the undercroft — each with a second
+## readable phase and a mechanic the warden does not have, plus the `InfectedNode` weak
+## point the Root Mother grows. The group mirrors `_test_forest_warden_boss`: stats read
+## off the scene, a live placement pass through the real worlds, then behaviour on a
+## bare arena where nothing but the boss and one duelist exists.
+##
+## The unique mechanics are driven through the boss's own public seams rather than by
+## waiting out multi-second clocks: the Root Mother's summon cadence and cap are walked
+## by feeding `_tick_summon` a full interval, the Captain's phase-two heavy cadence is
+## probed through `_start_attack` exactly as the warden's is, and the Bell Ringer exposes
+## `ring_wave` / `spawn_hazards` / `apply_now` so the "inside the ring / outside the ring"
+## promise is checked directly. Damage is read back out of the resolver's own
+## `damage_dealt` payload (filtered to the player by `target_id` and to the mechanic by
+## `damage_type`), never out of the player's HP, because the player has i-frames and the
+## payload does not.
+func _test_three_bosses() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	_clear_death_pools()
+	for node in get_nodes_in_group("infected_node"):
+		node.queue_free()
+	for node in get_nodes_in_group("bell_hazard"):
+		node.queue_free()
+	await process_frame
+	await process_frame
+
+	# --- 1. the three scenes carry the stats spec §11 asks of a boss -----------
+	var stat_scenes := {
+		"root_mother": {
+			"name": "Корневая Матерь", "hp": 260, "dmg": 14, "xp": 200, "gold": 90,
+			"loot": "swift_ring", "speed": 0.7, "block": 0.0, "kind": 0,
+		},
+		"captain_of_the_guard": {
+			"name": "Капитан Погребальной Стражи", "hp": 300, "dmg": 18, "xp": 260, "gold": 120,
+			"loot": "iron_spear", "speed": 1.0, "block": 0.6, "kind": 0,
+		},
+		"bell_ringer": {
+			"name": "Звонарь Пустой Крипты", "hp": 340, "dmg": 16, "xp": 320, "gold": 150,
+			"loot": "leather_armor", "speed": 1.0, "block": 0.0, "kind": 1,
+		},
+	}
+	for type: String in stat_scenes.keys():
+		var expected: Dictionary = stat_scenes[type]
+		var inst := (load("res://scenes/enemies/%s.tscn" % type) as PackedScene).instantiate() as Node2D
+		_check(inst != null, "%s.tscn loads and instantiates" % type)
+		if inst == null:
+			continue
+		_check(String(inst.get("enemy_type")) == type, "%s names itself" % type)
+		_check(String(inst.get("display_name")) == String(expected["name"]),
+			"%s is named '%s' (got '%s')" % [type, String(expected["name"]), String(inst.get("display_name"))])
+		_check(int(inst.get("max_health")) == int(expected["hp"]),
+			"%s pool is %d (got %d)" % [type, int(expected["hp"]), int(inst.get("max_health"))])
+		_check(int(inst.get("attack_damage")) == int(expected["dmg"]),
+			"%s hits for %d (got %d)" % [type, int(expected["dmg"]), int(inst.get("attack_damage"))])
+		_check(int(inst.get("xp_reward")) == int(expected["xp"]) and int(inst.get("gold_reward")) == int(expected["gold"]),
+			"%s pays %d xp and %d gold" % [type, int(expected["xp"]), int(expected["gold"])])
+		_check(String(inst.get("loot_item")) == String(expected["loot"]) and is_equal_approx(float(inst.get("loot_chance")), 1.0),
+			"%s always drops its %s" % [type, String(expected["loot"])])
+		_check(is_equal_approx(float(inst.get("speed_multiplier")), float(expected["speed"])),
+			"%s base speed is %.2f" % [type, float(expected["speed"])])
+		_check(is_equal_approx(float(inst.get("frontal_block")), float(expected["block"])),
+			"%s frontal block is %.2f in phase 1" % [type, float(expected["block"])])
+		_check(int(inst.get("kind")) == int(expected["kind"]),
+			"%s is a %s boss" % [type, "ranged" if int(expected["kind"]) == 1 else "melee"])
+		_check(is_equal_approx(float(inst.get("phase_two_health_fraction")), 0.5),
+			"%s enrages at half its pool" % type)
+		var hc := inst.get_node_or_null("HealthComponent") as HealthComponent
+		_check(hc != null and int(hc.max_health) == int(expected["hp"]),
+			"%s carries a HealthComponent on the same pool" % type)
+		inst.free()
+
+	# --- 2. each boss really stands in its own zone, on ground, clear of arrival -
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var manager := scene.get_node_or_null("ZoneManager")
+
+	# forest: the Root Mother, outside the village safe zone and clear of the spawn.
+	var forest := scene.get_node_or_null("World")
+	var root_mother := _boss_of_type("root_mother")
+	_check(root_mother != null, "the forest spawns the Root Mother")
+	if root_mother != null and forest != null:
+		var rm_tile := _tile_of_node(root_mother as Node2D)
+		var rm_cell := String(forest.call("cell_at", rm_tile))
+		_check(rm_cell == "." or rm_cell == ",", "the Root Mother stands on a walkable tile ('%s' at %s)" % [rm_cell, str(rm_tile)])
+		_check(not bool(forest.call("is_in_safe_zone", rm_tile)),
+			"the Root Mother is outside the village safe zone (%s)" % str(rm_tile))
+	_check(root_mother != null and int(root_mother.call("current_phase")) == 1,
+		"the Root Mother starts in phase 1 in the live forest")
+
+	if manager != null:
+		_check(bool(manager.call("travel", "ruins")), "the group travelled into the ruins")
+		await process_frame
+		await process_frame
+		var ruins := scene.get_node_or_null("World")
+		var captain := _boss_of_type("captain_of_the_guard")
+		_check(captain != null, "the ruins spawn the Captain of the Guard")
+		if captain != null and ruins != null:
+			var cap_tile := _tile_of_node(captain as Node2D)
+			var cap_cell := String(ruins.call("cell_at", cap_tile))
+			_check(cap_cell == "." or cap_cell == ",", "the Captain stands on a walkable tile ('%s' at %s)" % [cap_cell, str(cap_tile)])
+			var cap_entry := Vector2i(manager.call("entry_tile", "ruins"))
+			var cap_sep := maxi(absi(cap_tile.x - cap_entry.x), absi(cap_tile.y - cap_entry.y))
+			_check(cap_sep >= 10, "the Captain keeps %d tiles from the ruins entry" % cap_sep)
+
+		_check(bool(manager.call("travel", "dungeon")), "the group travelled into the undercroft")
+		await process_frame
+		await process_frame
+		var dungeon := scene.get_node_or_null("World")
+		var bell := _boss_of_type("bell_ringer")
+		_check(bell != null, "the undercroft spawns the Bell Ringer")
+		if bell != null and dungeon != null:
+			var bell_tile := _tile_of_node(bell as Node2D)
+			var bell_cell := String(dungeon.call("cell_at", bell_tile))
+			_check(bell_cell == "." or bell_cell == ",", "the Bell Ringer stands on a walkable tile ('%s' at %s)" % [bell_cell, str(bell_tile)])
+			var bell_entry := Vector2i(manager.call("entry_tile", "dungeon"))
+			var bell_sep := maxi(absi(bell_tile.x - bell_entry.x), absi(bell_tile.y - bell_entry.y))
+			_check(bell_sep >= 10, "the Bell Ringer keeps %d tiles from the undercroft entry" % bell_sep)
+
+	scene.queue_free()
+	await process_frame
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	await process_frame
+
+	# --- behaviour arena -------------------------------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var duelist := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	duelist.position = Vector2.ZERO
+	arena.add_child(duelist)
+	await process_frame
+
+	# --- phase 2 fires exactly once for each of the three ----------------------
+	var phase_scenes := {
+		"root_mother": 260, "captain_of_the_guard": 300, "bell_ringer": 340,
+	}
+	for type: String in phase_scenes.keys():
+		var hp: int = int(phase_scenes[type])
+		var threshold: int = int(floor(float(hp) * 0.5))
+		var boss := (load("res://scenes/enemies/%s.tscn" % type) as PackedScene).instantiate() as Node2D
+		boss.position = Vector2(600, 600)
+		arena.add_child(boss)
+		var log: Array[int] = []
+		var rec := func(phase: int) -> void: log.append(phase)
+		boss.connect(&"phase_changed", rec)
+		await process_frame
+		_check(int(boss.call("current_phase")) == 1, "%s starts in phase 1" % type)
+		_check(int(boss.call("phase_two_threshold")) == threshold, "%s phase-2 threshold is %d" % [type, threshold])
+		# one point above the threshold: nothing may fire.
+		DamageResolver.resolve_hit(null, boss, {"damage": hp - threshold - 1, "hit_id": "%s-ph-a" % type, "damage_type": "physical"})
+		_check(log.is_empty(), "%s does not enrage one point above the threshold" % type)
+		DamageResolver.resolve_hit(null, boss, {"damage": 1, "hit_id": "%s-ph-b" % type, "damage_type": "physical"})
+		_check(log.size() == 1 and log[0] == 2, "%s crosses into phase 2 exactly once" % type)
+		_check(int(boss.call("current_phase")) == 2, "%s reports phase 2" % type)
+		DamageResolver.resolve_hit(null, boss, {"damage": 40, "hit_id": "%s-ph-c" % type, "damage_type": "physical"})
+		_check(log.size() == 1, "%s never re-fires the enrage below the threshold" % type)
+		boss.disconnect(&"phase_changed", rec)
+		boss.queue_free()
+		await process_frame
+	# The Root Mother in that loop grew two weak points into the arena and was freed
+	# rather than killed, so those two orphans go now, before the dedicated pass below
+	# counts its own pair.
+	for node in get_nodes_in_group("infected_node"):
+		node.queue_free()
+	await process_frame
+
+	# --- Root Mother: phase 1 summons a capped crowd, phase 2 stops and roots ---
+	var rm := (load("res://scenes/enemies/root_mother.tscn") as PackedScene).instantiate() as Node2D
+	rm.position = Vector2(100, 0)  # inside summon_radius of the duelist at the origin
+	arena.add_child(rm)
+	await process_frame
+	# Feed a full interval at a time: each call that clears the interval puts one spider
+	# down until the cap, which is the cadence and the ceiling without waiting twelve
+	# seconds of real time.
+	for i in range(6):
+		rm.call("_tick_summon", 4.0)
+	_check(int(rm.call("minion_count")) == 3,
+		"the Root Mother summons up to three spiders and no more (got %d)" % int(rm.call("minion_count")))
+	var spider_minions := 0
+	for m in rm.get("_minions"):
+		if is_instance_valid(m) and String(m.get("enemy_type")) == "spider":
+			spider_minions += 1
+	_check(spider_minions == 3, "the three minions are real spiders")
+	# cross into phase 2: summoning stops, two weak points grow.
+	DamageResolver.resolve_hit(null, rm, {"damage": 140, "hit_id": "rm-to-p2", "damage_type": "physical"})
+	await process_frame
+	_check(int(rm.call("current_phase")) == 2, "the Root Mother is in phase 2")
+	_check(int(rm.call("infected_node_count")) == 2,
+		"phase 2 grows exactly two infected nodes (got %d)" % int(rm.call("infected_node_count")))
+	var before_extra := int(rm.call("minion_count"))
+	for i in range(4):
+		rm.call("_tick_summon", 4.0)
+	_check(int(rm.call("minion_count")) == before_extra, "phase 2 never summons again")
+	# destroying both nodes weakens the boss exactly once.
+	var nodes := get_nodes_in_group("infected_node")
+	_check(nodes.size() == 2, "the two infected nodes are in the world (got %d)" % nodes.size())
+	for nd in nodes:
+		nd.call("receive_damage", 999, {"damage": 999, "hit_id": "rm-node-kill"})
+	await process_frame
+	_check(bool(rm.call("is_weakened")), "cutting both nodes weakens the Root Mother")
+	_check(int(rm.call("infected_node_count")) == 0, "the destroyed nodes are gone")
+	rm.queue_free()
+	# the three summoned spiders are arena children, not the boss's; drop them so they
+	# cannot chew on the duelist during the blocks below.
+	_clear_enemies()
+	await process_frame
+
+	# --- Root Mother: the weakened blunting is one-way and exact ---------------
+	var rm2 := (load("res://scenes/enemies/root_mother.tscn") as PackedScene).instantiate() as Node2D
+	rm2.position = Vector2(600, 600)
+	arena.add_child(rm2)
+	await process_frame
+	var rm_dmg_before := int(rm2.get("attack_damage"))
+	var rm_speed_before := float(rm2.get("speed_multiplier"))
+	_check(bool(rm2.call("weaken")), "the first weaken applies")
+	_check(int(rm2.get("attack_damage")) == int(round(float(rm_dmg_before) * 0.6)),
+		"weakened swing keeps 60%% of its number (%d -> %d)" % [rm_dmg_before, int(rm2.get("attack_damage"))])
+	_check(is_equal_approx(float(rm2.get("speed_multiplier")), rm_speed_before * 0.75),
+		"weakened stride keeps 75%% of its speed (%.3f -> %.3f)" % [rm_speed_before, float(rm2.get("speed_multiplier"))])
+	_check(not bool(rm2.call("weaken")), "a second weaken does nothing")
+	_check(int(rm2.get("attack_damage")) == int(round(float(rm_dmg_before) * 0.6)), "the second weaken left the swing alone")
+	_check(is_equal_approx(float(rm2.get("speed_multiplier")), rm_speed_before * 0.75), "the second weaken left the stride alone")
+	rm2.queue_free()
+	await process_frame
+
+	# --- Captain: the shield is up in phase 1, gone for good in phase 2 --------
+	var cap := (load("res://scenes/enemies/captain_of_the_guard.tscn") as PackedScene).instantiate() as Node2D
+	cap.position = Vector2(600, 600)
+	arena.add_child(cap)
+	await process_frame
+	_check(is_equal_approx(float(cap.get("frontal_block")), 0.6), "the Captain blocks from the front in phase 1")
+	DamageResolver.resolve_hit(null, cap, {"damage": 151, "hit_id": "cap-to-p2", "damage_type": "physical"})
+	await process_frame
+	_check(int(cap.call("current_phase")) == 2, "the Captain is in phase 2")
+	_check(is_equal_approx(float(cap.get("frontal_block")), 0.0), "phase 2 drops the shield for good")
+	_check((cap.get("_base_telegraph_color") as Color).is_equal_approx(Color(0.55, 0.78, 1.0, 0.85)),
+		"phase 2 recolours the telegraph to the colder phase-two promise")
+	# phase-2 heavy cadence: every second swing, probed through the real seam.
+	var cap_cadence: Array[bool] = []
+	for probe in range(1, 8):
+		cap.set("_swing_counter", probe - 1)
+		cap.call("_start_attack")
+		cap_cadence.append(bool(cap.call("is_heavy_swing")))
+	_check(cap_cadence == [false, true, false, true, false, true, false],
+		"the enraged Captain lands the heavy swing on every second swing %s" % str(cap_cadence))
+	cap.call("_release_heavy_windup")
+	cap.queue_free()
+	await process_frame
+
+	# --- Bell Ringer: the shock wave strikes inside the ring, not outside ------
+	var bell2 := (load("res://scenes/enemies/bell_ringer.tscn") as PackedScene).instantiate() as Node2D
+	bell2.position = Vector2.ZERO
+	arena.add_child(bell2)
+	await process_frame
+	var pid := duelist.get_instance_id()
+	var shock_hits: Array[int] = []
+	var shock_listener := func(payload: Dictionary) -> void:
+		if int(payload.get("target_id", 0)) == pid and String(payload.get("damage_type", "")) == "shock":
+			shock_hits.append(int(payload.get("final_damage", 0)))
+	bus.damage_dealt.connect(shock_listener)
+	duelist.global_position = bell2.global_position  # dead centre, well inside 90 px
+	var wave := bell2.call("ring_wave") as Node2D
+	wave.call("apply_now")
+	_check(shock_hits.size() == 1, "a wave strikes a player standing inside the ring (got %d)" % shock_hits.size())
+	duelist.global_position = bell2.global_position + Vector2(400, 0)  # far outside 90 px
+	var wave2 := bell2.call("ring_wave") as Node2D
+	wave2.call("apply_now")
+	_check(shock_hits.size() == 1, "a wave leaves a player outside the ring alone (got %d)" % shock_hits.size())
+	bus.damage_dealt.disconnect(shock_listener)
+
+	# --- Bell Ringer: phase-2 hazards cap at four and strike whoever stands in -
+	bell2.call("spawn_hazards")
+	bell2.call("spawn_hazards")
+	bell2.call("spawn_hazards")
+	var hazards := get_nodes_in_group("bell_hazard")
+	_check(hazards.size() == 4, "hazards cap at four live circles (got %d)" % hazards.size())
+	var blight_hits: Array[int] = []
+	var blight_listener := func(payload: Dictionary) -> void:
+		if int(payload.get("target_id", 0)) == pid and String(payload.get("damage_type", "")) == "blight":
+			blight_hits.append(int(payload.get("final_damage", 0)))
+	bus.damage_dealt.connect(blight_listener)
+	var hz := hazards[0] as Node2D
+	duelist.global_position = hz.global_position
+	hz.call("apply_now")
+	_check(blight_hits.size() == 1, "a hazard strikes a player standing in it (got %d)" % blight_hits.size())
+	duelist.global_position = hz.global_position + Vector2(600, 0)
+	hz.call("apply_now")
+	_check(blight_hits.size() == 1, "a hazard leaves a player outside it alone (got %d)" % blight_hits.size())
+	bus.damage_dealt.disconnect(blight_listener)
+	# a circle frees itself once its lifetime runs out.
+	hz.set("_elapsed", 4.5)  # past telegraph (1.2) + lifetime (3.0)
+	await process_frame
+	await process_frame
+	_check(not is_instance_valid(hz) or not hz.is_in_group("bell_hazard"),
+		"a hazard circle frees itself after its lifetime")
+	bell2.queue_free()
+	duelist.global_position = Vector2.ZERO
+	for node in get_nodes_in_group("bell_hazard"):
+		node.queue_free()
+	await process_frame
+
+	# --- ordinary hits do not lock any of the three ----------------------------
+	for type: String in ["root_mother", "captain_of_the_guard", "bell_ringer"]:
+		var bulwark := (load("res://scenes/enemies/%s.tscn" % type) as PackedScene).instantiate() as Node2D
+		bulwark.position = Vector2(600, 600)
+		arena.add_child(bulwark)
+		var st := bulwark.get_node_or_null("StatusComponent") as StatusComponent
+		if st != null:
+			st.set_process(false)
+		await process_frame
+		DamageResolver.resolve_hit(null, bulwark, {"damage": 5, "hit_id": "%s-stag" % type, "damage_type": "physical"})
+		_check(int(bulwark.get("state")) != 5,
+			"an ordinary hit does not stagger the %s (state=%s)" % [type, str(bulwark.get("state"))])
+		bulwark.queue_free()
+		await process_frame
+
+	# --- each kill pays exactly its bounty, once -------------------------------
+	var bounties := {
+		"root_mother": {"gold": 90, "loot": "swift_ring"},
+		"captain_of_the_guard": {"gold": 120, "loot": "iron_spear"},
+		"bell_ringer": {"gold": 150, "loot": "leather_armor"},
+	}
+	for type: String in bounties.keys():
+		gs.reset()
+		DamageResolver.reset()
+		var bounty := (load("res://scenes/enemies/%s.tscn" % type) as PackedScene).instantiate() as Node2D
+		bounty.position = Vector2(600, 600)
+		arena.add_child(bounty)
+		await process_frame
+		var died_types: Array[StringName] = []
+		var death_listener := func(enemy_id: StringName, enemy_type: StringName, _pos: Vector2) -> void:
+			died_types.append(enemy_type)
+		bus.enemy_died.connect(death_listener)
+		bounty.receive_damage(999, {"damage": 999, "hit_id": "%s-bounty" % type})
+		bus.enemy_died.disconnect(death_listener)
+		_check(died_types.size() == 1 and died_types[0] == StringName(type),
+			"enemy_died fires once for the %s (%s)" % [type, str(died_types)])
+		_check(gs.kill_count(type) == 1, "the %s kill is credited once" % type)
+		_check(gs.gold == int((bounties[type] as Dictionary)["gold"]),
+			"the %s paid exactly %d gold (got %d)" % [type, int((bounties[type] as Dictionary)["gold"]), gs.gold])
+		_check(gs.count_item(String((bounties[type] as Dictionary)["loot"])) == 1,
+			"the %s dropped its %s exactly once" % [type, String((bounties[type] as Dictionary)["loot"])])
+		bounty.queue_free()
+		await process_frame
+
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	_clear_death_pools()
+	for node in get_nodes_in_group("infected_node"):
+		node.queue_free()
+	for node in get_nodes_in_group("bell_hazard"):
+		node.queue_free()
+	# This group is the last in the suite to make noise — three boss deaths, their
+	# hits, their phase roars — and the suite quits the frame it returns. A voice
+	# still playing when the process goes down is an AudioStreamPlayback the headless
+	# audio driver cannot reap in time, which surfaces as leaked instances and streams
+	# "still in use" at exit. AudioManager stops its own voices in _exit_tree; doing
+	# the same here, a few frames before quitting, gives the driver frames to flush in
+	# so the shutdown comes out clean.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		for child in audio.get_children():
+			var voice := child as AudioStreamPlayer
+			if voice != null:
+				if voice.playing:
+					voice.stop()
+				voice.stream = null
+		# A frame or two is not a reliable window: the headless driver reaps a stopped
+		# playback on its own schedule, so wait out the longest cue (boss_roar is 500 ms)
+		# on a real timer before the suite quits.
+		await create_timer(0.6).timeout
+	completed["three_bosses"] = true

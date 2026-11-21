@@ -29,6 +29,10 @@ const COLOR_TABLET := Color(0.78, 0.80, 0.88)
 ## assertive marker on the map. Clear of the violet gate it can sit beside, of the
 ## near-white tablet, and of the green lever, none of which name a whole room.
 const COLOR_ROOM := Color(0.38, 0.44, 0.55)
+## A zone boss. Drawn in the same purple family as the boss health bar (HUD
+## `COLOR_BOSS_BAR`), so the marker on the map and the bar over the fight read as the
+## same thing: the map says "a boss is here", the bar says "you are fighting it".
+const COLOR_BOSS := Color(0.72, 0.40, 0.85)
 const COLOR_PLAYER := Color(0.90, 1.0, 1.0)
 
 var _world: Node = null
@@ -170,6 +174,11 @@ func _draw() -> void:
 				# ground rather than a thing standing on it.
 				"room":
 					color = COLOR_ROOM
+				# A zone boss. Marked for the whole life of the zone: the marker points
+				# at the fight the player came to find, and a cleared boss is still the
+				# room he will remember.
+				"boss":
+					color = COLOR_BOSS
 				_:
 					continue
 			_draw_marker(tile, color)
