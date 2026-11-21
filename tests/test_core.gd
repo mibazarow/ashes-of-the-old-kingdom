@@ -345,12 +345,15 @@ func _run() -> void:
 	print("== three new bosses ==")
 	await _test_three_bosses()
 
+	print("== king and endings ==")
+	await _test_king_and_endings()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 60, "every test group ran to completion (got %d/60)" % completed.size())
+	_check(completed.size() == 61, "every test group ran to completion (got %d/61)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6379,7 +6382,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- the quest table ------------------------------------------------------
 	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
 	var table: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
-	_check(table.size() == 5, "data/quests.json defines 5 quests (got %d)" % table.size())
+	_check(table.size() == 8, "data/quests.json defines 8 quests (got %d)" % table.size())
 	_check(table.has("q01_ash_wolves") and table.has("q02_gather_fangs") and table.has("q03_clear_boars"),
 		"the quest table holds q01, q02 and q03")
 
@@ -7573,10 +7576,11 @@ func _test_ruins_quests() -> void:
 	for quest_id: String in defs.keys():
 		ids.append(quest_id)
 	ids.sort()
-	_check(defs.size() == 5, "data/quests.json declares five quests (got %d)" % defs.size())
+	_check(defs.size() == 8, "data/quests.json declares eight quests (got %d)" % defs.size())
 	_check(ids == ["q01_ash_wolves", "q02_gather_fangs", "q03_clear_boars",
-			"q04_bone_guard", "q05_ruin_key"],
-		"the two ruins quests sit beside the three forest ones (%s)" % ", ".join(ids))
+			"q04_bone_guard", "q05_ruin_key", "q06_the_crown", "q07_captain_guard",
+			"q08_the_bell"],
+		"the three story quests sit beside the two ruins and three forest ones (%s)" % ", ".join(ids))
 
 	var bone: Dictionary = defs.get("q04_bone_guard", {})
 	var keyq: Dictionary = defs.get("q05_ruin_key", {})
@@ -9173,12 +9177,13 @@ const ROSTER_ZONES: Dictionary = {
 
 ## The bosses are deliberately outside the count. Spec §10 asks for eighteen
 ## mechanically distinct *normal* enemy types, and a boss is not one of them, so the
-## scan has to name what it excluded rather than quietly drop a row. All four bosses
-## (spec §11) are listed here so none of them is scanned as a normal type — and so a
-## boss that happens to share a trait tuple with a normal enemy (the Bell Ringer reads
-## as an archer by tuple) is not mistaken for a palette-swap duplicate.
+## scan has to name what it excluded rather than quietly drop a row. All five bosses
+## (spec §11, §11.4) are listed here so none of them is scanned as a normal type — and
+## so a boss that happens to share a trait tuple with a normal enemy (the Bell Ringer
+## reads as an archer by tuple) is not mistaken for a palette-swap duplicate.
 const ROSTER_BOSS_TYPES: Array[String] = [
 	"forest_warden", "root_mother", "captain_of_the_guard", "bell_ringer",
+	"king_without_crown",
 ]
 
 
@@ -9325,7 +9330,7 @@ func _test_enemy_roster() -> void:
 	var boss_types_sorted := ROSTER_BOSS_TYPES.duplicate()
 	boss_types_sorted.sort()
 	_check(boss_seen_sorted == boss_types_sorted,
-		"exactly the four bosses were excluded from the count (got %s)" % ", ".join(boss_seen_sorted))
+		"exactly the five bosses were excluded from the count (got %s)" % ", ".join(boss_seen_sorted))
 	for zone_id: String in ROSTER_ZONES.keys():
 		for type: String in (ROSTER_ZONES[zone_id] as Array):
 			_check(types_seen.has(type), "%s fields %s" % [zone_id, type])
@@ -10853,4 +10858,371 @@ func _test_three_bosses() -> void:
 		# playback on its own schedule, so wait out the longest cue (boss_roar is 500 ms)
 		# on a real timer before the suite quits.
 		await create_timer(0.6).timeout
-	completed["three_bosses"] = true
+		completed["three_bosses"] = true
+
+
+## Spec §11.4 + §16.1: the final boss «Король Без Венца» with three readable phases,
+## the three story quests that walk the player to him, the throne that ends the run,
+## and the victory screen's route back to the menu. The group mirrors `_test_three_bosses`:
+## stats read off the scene, a live pass through the real fortress (the King in his
+## ring, the altar in the sanctum, the endings committed through the altar against the
+## live HUD), then behaviour on a bare arena where nothing but the King and one duelist
+## exists. The unique mechanics are driven through the King's own public seams —
+## `phase_thresholds`, `ring_wave` / `spawn_pillars` / `apply_now` — so the "inside the
+## ring / outside the ring" promise is checked directly, and damage is read out of the
+## resolver's `damage_dealt` payload (filtered by `target_id` and the mechanic's own
+## `damage_type`), never out of the player's HP, because the player has i-frames.
+func _test_king_and_endings() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	_clear_death_pools()
+	for node in get_nodes_in_group("king_pillar"):
+		node.queue_free()
+	await process_frame
+	await process_frame
+
+	# --- 1. the scene carries the stats spec §11.4 asks of the final boss -------
+	var king_inst := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	_check(king_inst != null, "king_without_crown.tscn loads and instantiates")
+	if king_inst != null:
+		_check(String(king_inst.get("enemy_type")) == "king_without_crown", "the King names himself")
+		_check(String(king_inst.get("display_name")) == "Король Без Венца",
+			"the King is named «Король Без Венца» (got '%s')" % String(king_inst.get("display_name")))
+		_check(int(king_inst.get("max_health")) == 600, "the King pool is 600 (got %d)" % int(king_inst.get("max_health")))
+		_check(int(king_inst.get("attack_damage")) == 22, "the King hits for 22 (got %d)" % int(king_inst.get("attack_damage")))
+		_check(int(king_inst.get("xp_reward")) == 600 and int(king_inst.get("gold_reward")) == 300,
+			"the King pays 600 xp and 300 gold (got %d / %d)" % [int(king_inst.get("xp_reward")), int(king_inst.get("gold_reward"))])
+		_check(is_equal_approx(float(king_inst.get("speed_multiplier")), 0.85), "the King base speed is 0.85")
+		_check((king_inst.get("sprite_tint") as Color).is_equal_approx(Color(0.9, 0.78, 0.45, 1)),
+			"the King wears the ash-gold tint")
+		_check(int(king_inst.get("kind")) == 0, "the King is a melee boss")
+		_check(is_equal_approx(float(king_inst.get("enraged_speed_multiplier")), 1.2)
+				and is_equal_approx(float(king_inst.get("enraged_cooldown_multiplier")), 0.8),
+			"the King's phase-two enrage is speed 1.2 / cooldown 0.8")
+		var thresholds: Array = king_inst.call("phase_thresholds")
+		_check(thresholds.size() == 2 and is_equal_approx(float(thresholds[0]), 0.66) and is_equal_approx(float(thresholds[1]), 0.33),
+			"the King crosses phases at 0.66 and 0.33 (got %s)" % str(thresholds))
+		var hc := king_inst.get_node_or_null("HealthComponent") as HealthComponent
+		_check(hc != null and int(hc.max_health) == 600, "the King carries a HealthComponent on the same pool")
+		var body_shape := king_inst.get_node_or_null("CollisionShape2D") as CollisionShape2D
+		_check(body_shape != null and body_shape.shape != null, "the King has a body shape")
+		var hitbox := king_inst.get_node_or_null("AttackHitbox/CollisionShape2D") as CollisionShape2D
+		_check(hitbox != null and hitbox.shape != null, "the King has an attack hitbox")
+		king_inst.free()
+
+	# --- 2. the three story quests are authored and pay out ---------------------
+	for quest_id: String in ["q06_the_crown", "q07_captain_guard", "q08_the_bell"]:
+		var def: Dictionary = qm.call("get_quest", quest_id)
+		_check(not def.is_empty(), "%s is defined in data/quests.json" % quest_id)
+	_check(String(qm.call("objective_type", "q06_the_crown")) == "kill"
+			and String(qm.call("objective_target", "q06_the_crown")) == "ruin_skeleton"
+			and int(qm.call("target_count", "q06_the_crown")) == 6,
+		"q06 hunts six ruin_skeleton")
+	_check(String(qm.call("objective_target", "q07_captain_guard")) == "captain_of_the_guard"
+			and int(qm.call("target_count", "q07_captain_guard")) == 1,
+		"q07 hunts the Captain once")
+	_check(String(qm.call("objective_target", "q08_the_bell")) == "bell_ringer"
+			and int(qm.call("target_count", "q08_the_bell")) == 1,
+		"q08 hunts the Bell Ringer once")
+
+	# --- 3. a live pass: the King in his ring, the altar in the sanctum ---------
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var manager := scene.get_node_or_null("ZoneManager")
+	var hud := scene.get_node_or_null("HUD")
+	_check(manager != null, "the king group has a zone manager to travel with")
+	_check(hud != null, "the king group has a HUD for the ending screen")
+	if manager != null:
+		_check(bool(manager.call("travel", "fortress")), "the group travelled into the fortress")
+		await process_frame
+		await process_frame
+	var world := scene.get_node_or_null("World")
+	_check(world != null and String(world.call("zone_id")) == "fortress", "the live world is the fortress")
+
+	var king := _boss_of_type("king_without_crown")
+	_check(king != null, "the fortress spawns the King Without a Crown")
+	_check(king != null and king.is_in_group("boss"), "the King is in the boss group")
+	_check(king != null and int(king.call("current_phase")) == 1, "the King starts in phase 1 in the live fortress")
+	if king != null and world != null:
+		var king_tile := _tile_of_node(king as Node2D)
+		var king_cell := String(world.call("cell_at", king_tile))
+		_check(king_cell == "." or king_cell == ",", "the King stands on a walkable tile ('%s' at %s)" % [king_cell, str(king_tile)])
+		# The ring kept for him is Rect2i(42,11,5,8); he belongs inside it.
+		_check(Rect2i(42, 11, 5, 8).has_point(king_tile), "the King stands inside the sanctum ring (%s)" % str(king_tile))
+
+	var altar := world.get_node_or_null("EndingAltar") if world != null else null
+	_check(altar != null, "the fortress places the EndingAltar")
+	_check(altar != null and altar.is_in_group("interactable"), "the throne is an interactable")
+
+	# --- 4. the throne refuses before the King falls, accepts after -------------
+	var toasts: Array[String] = []
+	var toast_listener := func(message: String) -> void: toasts.append(message)
+	bus.toast.connect(toast_listener)
+	gs.reset()  # no king_defeated, no ending
+	if altar != null:
+		_check(String((altar as Node).call("prompt_text")) == "Трон", "the sealed throne prompts 'Трон' (got '%s')" % String((altar as Node).call("prompt_text")))
+		altar.call("interact", null)
+		_check(toasts.has("Сначала победите короля"), "the throne refuses before the King is dead (%s)" % ", ".join(toasts))
+		_check(not bool(altar.call("choose", "dawn")), "the throne refuses an ending before the King is dead")
+		_check(String(gs.ending) == "", "a refused ending left GameState.ending empty")
+	toasts.clear()
+
+	# Now the King is dead: the throne opens, and each ending commits exactly once.
+	gs.set_flag("king_defeated", true)
+	if altar != null:
+		_check(String((altar as Node).call("prompt_text")) == "Выбрать судьбу", "the open throne prompts 'Выбрать судьбу' (got '%s')" % String((altar as Node).call("prompt_text")))
+		_check(not bool(altar.call("choose", "throne_of_bones")), "an unknown ending id is refused")
+		_check(bool(altar.call("choose", "dawn")), "the throne accepts an ending once the King is dead")
+		_check(String(gs.ending) == "dawn", "the chosen ending is persisted to GameState.ending (got '%s')" % String(gs.ending))
+		_check(bool(gs.get_flag("ending_dawn", false)), "the ending_dawn flag is set")
+		_check(String(hud.call("victory_title_text")).contains("Новый рассвет"),
+			"the victory screen reads «Новый рассвет» (got '%s')" % String(hud.call("victory_title_text")))
+		_check(not bool(altar.call("choose", "memory")), "a second ending is refused")
+		_check(String(gs.ending) == "dawn", "the refused second ending left the first in place")
+		altar.call("interact", null)
+		_check(toasts.has("Судьба уже выбрана"), "the throne says the fate is taken once chosen (%s)" % ", ".join(toasts))
+	bus.toast.disconnect(toast_listener)
+	if hud != null:
+		hud.call("close_victory")
+
+	# --- 5. all three endings set their flag, persist, and name the screen ------
+	var ending_names := {"dawn": "Новый рассвет", "memory": "Память короля", "crown": "Пепельный венец"}
+	for ending_id: String in ending_names.keys():
+		gs.reset()
+		gs.set_flag("king_defeated", true)
+		if altar != null:
+			_check(bool(altar.call("choose", ending_id)), "%s is accepted by the throne" % ending_id)
+		_check(String(gs.ending) == ending_id, "%s persists to GameState.ending" % ending_id)
+		_check(bool(gs.get_flag("ending_" + ending_id, false)), "the %s flag is set" % ending_id)
+		if hud != null:
+			_check(String(hud.call("victory_title_text")).contains(String(ending_names[ending_id])),
+				"%s reads «%s» on the victory screen (got '%s')" % [ending_id, String(ending_names[ending_id]), String(hud.call("victory_title_text"))])
+			hud.call("close_victory")
+
+	# --- 6. the victory screen offers the route back to the menu ----------------
+	if hud != null:
+		_check(hud.has_method("return_to_menu"), "the HUD can return the finished run to the menu")
+		_check(String(hud.call("victory_hint_text")).contains("В главное меню"),
+			"the victory panel names the way to the main menu (got '%s')" % String(hud.call("victory_hint_text")))
+	# The menu path is checked as a literal rather than through `Hud.MENU_SCENE`: a
+	# compile-time reference to the Hud class would drag the whole HUD (and the
+	# autoloads it names) into this script's dependency graph, which `--script` mode
+	# cannot resolve. The path is spelled the same way `return_to_menu` spells it.
+	_check(ResourceLoader.exists("res://scenes/main/menu.tscn"), "the main menu scene exists on disk")
+
+	# --- 7. the ending survives a save round-trip -------------------------------
+	gs.reset()
+	gs.ending = "crown"
+	var snapshot: Dictionary = gs.to_dict()
+	gs.reset()
+	_check(String(gs.ending) == "", "reset clears the ending")
+	gs.from_dict(snapshot)
+	_check(String(gs.ending) == "crown", "the ending survives a save round-trip (got '%s')" % String(gs.ending))
+	gs.reset()
+
+	# free the live world before the bare-arena behaviour pass, so its player is the
+	# only one the wave and pillar rings can see.
+	scene.queue_free()
+	await process_frame
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	await process_frame
+
+	# --- behaviour arena --------------------------------------------------------
+	var arena := Node2D.new()
+	root.add_child(arena)
+	var duelist := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	duelist.position = Vector2.ZERO
+	arena.add_child(duelist)
+	await process_frame
+
+	# --- 8. the three phases fire exactly once, in order ------------------------
+	var king2 := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	king2.position = Vector2(600, 600)
+	arena.add_child(king2)
+	var phase_log: Array[int] = []
+	var phase_rec := func(phase: int) -> void: phase_log.append(phase)
+	king2.connect(&"phase_changed", phase_rec)
+	await process_frame
+	_check(int(king2.call("current_phase")) == 1, "the King starts in phase 1")
+	# one point above the 0.66 threshold (396 of 600): nothing may fire.
+	DamageResolver.resolve_hit(null, king2, {"damage": 203, "hit_id": "king-p2-a", "damage_type": "physical"})
+	_check(phase_log.is_empty(), "the King does not open act two one point above the threshold")
+	DamageResolver.resolve_hit(null, king2, {"damage": 1, "hit_id": "king-p2-b", "damage_type": "physical"})
+	_check(phase_log == [2], "the King crosses into phase 2 exactly once (got %s)" % str(phase_log))
+	_check(int(king2.call("current_phase")) == 2, "the King reports phase 2")
+	# one point above the 0.33 threshold (198 of 600): act three stays shut.
+	DamageResolver.resolve_hit(null, king2, {"damage": 197, "hit_id": "king-p3-a", "damage_type": "physical"})
+	_check(phase_log == [2], "the King does not open act three one point above the threshold")
+	DamageResolver.resolve_hit(null, king2, {"damage": 1, "hit_id": "king-p3-b", "damage_type": "physical"})
+	_check(phase_log == [2, 3], "the King crosses into phase 3 exactly once (got %s)" % str(phase_log))
+	_check(int(king2.call("current_phase")) == 3, "the King reports phase 3")
+	DamageResolver.resolve_hit(null, king2, {"damage": 100, "hit_id": "king-p3-c", "damage_type": "physical"})
+	_check(phase_log == [2, 3], "the King never re-fires a phase below its threshold")
+	king2.disconnect(&"phase_changed", phase_rec)
+	king2.queue_free()
+	await process_frame
+
+	# --- 9. the phase-two ash wave strikes inside the ring, not outside ---------
+	var king3 := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	king3.position = Vector2.ZERO
+	arena.add_child(king3)
+	await process_frame
+	var pid := duelist.get_instance_id()
+	var wave_hits: Array[int] = []
+	var wave_listener := func(payload: Dictionary) -> void:
+		if int(payload.get("target_id", 0)) == pid and String(payload.get("damage_type", "")) == "ash_wave":
+			wave_hits.append(int(payload.get("final_damage", 0)))
+	bus.damage_dealt.connect(wave_listener)
+	duelist.global_position = king3.global_position  # dead centre, well inside 100 px
+	var wave := king3.call("ring_wave") as Node2D
+	wave.call("apply_now")
+	_check(wave_hits.size() == 1, "an ash wave strikes a player inside the ring (got %d)" % wave_hits.size())
+	_check(wave_hits.size() == 1 and wave_hits[0] > 0, "the wave landed real damage (got %s)" % str(wave_hits))
+	duelist.global_position = king3.global_position + Vector2(400, 0)  # far outside 100 px
+	var wave2 := king3.call("ring_wave") as Node2D
+	wave2.call("apply_now")
+	_check(wave_hits.size() == 1, "an ash wave leaves a player outside the ring alone (got %d)" % wave_hits.size())
+	bus.damage_dealt.disconnect(wave_listener)
+	king3.queue_free()
+	for node in get_nodes_in_group("king_pillar"):
+		node.queue_free()
+	await process_frame
+
+	# --- 10. the phase-three pillars cap at six and strike whoever stands in ----
+	var king4 := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	king4.position = Vector2.ZERO
+	arena.add_child(king4)
+	await process_frame
+	king4.call("spawn_pillars")
+	king4.call("spawn_pillars")
+	king4.call("spawn_pillars")
+	var pillars := get_nodes_in_group("king_pillar")
+	_check(pillars.size() == 6, "ash pillars cap at six live (got %d)" % pillars.size())
+	var pillar_hits: Array[int] = []
+	var pillar_listener := func(payload: Dictionary) -> void:
+		if int(payload.get("target_id", 0)) == pid and String(payload.get("damage_type", "")) == "ash_pillar":
+			pillar_hits.append(int(payload.get("final_damage", 0)))
+	bus.damage_dealt.connect(pillar_listener)
+	var pl := pillars[0] as Node2D
+	duelist.global_position = pl.global_position
+	pl.call("apply_now")
+	_check(pillar_hits.size() == 1, "an ash pillar strikes a player standing in it (got %d)" % pillar_hits.size())
+	duelist.global_position = pl.global_position + Vector2(600, 0)
+	pl.call("apply_now")
+	_check(pillar_hits.size() == 1, "an ash pillar leaves a player outside it alone (got %d)" % pillar_hits.size())
+	bus.damage_dealt.disconnect(pillar_listener)
+	# a pillar frees itself once its lifetime runs out.
+	pl.set("_elapsed", 5.5)  # past telegraph (1.2) + lifetime (4.0)
+	await process_frame
+	await process_frame
+	_check(not is_instance_valid(pl) or not pl.is_in_group("king_pillar"), "an ash pillar frees itself after its lifetime")
+	king4.queue_free()
+	duelist.global_position = Vector2.ZERO
+	for node in get_nodes_in_group("king_pillar"):
+		node.queue_free()
+	await process_frame
+
+	# --- 11. an ordinary hit does not lock the King -----------------------------
+	var king5 := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	king5.position = Vector2(600, 600)
+	arena.add_child(king5)
+	var st := king5.get_node_or_null("StatusComponent") as StatusComponent
+	if st != null:
+		st.set_process(false)
+	await process_frame
+	DamageResolver.resolve_hit(null, king5, {"damage": 5, "hit_id": "king-stagger", "damage_type": "physical"})
+	_check(int(king5.get("state")) != 5, "an ordinary hit does not stagger the King (state=%s)" % str(king5.get("state")))
+	king5.queue_free()
+	await process_frame
+
+	# --- 12. the King's death pays once and marks the run -----------------------
+	gs.reset()
+	DamageResolver.reset()
+	var king6 := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	king6.position = Vector2(600, 600)
+	arena.add_child(king6)
+	await process_frame
+	var died_types: Array[StringName] = []
+	var death_listener := func(_enemy_id: StringName, enemy_type: StringName, _pos: Vector2) -> void:
+		died_types.append(enemy_type)
+	var death_toasts: Array[String] = []
+	var death_toast := func(message: String) -> void: death_toasts.append(message)
+	bus.enemy_died.connect(death_listener)
+	bus.toast.connect(death_toast)
+	king6.receive_damage(999, {"damage": 999, "hit_id": "king-kill"})
+	bus.enemy_died.disconnect(death_listener)
+	bus.toast.disconnect(death_toast)
+	_check(died_types.size() == 1 and died_types[0] == StringName("king_without_crown"),
+		"enemy_died fires once for the King (%s)" % str(died_types))
+	_check(gs.kill_count("king_without_crown") == 1, "the King kill is credited once")
+	_check(gs.gold == 300, "the King paid exactly 300 gold (got %d)" % gs.gold)
+	_check(bool(gs.get_flag("king_defeated", false)), "the King's death sets king_defeated")
+	_check(death_toasts.has("Король пал"), "the King's death says «Король пал» (%s)" % ", ".join(death_toasts))
+	king6.queue_free()
+	await process_frame
+
+	# --- 13. the story quests track kills (including boss kills) and pay once ---
+	gs.reset()
+	qm.reset()
+	DamageResolver.reset()
+	_check(bool(qm.call("start", "q06_the_crown")), "q06 starts")
+	for i in range(6):
+		bus.enemy_died.emit(StringName("rs%d" % i), &"ruin_skeleton", Vector2.ZERO)
+	_check(String(qm.call("state_of", "q06_the_crown")) == "ready", "six skeleton kills make q06 ready")
+	_check(bool(qm.call("turn_in", "q06_the_crown")), "q06 turns in")
+	_check(gs.gold == 120, "q06 paid 120 gold (got %d)" % gs.gold)
+	_check(gs.count_item("health_potion") == 2, "q06 paid two health potions (got %d)" % gs.count_item("health_potion"))
+	_check(String(qm.call("state_of", "q06_the_crown")) == "done", "q06 is done")
+	_check(not bool(qm.call("turn_in", "q06_the_crown")), "q06 cannot be turned in twice")
+
+	gs.reset()
+	qm.reset()
+	_check(bool(qm.call("start", "q07_captain_guard")), "q07 starts")
+	bus.enemy_died.emit(&"cap1", &"captain_of_the_guard", Vector2.ZERO)
+	_check(String(qm.call("state_of", "q07_captain_guard")) == "ready", "a boss kill makes q07 ready")
+	_check(bool(qm.call("turn_in", "q07_captain_guard")), "q07 turns in")
+	_check(gs.gold == 200, "q07 paid 200 gold (got %d)" % gs.gold)
+
+	gs.reset()
+	qm.reset()
+	_check(bool(qm.call("start", "q08_the_bell")), "q08 starts")
+	bus.enemy_died.emit(&"bell1", &"bell_ringer", Vector2.ZERO)
+	_check(String(qm.call("state_of", "q08_the_bell")) == "ready", "a boss kill makes q08 ready")
+	_check(bool(qm.call("turn_in", "q08_the_bell")), "q08 turns in")
+	_check(gs.gold == 220, "q08 paid 220 gold (got %d)" % gs.gold)
+
+	# --- cleanup ----------------------------------------------------------------
+	arena.queue_free()
+	await process_frame
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	qm.reset()
+	_clear_enemies()
+	_clear_death_pools()
+	for node in get_nodes_in_group("king_pillar"):
+		node.queue_free()
+	# This group is the last in the suite to make noise — the King's death and his
+	# phase roars — and the suite quits the frame it returns. A voice still playing
+	# when the process goes down is an AudioStreamPlayback the headless audio driver
+	# cannot reap in time, which surfaces as leaked instances and streams "still in
+	# use" at exit. Stop the pool and wait out the longest cue before quitting.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		for child in audio.get_children():
+			var voice := child as AudioStreamPlayer
+			if voice != null:
+				if voice.playing:
+					voice.stop()
+				voice.stream = null
+		await create_timer(0.6).timeout
+	completed["king_and_endings"] = true

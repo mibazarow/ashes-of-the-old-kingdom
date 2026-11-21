@@ -145,6 +145,13 @@ var flags: Dictionary = {}
 var kills: Dictionary = {}
 var play_time_ms: int = 0
 
+## The ending the player committed at the throne (spec §16.1): "", "dawn", "memory" or
+## "crown". Lives as a first-class field rather than only a flag because it is the one
+## piece of story state a save has to carry forward verbatim — a finished run stays
+## finished, and the victory screen reads this back. The `ending_<id>` flags the altar
+## also sets are the per-ending markers; this is the single "which one" answer.
+var ending: String = ""
+
 ## Dialogue nodes the player has already seen (spec §12.2 fast-skip). Keys are
 ## `"<dialogue_id>:<node_id>"`, composed by `DialogueRunner`, so the same short
 ## node id used in two dialogues never collides. Lives here rather than in the
@@ -195,6 +202,7 @@ func reset() -> void:
 	flags = {}
 	kills = {}
 	play_time_ms = 0
+	ending = ""
 	dialogue_read = []
 	zone = DEFAULT_ZONE
 	recompute_derived()
@@ -876,6 +884,18 @@ func _restore_zone(raw: Variant) -> String:
 	return DEFAULT_ZONE
 
 
+## The three committed endings plus the empty "not yet" value. A save written before
+## the final boss existed has no `ending` key, and a hand-edited one may name a fourth
+## fate the altar never offers, so anything unusable restores "" rather than failing
+## the load — the same tolerance every other optional field here uses.
+func _restore_ending(raw: Variant) -> String:
+	if raw is String:
+		var value := String(raw)
+		if value == "" or value == "dawn" or value == "memory" or value == "crown":
+			return value
+	return ""
+
+
 # --- flags / counters ---------------------------------------------------------
 
 func set_flag(key: String, value: Variant = true) -> void:
@@ -950,6 +970,7 @@ func to_dict() -> Dictionary:
 		"flags": flags.duplicate(true),
 		"kills": kills.duplicate(true),
 		"play_time_ms": play_time_ms,
+		"ending": ending,
 		"dialogue_read": dialogue_read.duplicate(),
 		"zone": zone,
 	}
@@ -986,6 +1007,7 @@ func from_dict(d: Dictionary) -> void:
 	flags = d.get("flags", {}).duplicate(true)
 	kills = d.get("kills", {}).duplicate(true)
 	play_time_ms = int(d.get("play_time_ms", 0))
+	ending = _restore_ending(d.get("ending", null))
 	dialogue_read = _restore_dialogue_read(d.get("dialogue_read", null))
 	zone = _restore_zone(d.get("zone", null))
 	recompute_derived()

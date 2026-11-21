@@ -140,6 +140,7 @@ var _victory_panel: PanelContainer
 var _victory_title: Label
 var _victory_scroll: ScrollContainer
 var _victory_box: VBoxContainer
+var _victory_hint: Label
 var _victory_open := false
 
 ## Edge detector for the pause menu's "В главное меню" key. Q has no InputMap action
@@ -406,7 +407,11 @@ func _build_victory_panel() -> void:
 	_victory_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_victory_scroll.add_child(_victory_box)
 
-	box.add_child(_make_text("↑↓ прокрутка · E или Esc — закрыть", COLOR_HINT))
+	# The ending is the end of the run, so the only way off this screen is back to
+	# the menu — there is no "close" that hands control back to a finished world. The
+	# same keys that closed it before now leave the run; the wording says so plainly.
+	_victory_hint = _make_text("↑↓ прокрутка · E или Esc — В главное меню", COLOR_HINT)
+	box.add_child(_victory_hint)
 
 
 ## The character screen lives in its own script (like SettingsPanel): it owns
@@ -2265,7 +2270,11 @@ func _process_victory_navigation() -> void:
 	_enter_held = enter_now
 	if InputSource.is_action_just_pressed(&"interact") or enter_edge \
 			or InputSource.is_action_just_pressed(&"pause"):
-		close_victory()
+		# The ending is terminal: there is no world to step back into, so the confirm
+		# key leaves the run rather than merely hiding the panel. `return_to_menu`
+		# closes the victory screen (clearing `ui_blocking` and the pause) on its way
+		# out, so the flag and the tree are left in the same clean state either way.
+		return_to_menu()
 
 
 # --- read-only views of the two screens ---------------------------------------
@@ -2304,3 +2313,10 @@ func victory_text() -> String:
 		if child is Label:
 			parts.append((child as Label).text)
 	return "\n".join(parts)
+
+
+## The line under the credits that names the way off the ending screen. Exposed so a
+## test can prove the victory panel offers the route back to the menu without driving
+## a real scene change.
+func victory_hint_text() -> String:
+	return _victory_hint.text if _victory_hint != null else ""

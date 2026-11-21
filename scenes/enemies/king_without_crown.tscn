@@ -1,0 +1,60 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/ai/boss_king.gd" id="1_king"]
+[ext_resource type="Texture2D" path="res://assets/sprites/npc.png" id="2_tex"]
+[ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
+
+[sub_resource type="RectangleShape2D" id="body_shape"]
+size = Vector2(20, 16)
+
+[sub_resource type="RectangleShape2D" id="attack_shape"]
+size = Vector2(26, 20)
+
+[node name="KingWithoutCrown" type="CharacterBody2D"]
+collision_layer = 4
+collision_mask = 3
+motion_mode = 1
+script = ExtResource("1_king")
+kind = 0
+enemy_type = &"king_without_crown"
+display_name = "Король Без Венца"
+max_health = 600
+attack_damage = 22
+xp_reward = 600
+gold_reward = 300
+loot_item = ""
+loot_chance = 0.0
+speed_multiplier = 0.85
+sprite_tint = Color(0.9, 0.78, 0.45, 1)
+phase_two_health_fraction = 0.66
+enraged_speed_multiplier = 1.2
+enraged_cooldown_multiplier = 0.8
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture = ExtResource("2_tex")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("body_shape")
+
+[node name="HealthComponent" type="Node" parent="."]
+script = ExtResource("3_health")
+max_health = 600
+
+[node name="AttackHitbox" type="Area2D" parent="."]
+collision_layer = 16
+collision_mask = 2
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="AttackHitbox"]
+shape = SubResource("attack_shape")
+disabled = true
+
+[node name="Telegraph" type="ColorRect" parent="."]
+offset_left = -12.0
+offset_top = -12.0
+offset_right = 12.0
+offset_bottom = 12.0
+color = Color(1, 0.35, 0.25, 0.5)
+visible = false
+
+[node name="Muzzle" type="Marker2D" parent="."]
+position = Vector2(12, 0)

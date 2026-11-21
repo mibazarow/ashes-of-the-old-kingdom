@@ -39,6 +39,11 @@ const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 ## and 1.35x the speed, meant to close a room before the player reads the room.
 const ASH_KNIGHT_SCENE := "res://scenes/enemies/ash_knight.tscn"
 const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
+## The final boss (spec §11.4) and the throne that ends the run. The King is the only
+## enemy the arena was kept empty for; the altar is the choice the death unlocks. The
+## altar is built in code (`EndingAltar.new()`) exactly like the zone exit, so it needs
+## no scene file of its own.
+const KING_SCENE := "res://scenes/enemies/king_without_crown.tscn"
 
 const MAP_W := 48
 const MAP_H := 30
@@ -196,6 +201,16 @@ const ARCHER_C_ANCHOR := Vector2i(26, 19)
 const ASH_KNIGHT_A_ANCHOR := Vector2i(19, 14)
 const BONE_CRAWLER_C_ANCHOR := Vector2i(29, 14)
 
+## The final boss and his throne, both placed by hand at the far end of the spine
+## inside the ring the zone kept for exactly this. The King takes the centre of
+## `BOSS_ARENA`; the throne stands two tiles east of him against the sanctum's back
+## wall, so the player who has killed him walks a few steps past the body to the seat.
+## Neither is snapped by `_find_prop_tile`: the ring is empty by construction, so the
+## declared tiles are the tiles they get, and the two are far enough apart that the
+## King's body and the throne's prompt never compete.
+const KING_ANCHOR := Vector2i(44, 15)
+const ALTAR_ANCHOR := Vector2i(46, 15)
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the entry
@@ -208,6 +223,13 @@ const ENEMY_CLEAR_FROM_ENTRY := 6
 ## markers need no node: they name ground, not objects, and ground cannot free
 ## itself, so they are built from `ROOM_BOUNDS` on every call rather than cached.
 var _exit_node: Node2D
+
+## The final boss and the throne, kept as live references the way the exit is. They
+## are deliberately not landmarks: the sanctum is the one room the player is meant to
+## walk into without being sent to it, and marking the throne would put the game's
+## ending on the map before he has earned the walk.
+var _king_node: Node2D
+var _altar_node: Node2D
 
 
 func zone_id() -> String:
@@ -321,6 +343,24 @@ func _spawn_actors() -> void:
 		reserved[tile] = true
 	_spawn_enemies(spawn_tile, reserved)
 	_spawn_new_posts(spawn_tile, reserved)
+	# The ring the reservation above held empty is filled last, by hand, with the one
+	# enemy it was held for and the throne his death unlocks. Placed after every post
+	# so the arena is the only ground they can take, and never via `_find_prop_tile`
+	# so a future edit to an anchor cannot slide either one out of the sanctum.
+	_spawn_final_boss()
+
+
+## The final boss in the centre of the ring and the throne against the back wall. Both
+## stand on tiles the map already proves walkable (every tile of `BOSS_ARENA` is bare
+## stone), so they are placed at their declared centres directly rather than snapped.
+func _spawn_final_boss() -> void:
+	_king_node = _instantiate(KING_SCENE, _tile_center(KING_ANCHOR.x, KING_ANCHOR.y), "KingWithoutCrown")
+	_king_node.name = "KingWithoutCrown"
+	var altar := EndingAltar.new()
+	altar.name = "EndingAltar"
+	altar.position = _tile_center(ALTAR_ANCHOR.x, ALTAR_ANCHOR.y)
+	add_child(altar)
+	_altar_node = altar
 
 
 ## The two new posts, on the same reserved-tile flow as the eight originals and
