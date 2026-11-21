@@ -255,6 +255,10 @@ func zone_name() -> String:
 	return "Древняя крепость"
 
 
+func music_track() -> String:
+	return "music_fortress"
+
+
 ## The stair down and the four named areas. The rooms are marked because the map is
 ## where a player looks to find out how far he still has to walk, and a fortress
 ## that is only a corridor between walls tells him nothing about what the walls are

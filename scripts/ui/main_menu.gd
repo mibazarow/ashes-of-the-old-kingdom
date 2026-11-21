@@ -102,7 +102,21 @@ func _ready() -> void:
 	_build_ui()
 	_built = true
 	_show_main()
+	_start_menu_music()
 	_maybe_capture_menu_screenshot()
+
+
+## The menu's own bed. Resolved through the runtime autoload rather than a
+## compile-time identifier, exactly like `settings_panel.gd`: a missing audio
+## layer is a silent no-op, and a run that bypassed this screen (a bot, a probe)
+## never reaches here at all, so it never hears menu music.
+func _start_menu_music() -> void:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return
+	var audio := loop.root.get_node_or_null("AudioManager")
+	if audio != null and audio.has_method("play_music"):
+		audio.call("play_music", "music_menu")
 
 
 ## Whether this process was launched at a bot or at a headless probe rather than

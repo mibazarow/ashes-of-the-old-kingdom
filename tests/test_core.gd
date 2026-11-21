@@ -20,6 +20,22 @@ const AUDIO_SFX_NAMES: Array[String] = [
 	"hit", "hurt", "enemy_die", "pickup", "cast", "ui_click", "step", "boss_roar",
 ]
 
+## The eight generated music/ambience files (six looping tracks, one looping
+## forest ambience bed, one short victory sting). The seven loop beds are 20–60 s;
+## the sting is a one-shot cue and is checked separately as a short file.
+const AUDIO_MUSIC_LOOPS: Array[String] = [
+	"music_menu", "music_forest", "music_ruins", "music_dungeon",
+	"music_fortress", "music_boss", "ambience_forest",
+]
+const AUDIO_STING := "sting_victory"
+## Every file `tools/gen_audio.py` writes — used by the idempotency check, which
+## regenerates all of them and compares md5 against the shipped bytes.
+const AUDIO_GENERATED_NAMES: Array[String] = [
+	"hit", "hurt", "enemy_die", "pickup", "cast", "ui_click", "step", "boss_roar",
+	"music_menu", "music_forest", "music_ruins", "music_dungeon",
+	"music_fortress", "music_boss", "ambience_forest", "sting_victory",
+]
+
 var failures := 0
 var checks := 0
 
@@ -312,6 +328,9 @@ func _run() -> void:
 	print("== settings sound ==")
 	await _test_settings_sound()
 
+	print("== music & ambience ==")
+	await _test_audio_music()
+
 	print("== zones ==")
 	await _test_zone_registry()
 	await _test_zone_state()
@@ -356,7 +375,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 62, "every test group ran to completion (got %d/62)" % completed.size())
+	_check(completed.size() == 63, "every test group ran to completion (got %d/63)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6819,7 +6838,10 @@ func _audio_playing_count(am: Node, bus: String) -> int:
 
 
 func _audio_stop_all(am: Node) -> void:
-	am.call("stop_music")
+	# Instant stop (fade 0.0) so no crossfade ramp is left stepping players after
+	# the group has already torn them down; the ambience bed is stopped too.
+	am.call("stop_music", 0.0)
+	am.call("stop_ambience")
 	for child in am.get_children():
 		var player := child as AudioStreamPlayer
 		if player != null and player.playing:
@@ -6902,6 +6924,265 @@ func _audio_u16(bytes: PackedByteArray, offset: int) -> int:
 func _audio_u32(bytes: PackedByteArray, offset: int) -> int:
 	return int(bytes[offset]) | (int(bytes[offset + 1]) << 8) \
 		| (int(bytes[offset + 2]) << 16) | (int(bytes[offset + 3]) << 24)
+
+
+# --- music & ambience (spec §17) ---------------------------------------------
+
+## The music/ambience layer: the generated beds, the crossfade that replaces one
+## track with another without stacking two, the ambience bed, the per-zone track
+## the world starts on build, and the idempotency of the generator that produced
+## all of it. Like the audio group, `AudioManager` is resolved through the scene
+## root and driven through `call`, so the suite keeps no compile-time dependency
+## on an autoload identifier and still runs under `godot --script`.
+##
+## It runs right after the settings-sound group and cleans up the same way: it
+## leaves no track playing, no ambience bed, no settings file and the default
+## volumes, so the zone groups that follow (which now start their own music on
+## build) are unaffected by anything here.
+func _test_audio_music() -> void:
+	var am := root.get_node_or_null("AudioManager")
+	_check(am != null, "AudioManager autoload present for the music group")
+	if am == null:
+		completed["audio_music"] = true
+		return
+
+	_audio_stop_all(am)
+	_delete_audio_settings()
+	_apply_audio_defaults(am)
+
+	_test_audio_music_assets()
+	await _test_audio_music_idempotent()
+	await _test_audio_music_playback(am)
+	_test_audio_music_bus(am)
+	await _test_audio_ambience(am)
+	await _test_audio_zone_music(am)
+
+	# Leave nothing behind: no track, no bed, no settings file, default volumes.
+	_audio_stop_all(am)
+	# A voice stopped in the same frame it is quit from is still held by the audio
+	# server at shutdown (leaked instances, streams "still in use"). Wall-clock
+	# time clears it where frames do not, so the wait is on a timer with margin.
+	await create_timer(0.5).timeout
+	_apply_audio_defaults(am)
+	_delete_audio_settings()
+	_check(String(am.call("current_music")) == "", "the music group leaves current_music empty")
+	_check(String(am.call("current_ambience")) == "", "the music group leaves current_ambience empty")
+	_check(_audio_playing_count(am, "Music") == 0, "the music group leaves no Music-bus voice playing")
+	_check(not FileAccess.file_exists(AUDIO_SETTINGS_PATH),
+		"the music group left no settings file behind")
+	completed["audio_music"] = true
+
+
+## Every generated music/ambience file exists and really is PCM 16-bit mono
+## 22050 Hz read straight from the container, with a peak below full scale. The
+## seven loop beds are 20–60 s; the victory sting is a short one-shot cue.
+func _test_audio_music_assets() -> void:
+	for name in AUDIO_MUSIC_LOOPS:
+		var path := "res://assets/audio/%s.wav" % name
+		var wav := _audio_read_wav(path)
+		_check(FileAccess.file_exists(path), "%s.wav exists" % name)
+		_check(bool(wav.get("ok", false)), "%s.wav is RIFF/WAVE with fmt+data chunks" % name)
+		_check(int(wav.get("format", 0)) == 1, "%s.wav is uncompressed PCM" % name)
+		_check(int(wav.get("channels", 0)) == 1, "%s.wav is mono" % name)
+		_check(int(wav.get("bits", 0)) == 16, "%s.wav is 16-bit" % name)
+		_check(int(wav.get("rate", 0)) == 22050, "%s.wav is 22050 Hz" % name)
+		var seconds := float(wav.get("frames", 0)) / float(maxi(1, int(wav.get("rate", 1))))
+		_check(seconds >= 20.0 and seconds <= 60.0, "%s.wav loops at %.1f s (20–60 s)" % [name, seconds])
+		var peak := int(wav.get("peak", 0))
+		_check(peak > 0 and peak < 32767, "%s.wav does not clip (max sample %d)" % [name, peak])
+
+	var sting := _audio_read_wav("res://assets/audio/%s.wav" % AUDIO_STING)
+	_check(bool(sting.get("ok", false)), "%s.wav exists and is RIFF/WAVE PCM" % AUDIO_STING)
+	_check(int(sting.get("channels", 0)) == 1 and int(sting.get("bits", 0)) == 16
+			and int(sting.get("rate", 0)) == 22050, "%s.wav is 16-bit mono 22050 Hz" % AUDIO_STING)
+	var sting_seconds := float(sting.get("frames", 0)) / float(maxi(1, int(sting.get("rate", 1))))
+	_check(sting_seconds > 0.0 and sting_seconds < 5.0,
+		"%s.wav is a short cue (%.2f s), not a loop" % [AUDIO_STING, sting_seconds])
+	_check(int(sting.get("peak", 0)) > 0 and int(sting.get("peak", 0)) < 32767,
+		"%s.wav does not clip (max sample %d)" % [AUDIO_STING, int(sting.get("peak", 0))])
+
+
+## Re-running the generator reproduces the shipped files byte for byte. The
+## committed assets are one run; regenerating into a temp dir is a second run;
+## equal md5 across all sixteen files proves the generator is deterministic and
+## that what ships is exactly what the committed script produces.
+func _test_audio_music_idempotent() -> void:
+	const TMP := "user://gen_audio_idem"
+	_rm_dir_recursive(TMP)
+	DirAccess.make_dir_recursive_absolute(TMP)
+	var script := ProjectSettings.globalize_path("res://tools/gen_audio.py")
+	var outdir := ProjectSettings.globalize_path(TMP)
+	var output: Array[String] = []
+	var rc := OS.execute("python3", [script, outdir], output, true)
+	_check(rc == 0, "the generator re-ran into a temp dir (exit %d)" % rc)
+
+	var all_match := true
+	var first_diff := ""
+	for name in AUDIO_GENERATED_NAMES:
+		var fresh := TMP.path_join("%s.wav" % name)
+		if not FileAccess.file_exists(fresh):
+			all_match = false
+			first_diff = "%s missing from the regeneration" % name
+			break
+		if _md5_file("res://assets/audio/%s.wav" % name) != _md5_file(fresh):
+			all_match = false
+			first_diff = name
+			break
+	_check(all_match,
+		"re-running the generator reproduces all %d shipped files byte for byte (md5)%s"
+			% [AUDIO_GENERATED_NAMES.size(), "" if all_match else " — first diff: %s" % first_diff])
+	_rm_dir_recursive(TMP)
+
+
+## The crossfade contract: a track starts and reports itself, a second track
+## replaces the first (exactly one voice left playing once the ramp settles), an
+## unknown name is refused without disturbing the current track, and stopping
+## clears the name.
+func _test_audio_music_playback(am: Node) -> void:
+	_audio_stop_all(am)
+
+	_check(bool(am.call("play_music", "music_forest")), "play_music(\"music_forest\") returns true")
+	_check(String(am.call("current_music")) == "music_forest",
+		"current_music() reports music_forest (got %s)" % String(am.call("current_music")))
+	_check(_music_playing_count(am) >= 1, "a music voice is playing after play_music")
+	_check(_music_voice_bus(am) == "Music", "the music voice sits on the Music bus")
+
+	_check(bool(am.call("play_music", "music_ruins")), "play_music(\"music_ruins\") returns true")
+	# Let the crossfade finish: the outgoing voice ramps to silence and stops, so
+	# only one track is left — travel must never stack two.
+	await create_timer(0.8).timeout
+	_check(String(am.call("current_music")) == "music_ruins",
+		"the second track replaced the first (current_music %s)" % String(am.call("current_music")))
+	_check(_music_playing_count(am) == 1,
+		"exactly one music voice is playing after the crossfade (got %d)" % _music_playing_count(am))
+
+	_check(not bool(am.call("play_music", "nope")), "play_music(\"nope\") returns false")
+	_check(String(am.call("current_music")) == "music_ruins",
+		"an unknown name leaves the current track unchanged (got %s)" % String(am.call("current_music")))
+
+	am.call("stop_music", 0.0)
+	_check(String(am.call("current_music")) == "", "stop_music() clears current_music()")
+	_check(_music_playing_count(am) == 0, "stop_music() leaves no music voice playing")
+
+
+## The Music bus is the master level: `set_volume("Music", 0.0)` silences a track
+## that is already playing (the bus reads about -80 dB), and the level comes back.
+func _test_audio_music_bus(am: Node) -> void:
+	am.call("set_volume", "Music", 0.7)
+	_check(bool(am.call("play_music", "music_menu", 0.0)), "play_music(menu, no fade) returns true")
+	am.call("set_volume", "Music", 0.0)
+	var music_db := AudioServer.get_bus_volume_db(AudioServer.get_bus_index("Music"))
+	_check(absf(music_db + 80.0) < 0.5,
+		"set_volume(Music, 0.0) silences the bus at about -80 dB (got %.1f)" % music_db)
+	am.call("set_volume", "Music", 0.7)
+	_check(absf(float(am.call("volume", "Music")) - 0.7) < 0.01, "the Music bus level comes back")
+	am.call("stop_music", 0.0)
+
+
+## One ambience bed at a time, on the Music bus, under the music.
+func _test_audio_ambience(am: Node) -> void:
+	am.call("stop_ambience")
+	_check(bool(am.call("play_ambience", "ambience_forest")), "play_ambience(\"ambience_forest\") returns true")
+	_check(String(am.call("current_ambience")) == "ambience_forest",
+		"current_ambience() reports the bed (got %s)" % String(am.call("current_ambience")))
+	_check(_ambience_playing_count(am) == 1, "exactly one ambience voice is playing (got %d)" % _ambience_playing_count(am))
+	_check(not bool(am.call("play_ambience", "nope")), "play_ambience(\"nope\") returns false")
+	am.call("stop_ambience")
+	_check(_ambience_playing_count(am) == 0, "stop_ambience() stops the bed")
+	_check(String(am.call("current_ambience")) == "", "stop_ambience() clears current_ambience()")
+
+
+## The zone build path starts its own track: building each zone (the way the zone
+## manager and a save restore build it — instantiate and add to the tree) leaves
+## that zone's music as the current track. Built standalone, with no HUD, so the
+## boss-music override cannot interfere with what is being asserted here.
+func _test_audio_zone_music(am: Node) -> void:
+	var table := {
+		"forest": "music_forest",
+		"ruins": "music_ruins",
+		"dungeon": "music_dungeon",
+		"fortress": "music_fortress",
+	}
+	gs.reset()
+	for zone_id in ["forest", "ruins", "dungeon", "fortress"]:
+		am.call("stop_music", 0.0)
+		am.call("stop_ambience")
+		var zone_script: GDScript = load("res://scripts/world/%s.gd" % zone_id)
+		_check(zone_script != null and zone_script.can_instantiate(),
+			"the %s zone script compiles for the music check" % zone_id)
+		if zone_script == null:
+			continue
+		var zone := zone_script.new() as Node2D
+		root.add_child(zone)
+		await process_frame
+		await process_frame
+		_check(String(am.call("current_music")) == String(table[zone_id]),
+			"building the %s zone starts %s (got %s)"
+				% [zone_id, String(table[zone_id]), String(am.call("current_music"))])
+		zone.free()
+		await process_frame
+	am.call("stop_ambience")
+	gs.reset()
+
+
+## Music voices are the two `MusicPlayer*` children; the ambience bed is the one
+## `AmbiencePlayer`, so the two counts never overlap on the shared Music bus.
+func _music_playing_count(am: Node) -> int:
+	var count := 0
+	for child in am.get_children():
+		var player := child as AudioStreamPlayer
+		if player != null and player.playing and String(player.name).begins_with("MusicPlayer"):
+			count += 1
+	return count
+
+
+func _music_voice_bus(am: Node) -> String:
+	for child in am.get_children():
+		var player := child as AudioStreamPlayer
+		if player != null and player.playing and String(player.name).begins_with("MusicPlayer"):
+			return String(player.bus)
+	return ""
+
+
+func _ambience_playing_count(am: Node) -> int:
+	var count := 0
+	for child in am.get_children():
+		var player := child as AudioStreamPlayer
+		if player != null and player.playing and String(player.name) == "AmbiencePlayer":
+			count += 1
+	return count
+
+
+## md5 of a file's bytes, for the idempotency comparison.
+func _md5_file(path: String) -> String:
+	if not FileAccess.file_exists(path):
+		return ""
+	var bytes := FileAccess.get_file_as_bytes(path)
+	var hc := HashingContext.new()
+	hc.start(HashingContext.HASH_MD5)
+	hc.update(bytes)
+	return hc.finish().hex_encode()
+
+
+## Delete a `user://` directory and everything in it. `DirAccess` has no static
+## recursive delete in this engine version, so the walk is spelled out; it is a
+## no-op when the directory does not exist.
+func _rm_dir_recursive(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if not entry.begins_with("."):
+			var full := path.path_join(entry)
+			if dir.current_is_dir():
+				_rm_dir_recursive(full)
+			else:
+				DirAccess.remove_absolute(full)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	DirAccess.remove_absolute(path)
 
 
 # --- settings screen, sound section (spec §17.3) -----------------------------

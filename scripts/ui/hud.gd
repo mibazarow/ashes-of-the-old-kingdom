@@ -160,6 +160,9 @@ var _boss_panel: PanelContainer
 var _boss_bar: ProgressBar
 var _boss_label: Label
 var _boss: Node = null
+## Whether boss music is the current intent (spec §17). Edge-driven so the track
+## switches once on engagement and once on disengagement, never every frame.
+var _music_boss_engaged := false
 
 ## Branching-dialogue state (spec §12.2). The runner is non-null only while a
 ## data-driven conversation owns the panel; the legacy one-line quest dialogue
@@ -2020,6 +2023,11 @@ func _tick_boss_bar(_delta: float) -> void:
 		return
 	var player := get_tree().get_first_node_in_group("player") as Node2D
 	var boss := _resolve_boss(player)
+	# Music follows the same engagement the bar does: boss music while a boss is
+	# stood up to, the zone's own track the moment the fight ends or the player
+	# walks out of range. Done here rather than on a signal because only this
+	# per-frame resolve sees every way a fight can end (death, walk-away, travel).
+	_sync_boss_music(boss)
 	if boss == null:
 		_boss_panel.visible = false
 		return
@@ -2080,6 +2088,61 @@ func _boss_is_dead(boss: Node) -> bool:
 	if pool != null and bool(pool.get("is_dead")):
 		return true
 	return boss.has_method("is_status_owner_dead") and bool(boss.call("is_status_owner_dead"))
+
+
+# --- music routing (spec §17) --------------------------------------------------
+
+## The audio autoload, resolved at runtime rather than as a compile-time
+## identifier (the same rule `settings_panel.gd` follows): the HUD must not name
+## `AudioManager` in its compile graph, and a missing audio layer is a no-op.
+func _audio_manager() -> Node:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return null
+	return loop.root.get_node_or_null("AudioManager")
+
+
+## The live zone's own track, read through the world node's `music_track` hook so
+## the HUD never hardcodes which zone plays what.
+func _zone_music_track() -> String:
+	if _world != null and is_instance_valid(_world) and _world.has_method("music_track"):
+		return String(_world.call("music_track"))
+	return ""
+
+
+## Switches to boss music when a boss is engaged and back to the zone track when
+## the fight ends, on edges only. Silent while a death or ending screen is open:
+## those screens own the audio (the sting is separate), and the bar keeps polling
+## underneath them without fighting that decision.
+func _sync_boss_music(boss: Node) -> void:
+	if _defeat_open or _victory_open:
+		return
+	var audio := _audio_manager()
+	if audio == null or not audio.has_method("play_music"):
+		return
+	if boss != null:
+		if not _music_boss_engaged:
+			_music_boss_engaged = true
+			audio.call("play_music", "music_boss")
+	elif _music_boss_engaged:
+		_music_boss_engaged = false
+		var track := _zone_music_track()
+		if track != "":
+			audio.call("play_music", track)
+		elif audio.has_method("stop_music"):
+			audio.call("stop_music")
+
+
+## Brings the zone's own track back after a death (respawn). Clears the boss
+## intent first so a boss still standing re-engages cleanly on the next poll.
+func _restore_zone_music() -> void:
+	_music_boss_engaged = false
+	var audio := _audio_manager()
+	if audio == null or not audio.has_method("play_music"):
+		return
+	var track := _zone_music_track()
+	if track != "":
+		audio.call("play_music", track)
 
 
 # Read-only views of the boss bar, so a test or a screenshot probe can tell
@@ -2156,6 +2219,17 @@ func _open_defeat() -> void:
 	_enter_held = false
 	_refresh_defeat()
 	_defeat_panel.visible = true
+	# Death is silent: the music and the ambience bed stop here, and the only cue
+	# the player hears is the `hurt` that `_on_player_died` already plays at 0.6
+	# pitch — no second death sound is added. The boss intent is cleared so a
+	# respawn resumes the zone track rather than staying stuck on boss music.
+	_music_boss_engaged = false
+	var audio := _audio_manager()
+	if audio != null:
+		if audio.has_method("stop_music"):
+			audio.call("stop_music")
+		if audio.has_method("stop_ambience"):
+			audio.call("stop_ambience")
 	Telemetry.event(&"defeat_shown", {"hp": GameState.hp})
 
 
@@ -2169,6 +2243,9 @@ func _close_defeat() -> void:
 	_defeat_open = false
 	_defeat_panel.visible = false
 	_enter_held = false
+	# The run carries on, so the world's own bed comes back. A boss still stood up
+	# to re-engages boss music on the next boss-bar poll.
+	_restore_zone_music()
 
 
 func _refresh_defeat() -> void:
@@ -2238,6 +2315,18 @@ func show_victory(ending_id: String) -> void:
 	_reset_victory_scroll.call_deferred()
 	GameState.ui_blocking = true
 	get_tree().paused = true
+	# The ending replaces the world's bed with a single rising sting: stop the
+	# music and the ambience, then play `sting_victory` once on the SFX bus (the
+	# one-shot pool — never the music pair, which the crossfade owns).
+	_music_boss_engaged = false
+	var audio := _audio_manager()
+	if audio != null:
+		if audio.has_method("stop_music"):
+			audio.call("stop_music")
+		if audio.has_method("stop_ambience"):
+			audio.call("stop_ambience")
+		if audio.has_method("play_sfx"):
+			audio.call("play_sfx", "sting_victory", "SFX", 0.0)
 	Telemetry.event(&"victory_shown", {"ending": ending_id})
 
 

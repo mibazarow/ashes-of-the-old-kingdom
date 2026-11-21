@@ -45,7 +45,8 @@ var _map_height := 0
 func _ready() -> void:
 	# The fixed hook order. A zone that overrides any of them must keep this
 	# sequence: content first, then the tile layer that draws it, then the actors
-	# that stand on it, then the clock and the camera that watch them.
+	# that stand on it, then the clock and the camera that watch them, then the
+	# audio bed that belongs to the place the player has just arrived in.
 	_advertise_zone()
 	_generate_map()
 	_build_tileset_and_layer()
@@ -54,6 +55,7 @@ func _ready() -> void:
 	_configure_camera()
 	_last_visited_tile = player_tile()
 	_mark_visited(_last_visited_tile)
+	_start_zone_audio()
 
 
 func _process(_delta: float) -> void:
@@ -153,6 +155,46 @@ func landmarks() -> Array[Dictionary]:
 
 func is_in_safe_zone(_tile: Vector2i) -> bool:
 	return false
+
+
+## The looping music track this zone starts on build (`music_forest`, …), or ""
+## for no music. A concrete zone overrides this with its own track name; the base
+## stays silent so a zone that has not chosen a bed does not steal the previous
+## zone's track on a travel.
+func music_track() -> String:
+	return ""
+
+
+## The looping ambience bed this zone starts under its music (`ambience_forest`),
+## or "" for none. Only the forest uses this today.
+func ambience_track() -> String:
+	return ""
+
+
+# --- zone audio ----------------------------------------------------------------
+
+## Starts this zone's music and ambience once the world is built. Resolved
+## through the runtime autoload rather than a compile-time identifier, exactly
+## like every other caller of `AudioManager`: a missing audio layer is a silent
+## no-op, never a crash, and the zone still builds. `play_music` replaces whatever
+## the previous zone was playing, so travel never stacks two tracks.
+func _start_zone_audio() -> void:
+	var audio := _audio_manager()
+	if audio == null:
+		return
+	var track := music_track()
+	if track != "" and audio.has_method("play_music"):
+		audio.call("play_music", track)
+	var bed := ambience_track()
+	if bed != "" and audio.has_method("play_ambience"):
+		audio.call("play_ambience", bed)
+
+
+func _audio_manager() -> Node:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return null
+	return loop.root.get_node_or_null("AudioManager")
 
 
 # --- public API ----------------------------------------------------------------

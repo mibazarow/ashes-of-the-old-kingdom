@@ -226,6 +226,10 @@ func zone_name() -> String:
 	return "Подземелье под руинами"
 
 
+func music_track() -> String:
+	return "music_dungeon"
+
+
 func landmarks() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for entry: Array in [

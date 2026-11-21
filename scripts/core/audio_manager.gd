@@ -27,11 +27,32 @@ const SETTINGS_PATH := "user://settings/audio.json"
 const SETTINGS_VERSION := 1
 const SFX_POOL_SIZE := 8
 const UI_POOL_SIZE := 2
-const MUSIC_POOL_SIZE := 1
+## Two music players so a track change can crossfade instead of cutting: one
+## holds the current track, the other is the incoming/outgoing voice. A single
+## player could only stop-then-start, which pops on a mid-bar switch.
+const MUSIC_POOL_SIZE := 2
 ## Reading a bus at -80 dB or below counts as silence, which is what
 ## `set_volume(bus, 0.0)` writes. `linear_to_db(0.0)` is `-inf`, and an
 ## infinite value in a JSON settings file would not survive the round trip.
 const SILENCE_DB := -80.0
+## A crossfade starts a fresh voice here (effectively silent) and ramps it to
+## 0 dB while the outgoing voice ramps down here and is then stopped. It is well
+## above the bus silence floor so the ramp is audible, yet low enough that the
+## seam is inaudible.
+const MUSIC_FADE_START_DB := -60.0
+## An ambience bed sits this far under the music on the same bus: it is meant to
+## be felt under the track, not to compete with it.
+const AMBIENCE_DB := -10.0
+## How long `_exit_tree` lets the audio mix thread run after stopping every
+## voice, in milliseconds. A stopped voice's playback is retired a moment after
+## `stop()` queues it; without that moment the exit leak check finds a
+## still-playing bed's playback — and the stream it holds — "still in use".
+## Measured on this project: 0 ms leaks reproducibly (2 ObjectDB instances plus
+## 1 resource), anything from 20 ms up stays clean over repeated headless runs,
+## suites and bots, and a windowed run on the real audio driver is clean too.
+## 200 ms keeps a wide margin over the measured threshold while costing the
+## shutdown only a fifth of a second, once, and only when audio was played.
+const EXIT_AUDIO_FLUSH_MS := 200
 ## Default per-sound random pitch spread, in semitone-like fractions of pitch.
 const DEFAULT_PITCH_VARIATION := 0.06
 
@@ -53,8 +74,18 @@ var _pools: Dictionary = {}
 ## bounded by the pool size — pool players live as long as this node).
 var _playback_stamp := 0
 var _stamps: Dictionary = {}
-var _music_player: AudioStreamPlayer = null
+## The two music voices and which one currently owns `_music_name`. `_music_other`
+## is the spare: it becomes the incoming voice on the next `play_music`, and the
+## just-retired track becomes the new spare. `_music_fades` holds the in-flight
+## volume ramps (each `{player, target, rate}`) stepped in `_process`.
+var _music_players: Array[AudioStreamPlayer] = []
+var _music_current: AudioStreamPlayer = null
+var _music_other: AudioStreamPlayer = null
 var _music_name := ""
+var _music_fades: Array = []
+## A single looping ambience bed on the Music bus, under the music.
+var _ambience_player: AudioStreamPlayer = null
+var _ambience_name := ""
 
 ## UI click detection: the panels themselves are not touched; the shared
 ## "a modal owns the input" flag is watched in one central place instead.
@@ -70,6 +101,7 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	for bus in BUS_NAMES:
 		_build_pool(bus)
+	_build_ambience_player()
 	load_settings()
 	_connect_events()
 
@@ -78,6 +110,7 @@ func _process(_delta: float) -> void:
 	var tree := get_tree()
 	if tree == null:
 		return
+	_step_music_fades(_delta)
 	_poll_ui_toggle()
 	_poll_boss_phases(tree)
 
@@ -93,11 +126,29 @@ func _exit_tree() -> void:
 			var player := entry as AudioStreamPlayer
 			if player == null:
 				continue
-			if player.playing:
-				player.stop()
+			# Stop unconditionally, not only when `playing` reads true: under the
+			# headless (dummy) audio driver a voice that was started keeps its
+			# server-side playback alive while `playing` already reads false, so a
+			# `playing`-gated stop would leave that playback — and the stream it
+			# holds — in use at exit. `stop()` on an idle voice is a harmless no-op.
+			player.stop()
 			player.stream = null
+	if _ambience_player != null and is_instance_valid(_ambience_player):
+		_ambience_player.stop()
+		_ambience_player.stream = null
+	# The mix thread retires a stopped voice's playback a moment after `stop()`
+	# queues it. Let it run that moment before the caches — and with them the last
+	# reference to each stream — go away, or the exit leak check reports a
+	# still-playing bed's playback and its stream as "still in use". Only worth
+	# waiting on when something was actually played this session.
+	if not _streams.is_empty():
+		OS.delay_msec(EXIT_AUDIO_FLUSH_MS)
 	_streams.clear()
-	_music_player = null
+	_music_players.clear()
+	_music_current = null
+	_music_other = null
+	_music_fades.clear()
+	_ambience_player = null
 	_boss_phases.clear()
 	_stamps.clear()
 
@@ -125,28 +176,109 @@ func play_sfx(name: String, bus: String = "SFX", pitch_variation: float = DEFAUL
 	return true
 
 
-## Loops `res://assets/audio/<name>.wav` on the Music bus. No music asset ships
-## with the slice, so this is currently only reachable from tests and from a
-## later content pass; calling it with a missing name is a silent no-op.
-func play_music(name: String) -> void:
+## Loops `res://assets/audio/<name>.wav` on the Music bus, crossfading from the
+## track already playing (if any) over `fade` seconds. Returns false for an
+## unknown name, leaving the current track untouched — audio never breaks a
+## gameplay path. Calling it again with a different name replaces the previous
+## track (the old one is ramped down and stopped), so travel can never stack two
+## tracks. A `fade` of 0 cuts instantly instead of ramping.
+func play_music(name: String, fade: float = 0.6) -> bool:
 	var stream := _stream(name)
-	if stream == null or _music_player == null:
-		return
-	if stream is AudioStreamWAV:
-		(stream as AudioStreamWAV).loop_mode = AudioStreamWAV.LOOP_FORWARD
-	_music_player.stream = stream
+	if stream == null or _music_current == null or _music_other == null:
+		return false
+	# Already the current, audible track: do not restart it from silence.
+	if name == _music_name and _music_current.playing:
+		return true
+	_enable_loop(stream)
+	var incoming := _music_other
+	var outgoing := _music_current
+	# The spare may still be ramping down from an earlier swap: cancel that first
+	# so a rapid triple switch never leaves a stale fade on the voice we reuse.
+	_cancel_fade(incoming)
+	incoming.stream = stream
+	incoming.volume_db = MUSIC_FADE_START_DB
+	incoming.play()
+	if fade <= 0.0 or not outgoing.playing:
+		# No ramp: bring the new track straight up and cut the old one, so a
+		# travel or a boss switch never leaves two tracks stacked.
+		incoming.volume_db = 0.0
+		if outgoing.playing:
+			outgoing.stop()
+	else:
+		_start_fade(incoming, 0.0, fade)
+		_start_fade(outgoing, MUSIC_FADE_START_DB, fade)
+	# The just-started voice is now current; the retired one becomes the spare.
+	_music_current = incoming
+	_music_other = outgoing
 	_music_name = name
-	_music_player.play()
+	return true
 
 
-func stop_music() -> void:
+## Stops the music, ramping every live music voice down over `fade` seconds
+## (0 cuts instantly). Clears the current-track name immediately so a caller can
+## never read a track that is on its way out.
+func stop_music(fade: float = 0.6) -> void:
 	_music_name = ""
-	if _music_player != null and _music_player.playing:
-		_music_player.stop()
+	for player in _music_players:
+		if player == null or not is_instance_valid(player) or not player.playing:
+			continue
+		_cancel_fade(player)
+		if fade <= 0.0:
+			player.stop()
+		else:
+			_start_fade(player, MUSIC_FADE_START_DB, fade)
 
 
+## The track name `play_music` last started, or "" once stopped. Read by tests
+## and by the zone/boss wiring to decide whether a switch is actually a change.
+func current_music() -> String:
+	return _music_name
+
+
+## Back-compat alias for `current_music()`; the name predates the crossfade work.
 func music_name() -> String:
 	return _music_name
+
+
+## Loops an ambience bed (`res://assets/audio/<name>.wav`) on the Music bus at a
+## low fixed level, under the music. One bed at a time: a second call replaces
+## the first. Returns false for an unknown name.
+func play_ambience(name: String) -> bool:
+	if _ambience_player == null:
+		return false
+	var stream := _stream(name)
+	if stream == null:
+		return false
+	_enable_loop(stream)
+	_ambience_player.stream = stream
+	_ambience_player.volume_db = AMBIENCE_DB
+	_ambience_player.play()
+	_ambience_name = name
+	return true
+
+
+func stop_ambience() -> void:
+	_ambience_name = ""
+	if _ambience_player != null and is_instance_valid(_ambience_player) and _ambience_player.playing:
+		_ambience_player.stop()
+
+
+func current_ambience() -> String:
+	return _ambience_name
+
+
+## Make a loaded bed loop seamlessly. The importer leaves `loop_end` at 0, which
+## the audio server reads as a zero-length region, so a voice set to LOOP_FORWARD
+## alone finishes at once instead of looping. The true frame count comes from the
+## stream length, so the loop spans the whole bed whether the import kept it as
+## PCM or packed it into IMA_ADPCM.
+func _enable_loop(stream: AudioStream) -> void:
+	var wav := stream as AudioStreamWAV
+	if wav == null:
+		return
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = int(round(wav.get_length() * float(wav.mix_rate)))
 
 
 # --- volume ------------------------------------------------------------------
@@ -376,7 +508,61 @@ func _build_pool(bus: String) -> void:
 		add_child(player)
 		(_pools[bus] as Array).append(player)
 		if bus == "Music":
-			_music_player = player
+			_music_players.append(player)
+	if bus == "Music" and _music_players.size() >= 2:
+		_music_current = _music_players[0]
+		_music_other = _music_players[1]
+
+
+## One dedicated looping voice for the zone ambience bed, on the Music bus but
+## outside the music crossfade pair so a track change never touches it.
+func _build_ambience_player() -> void:
+	_ambience_player = AudioStreamPlayer.new()
+	_ambience_player.name = "AmbiencePlayer"
+	_ambience_player.bus = "Music"
+	_ambience_player.volume_db = AMBIENCE_DB
+	add_child(_ambience_player)
+
+
+# --- music crossfade ---------------------------------------------------------
+
+
+## Ramp `player` to `target_db` over `seconds`, replacing any fade it already had.
+func _start_fade(player: AudioStreamPlayer, target_db: float, seconds: float) -> void:
+	_cancel_fade(player)
+	var span := absf(target_db - player.volume_db)
+	var rate := span / maxf(0.01, seconds)
+	_music_fades.append({"player": player, "target": target_db, "rate": rate})
+
+
+func _cancel_fade(player: AudioStreamPlayer) -> void:
+	for i in range(_music_fades.size() - 1, -1, -1):
+		if _music_fades[i].get("player") == player:
+			_music_fades.remove_at(i)
+
+
+## Steps every in-flight ramp one frame. A voice that reaches the silence target
+## is stopped and dropped, which is what frees the spare for the next swap and
+## guarantees only one track is left playing once a crossfade settles.
+func _step_music_fades(delta: float) -> void:
+	for i in range(_music_fades.size() - 1, -1, -1):
+		var entry: Dictionary = _music_fades[i]
+		var player := entry.get("player") as AudioStreamPlayer
+		if player == null or not is_instance_valid(player):
+			_music_fades.remove_at(i)
+			continue
+		var target := float(entry.get("target", 0.0))
+		var rate := float(entry.get("rate", 0.0))
+		var current := player.volume_db
+		if current < target:
+			current = minf(target, current + rate * delta)
+		else:
+			current = maxf(target, current - rate * delta)
+		player.volume_db = current
+		if current == target:
+			if target <= MUSIC_FADE_START_DB and player.playing:
+				player.stop()
+			_music_fades.remove_at(i)
 
 
 ## Free player first; when all are busy, the one handed out longest ago.

@@ -239,6 +239,14 @@ func zone_name() -> String:
 	return "Лесной край"
 
 
+func music_track() -> String:
+	return "music_forest"
+
+
+func ambience_track() -> String:
+	return "ambience_forest"
+
+
 ## Advertise the safe zone before any actor is spawned, so an enemy created in
 ## `_spawn_actors` can already resolve this world through the group and honour
 ## the boundary from its very first physics frame.
