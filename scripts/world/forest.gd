@@ -10,6 +10,15 @@ const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
 const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 const FOREST_WARDEN_SCENE := "res://scenes/enemies/forest_warden.tscn"
+## The five new forest predators (spec §10). Each one is a different mechanic on
+## the shared `Enemy` script rather than a recoloured wolf: the spider webs, the
+## slime leaves a spore pool, the tick swarms, the lumberjack reads its axe a
+## long time coming, the root beast is a turret that never walks.
+const SPIDER_SCENE := "res://scenes/enemies/spider.tscn"
+const SLIME_SCENE := "res://scenes/enemies/slime.tscn"
+const TICK_SCENE := "res://scenes/enemies/tick.tscn"
+const LUMBERJACK_SCENE := "res://scenes/enemies/lumberjack.tscn"
+const ROOT_BEAST_SCENE := "res://scenes/enemies/root_beast.tscn"
 const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
 const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
@@ -83,6 +92,45 @@ const WISP_B_ANCHOR := Vector2i(41, 18)
 ## How far the walkable scan looks around a new-enemy anchor before giving up.
 ## 5 tiles is 80 px against a 2x2 tree cluster, so it always finds the clearing.
 const NEW_ENEMY_SCAN_RADIUS := 5
+
+## The tile the player arrives on. Named as a constant rather than left as the
+## two numbers inside `_spawn_actors`, because the rule below that keeps hostiles
+## off the player's first few steps has to read the very same tile the player is
+## actually placed on — a spawn point moved without moving this number would
+## quietly shrink that clearance to nothing.
+const PLAYER_SPAWN_TILE := Vector2i(4, 9)
+
+## Anchors for the five new forest predators (spec §10). They sit on the south and
+## east half of the map for two reasons. Mechanically, that is where the woods are
+## thickest and the village is not. Practically, the debug hunter (BOT-008) walks
+## at the NEAREST enemy and must still reach a wolf first: the closest wolf post
+## is WolfA at (18, 14), 238 px from the spawn, and `NEW_ENEMY_CLEAR_FROM_SPAWN`
+## below is what keeps every new post beyond that. Each anchor is only a starting
+## point — the actual tile comes from `_find_new_enemy_tile`, so a tree cluster
+## from the fixed seed can never swallow a spawn.
+const SPIDER_A_ANCHOR := Vector2i(13, 25)
+const SPIDER_B_ANCHOR := Vector2i(38, 16)
+const SLIME_A_ANCHOR := Vector2i(26, 24)
+const TICK_A_ANCHOR := Vector2i(12, 26)
+const TICK_B_ANCHOR := Vector2i(15, 26)
+const TICK_C_ANCHOR := Vector2i(18, 26)
+const LUMBERJACK_A_ANCHOR := Vector2i(29, 19)
+const ROOTBEAST_A_ANCHOR := Vector2i(45, 12)
+
+## How far a new predator has to stay from the tile the player arrives on
+## (Chebyshev, so the diagonal counts as close too). Sixteen tiles is 256 px,
+## which is more than the 238 px to the nearest wolf post, so the hunter bot's
+## first target stays a wolf, and it is also four times the width of the village
+## safe zone — nobody spawns a spider on the herbwife's doorstep. The rule is
+## enforced by `_find_new_enemy_tile` on the tile it is about to return, not on
+## the anchor, so a scan that has to step around a tree cannot smuggle a post
+## closer than this.
+const NEW_ENEMY_CLEAR_FROM_SPAWN := 16
+
+## How wide the new-predator scan looks for a free tile. Three tiles clears a
+## 2x2 cluster without wandering a post out of the quarter of the map its anchor
+## names, which is what keeps the pack of three ticks a pack instead of a spread.
+const NEW_ENEMY_SCAN_RADIUS_SMALL := 3
 
 ## Anchor for the forest mini-boss (roadmap stage D, spec §10.4). It sits inside
 ## the east clearing the archer and the sword chest already hold, one tile short
@@ -265,7 +313,7 @@ func _generate_map() -> void:
 
 
 func _spawn_actors() -> void:
-	player = _instantiate(PLAYER_SCENE, _tile_center(4, 9), "Player")
+	player = _instantiate(PLAYER_SCENE, _tile_center(PLAYER_SPAWN_TILE.x, PLAYER_SPAWN_TILE.y), "Player")
 	player.name = "Player"
 	player.add_to_group("player")
 	player.set("spawn_point", player.global_position)
@@ -366,6 +414,27 @@ func _spawn_actors() -> void:
 	_spawn_enemy_walkable(WISP_SCENE, WISP_A_ANCHOR, "WispA")
 	_spawn_enemy_walkable(WISP_SCENE, WISP_B_ANCHOR, "WispB")
 
+	# The five new predators (spec §10). They differ from everything above by
+	# mechanic, not by palette: the spider chills on contact, the slime pays for
+	# its slow walk by leaving a spore pool where it dies, the tick is cheap and
+	# only dangerous in a pack, the lumberjack trades speed for a heavy telegraph,
+	# and the root beast never leaves its tile but bites anything that steps into
+	# reach. Their tiles come from `_find_new_enemy_tile`, which is the walkable
+	# scan plus the two rules this half of the map needs: nothing inside the
+	# village safe zone (or its buffer), and nothing closer to the arrival tile
+	# than the nearest wolf post, so the hunter bot still reaches a wolf first.
+	# The reserved set keeps three tick anchors whose scans overlap from
+	# collapsing onto one tile.
+	var new_predator_tiles := {}
+	_spawn_new_enemy(SPIDER_SCENE, SPIDER_A_ANCHOR, "SpiderA", new_predator_tiles)
+	_spawn_new_enemy(SPIDER_SCENE, SPIDER_B_ANCHOR, "SpiderB", new_predator_tiles)
+	_spawn_new_enemy(SLIME_SCENE, SLIME_A_ANCHOR, "SlimeA", new_predator_tiles)
+	_spawn_new_enemy(TICK_SCENE, TICK_A_ANCHOR, "TickA", new_predator_tiles)
+	_spawn_new_enemy(TICK_SCENE, TICK_B_ANCHOR, "TickB", new_predator_tiles)
+	_spawn_new_enemy(TICK_SCENE, TICK_C_ANCHOR, "TickC", new_predator_tiles)
+	_spawn_new_enemy(LUMBERJACK_SCENE, LUMBERJACK_A_ANCHOR, "LumberjackA", new_predator_tiles)
+	_spawn_new_enemy(ROOT_BEAST_SCENE, ROOTBEAST_A_ANCHOR, "RootBeastA", new_predator_tiles)
+
 	# The mini-boss goes last among the enemies on purpose. It is the only enemy
 	# of its type, it owns the far east corner, and its `boss` group is what the
 	# HUD looks up for the boss bar — so nothing else in the world can shadow it.
@@ -457,6 +526,71 @@ func _spawn_rubble() -> void:
 func _spawn_enemy_walkable(scene_path: String, anchor: Vector2i, node_name: String, radius: int = NEW_ENEMY_SCAN_RADIUS) -> void:
 	var tile := _find_walkable_near(anchor, radius)
 	_spawn_enemy(scene_path, tile.x, tile.y, node_name)
+
+
+## `_spawn_enemy_walkable` for the new predator types, whose tiles carry two rules
+## the boar and the wisp never had to respect: the village clearing is off limits
+## to a hostile, and so is the ground right around the arrival tile. Every tile
+## already standing under another enemy is skipped too, so two posts whose scans
+## overlap can never collapse onto one square. Deterministic like the rest of this
+## file: the order depends only on the fixed seed, the fixed anchors and the fixed
+## order of the calls above.
+func _spawn_new_enemy(scene_path: String, anchor: Vector2i, node_name: String, taken: Dictionary) -> void:
+	for tile: Vector2i in _occupied_enemy_tiles().keys():
+		taken[tile] = true
+	var chosen := _find_new_enemy_tile(anchor, NEW_ENEMY_SCAN_RADIUS_SMALL, taken)
+	taken[chosen] = true
+	_spawn_enemy(scene_path, chosen.x, chosen.y, node_name)
+
+
+## The tiles the enemies already in this zone stand on, read back from the world
+## rather than tracked by hand, so a post added above this function (a wolf, a
+## boar, a wisp) is automatically off limits to the ones added below it.
+func _occupied_enemy_tiles() -> Dictionary:
+	var occupied := {}
+	for node in get_tree().get_nodes_in_group("enemy"):
+		var body := node as Node2D
+		if body == null or not is_instance_valid(body):
+			continue
+		occupied[Vector2i(floori(body.global_position.x / float(TILE)), floori(body.global_position.y / float(TILE)))] = true
+	return occupied
+
+
+## The declared anchor first, then the outward rings: a wide row-major scan answers
+## with the top-left corner of its box rather than the anchor, which is how a post
+## named for the south wood ends up three rows north of it. The anchor of each new
+## predator is walkable ground in this seed, so the ordinary case is the anchor
+## itself, and the rings are only the escape for a later edit to the tree clusters.
+##
+## Two rules a plain walkability check does not carry: a tile inside the village
+## safe zone or its one-tile buffer is not free (an enemy parked there spends its
+## first frames walking out, and the clearing is the one place this world promises
+## is safe), and neither is a tile nearer to the arrival point than
+## `NEW_ENEMY_CLEAR_FROM_SPAWN`, which is what keeps the hunter bot's nearest enemy
+## a wolf. Both are applied to the candidate, never to the anchor, so a scan
+## stepping around a tree cannot slip past them. Falls back to the anchor when
+## nothing in range passes, which the roster test notices rather than trusts.
+func _find_new_enemy_tile(anchor: Vector2i, radius: int, taken: Dictionary) -> Vector2i:
+	if _is_new_enemy_tile(anchor, taken):
+		return anchor
+	for ring in range(1, radius + 1):
+		for dy in range(-ring, ring + 1):
+			for dx in range(-ring, ring + 1):
+				if absi(dx) != ring and absi(dy) != ring:
+					continue
+				var t := Vector2i(anchor.x + dx, anchor.y + dy)
+				if _is_new_enemy_tile(t, taken):
+					return t
+	return anchor
+
+
+func _is_new_enemy_tile(tile: Vector2i, taken: Dictionary) -> bool:
+	var ch := cell_at(tile)
+	if ch != "." and ch != ",":
+		return false
+	if SAFE_ZONE_RECT.grow(1).has_point(tile) or taken.has(tile):
+		return false
+	return maxi(absi(tile.x - PLAYER_SPAWN_TILE.x), absi(tile.y - PLAYER_SPAWN_TILE.y)) >= NEW_ENEMY_CLEAR_FROM_SPAWN
 
 
 ## Builds the day cycle and gives every scheduled villager a `ScheduleComponent`.

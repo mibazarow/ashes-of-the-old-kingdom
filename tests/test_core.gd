@@ -333,6 +333,9 @@ func _run() -> void:
 	print("== enemy behaviour traits ==")
 	await _test_enemy_behaviour_traits()
 
+	print("== enemy roster ==")
+	await _test_enemy_roster()
+
 	print("== dungeon ==")
 	await _test_dungeon()
 
@@ -344,7 +347,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 58, "every test group ran to completion (got %d/58)" % completed.size())
+	_check(completed.size() == 59, "every test group ran to completion (got %d/59)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -9128,6 +9131,460 @@ class FakeWalledWorld:
 		if tile.x >= 3:
 			return "#"
 		return "."
+
+
+## The twelve types added to reach the eighteen the spec asks for, with the pool and
+## the swing each one declares in its own scene. The numbers are written out here
+## rather than read back from the scene, because a scene whose stats drifted since
+## it was written is exactly the kind of silent change this file exists to catch.
+const ROSTER_NEW_TYPES: Dictionary = {
+	"spider": {"hp": 18, "dmg": 6},
+	"slime": {"hp": 40, "dmg": 5},
+	"tick": {"hp": 8, "dmg": 3},
+	"lumberjack": {"hp": 52, "dmg": 15},
+	"root_beast": {"hp": 60, "dmg": 12},
+	"shieldbearer": {"hp": 55, "dmg": 9},
+	"cultist_caster": {"hp": 24, "dmg": 6},
+	"royal_guard": {"hp": 70, "dmg": 14},
+	"grave_hound": {"hp": 20, "dmg": 7},
+	"bone_crawler": {"hp": 16, "dmg": 8},
+	"plague_bearer": {"hp": 48, "dmg": 8},
+	"ash_knight": {"hp": 95, "dmg": 18},
+}
+
+## Where each of the eighteen is supposed to be found. Kept as data so the roster
+## can say which zone a type went missing from instead of only that a count is low.
+const ROSTER_ZONES: Dictionary = {
+	"forest": ["ash_wolf", "ash_archer", "ash_boar", "ash_wisp", "spider", "slime",
+		"tick", "lumberjack", "root_beast"],
+	"ruins": ["ruin_skeleton", "ruin_skeleton_archer", "shieldbearer",
+		"cultist_caster", "royal_guard", "grave_hound"],
+	"dungeon": ["bone_crawler", "plague_bearer"],
+	"fortress": ["ash_knight"],
+}
+
+## The boss is deliberately outside the count. Spec §10 asks for eighteen
+## mechanically distinct *normal* enemy types, and a boss is not one of them, so the
+## scan has to name what it excluded rather than quietly drop a row.
+const ROSTER_BOSS_TYPE := "forest_warden"
+
+
+## The mechanical fingerprint of an enemy type: every lever the trait system has
+## that changes how a fight actually plays, and nothing that only changes how it
+## looks. Two types whose strings match are the same fight under a different
+## palette, which is precisely what spec §10 refuses to count, so this is the
+## equality the roster test forbids. `display_name`, `sprite_tint`, health and
+## damage are left out on purpose: a recolour moves those and nothing else, and a
+## type that only moved its numbers would still pass for the wrong reason if they
+## were in.
+func _roster_signature(inst: Node) -> String:
+	return "kind=%d speed=%.3f cd=%.3f windup=%.3f block=%.3f aura=%d pool=%s turret=%s blink=%.2f web=%.2f pack=%.3f" % [
+		int(inst.get("kind")),
+		float(inst.get("speed_multiplier")),
+		float(inst.get("attack_cooldown_multiplier")),
+		float(inst.get("windup_multiplier")),
+		float(inst.get("frontal_block")),
+		int(inst.get("aura_heal_per_second")),
+		String(inst.get("death_pool")),
+		str(bool(inst.get("stationary"))),
+		float(inst.get("teleport_interval")),
+		float(inst.get("web_on_hit")),
+		float(inst.get("pack_bonus")),
+	]
+
+
+## One enemy scene, instantiated outside the tree. Nothing in `_ready` runs, so this
+## reads the numbers the scene was authored with and nothing else; `free()` is
+## immediate because the instance never joined the tree and owns no signal edges.
+func _roster_instance(type: String) -> Node2D:
+	var packed: PackedScene = load("res://scenes/enemies/%s.tscn" % type)
+	if packed == null:
+		return null
+	return packed.instantiate() as Node2D
+
+
+## True when `node` hangs somewhere under `ancestor`. Used to ignore the enemies of
+## a world that travel has already replaced but whose queue_free has not landed yet.
+func _is_under(node: Node, ancestor: Node) -> bool:
+	var parent := node.get_parent()
+	while parent != null:
+		if parent == ancestor:
+			return true
+		parent = parent.get_parent()
+	return false
+
+
+## The roster (spec §10: "не меньше 18 механически разных типов обычных врагов;
+## перекрашенный моб не считается"). Three separate claims, in this order:
+##
+## 1. every new scene is a real, complete enemy — it loads, it instantiates, it
+##    names itself, and it carries the health, hitbox and telegraph a fight needs;
+## 2. no two of the eighteen are the same fight — compared by trait tuple, not by
+##    name, so a palette swap cannot pass;
+## 3. each new gimmick actually happens in play — the shield blocks from the front
+##    only, the cultist heals a wounded ally, the plague bearer leaves a pool, the
+##    spider chills the player, a pack of ticks outruns a lone one, and the turret
+##    hits without leaving its post.
+##
+## Then a live pass over all four zones, because a type that exists only on disk is
+## not in the game: every post must stand on ground the player can walk, and none of
+## the forest posts may sit inside the village safe zone the bots sleep in.
+func _test_enemy_roster() -> void:
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	_clear_enemies()
+	_clear_death_pools()
+	await process_frame
+
+	# --- 1. every new scene is a complete enemy --------------------------------
+	for type: String in ROSTER_NEW_TYPES.keys():
+		var expected: Dictionary = ROSTER_NEW_TYPES[type]
+		var inst := _roster_instance(type)
+		_check(inst != null, "%s.tscn loads and instantiates" % type)
+		if inst == null:
+			continue
+		_check(String(inst.get("enemy_type")) == type,
+			"%s names itself '%s'" % [type, String(inst.get("enemy_type"))])
+		_check(not String(inst.get("display_name")).is_empty(),
+			"%s has a display name ('%s')" % [type, String(inst.get("display_name"))])
+		_check(int(inst.get("max_health")) == int(expected["hp"]),
+			"%s has %d health (got %d)" % [type, int(expected["hp"]), int(inst.get("max_health"))])
+		_check(int(inst.get("attack_damage")) == int(expected["dmg"]),
+			"%s swings for %d (got %d)" % [type, int(expected["dmg"]), int(inst.get("attack_damage"))])
+		var hc := inst.get_node_or_null("HealthComponent") as HealthComponent
+		_check(hc != null and int(hc.max_health) == int(expected["hp"]),
+			"%s carries a HealthComponent on the same pool" % type)
+		var body_shape := inst.get_node_or_null("CollisionShape2D") as CollisionShape2D
+		_check(body_shape != null and body_shape.shape != null, "%s has a body shape" % type)
+		var hitbox := inst.get_node_or_null("AttackHitbox/CollisionShape2D") as CollisionShape2D
+		_check(hitbox != null and hitbox.shape != null and hitbox.disabled,
+			"%s keeps its hitbox shut until the telegraph opens it" % type)
+		_check(inst.get_node_or_null("Telegraph") != null, "%s telegraphs before it hits" % type)
+		_check(inst.get_node_or_null("Sprite2D") != null, "%s draws something" % type)
+		inst.free()
+
+	# --- 2. eighteen distinct types, no two sharing a tuple --------------------
+	var dir := DirAccess.open("res://scenes/enemies")
+	_check(dir != null, "the roster can read scenes/enemies")
+	var types_seen: Array[String] = []
+	var signatures := {}
+	var by_type := {}
+	var duplicates: Array[String] = []
+	var boss_seen: Array[String] = []
+	if dir != null:
+		var files: Array[String] = []
+		for found in dir.get_files():
+			var file_name := String(found).get_file()
+			if file_name.ends_with(".tscn"):
+				files.append(file_name)
+		files.sort()
+		for file_name: String in files:
+			var packed: PackedScene = load("res://scenes/enemies/" + file_name)
+			var inst: Node2D = null if packed == null else packed.instantiate() as Node2D
+			_check(inst != null, "%s instantiates for the roster scan" % file_name)
+			if inst == null:
+				continue
+			var type := String(inst.get("enemy_type"))
+			if type == ROSTER_BOSS_TYPE:
+				boss_seen.append(type)
+				inst.free()
+				continue
+			var signature := _roster_signature(inst)
+			by_type[type] = signature
+			if signatures.has(signature):
+				duplicates.append("%s == %s" % [type, String(signatures[signature])])
+			signatures[signature] = type
+			if not types_seen.has(type):
+				types_seen.append(type)
+			inst.free()
+	types_seen.sort()
+	print("  roster: %d normal types — %s" % [types_seen.size(), ", ".join(types_seen)])
+	for type: String in types_seen:
+		print("    %-22s %s" % [type, String(by_type.get(type, "<missing>"))])
+	_check(types_seen.size() >= 18,
+		"the roster has at least 18 distinct normal enemy types (got %d)" % types_seen.size())
+	_check(duplicates.is_empty(),
+		"no two normal types share a trait tuple (%d tuples over %d types: %s)"
+			% [signatures.size(), types_seen.size(), ", ".join(duplicates)])
+	_check(boss_seen == [ROSTER_BOSS_TYPE],
+		"exactly the boss was excluded from the count (got %s)" % ", ".join(boss_seen))
+	for zone_id: String in ROSTER_ZONES.keys():
+		for type: String in (ROSTER_ZONES[zone_id] as Array):
+			_check(types_seen.has(type), "%s fields %s" % [zone_id, type])
+	for type: String in ROSTER_NEW_TYPES.keys():
+		_check(types_seen.has(type), "the new type %s is on disk" % type)
+
+	var arena := Node2D.new()
+	root.add_child(arena)
+	await process_frame
+
+	# --- 3a. frontal_block: the shieldbearer soaks the side it faces -----------
+	# No frame is awaited between add_child and the two hits: the state machine
+	# would call _face() on its first physics frame and overwrite the facing this
+	# block pins. Driven through receive_damage because DamageResolver builds its own
+	# payload and does not forward arbitrary keys.
+	var shield := _roster_instance("shieldbearer")
+	arena.add_child(shield)
+	_check(absf(float(shield.get("frontal_block")) - 0.6) < 0.001,
+		"the shieldbearer is authored with a 0.6 frontal block")
+	shield.set("_facing", Vector2.RIGHT)
+	var front_before := _enemy_hp(shield)
+	var front_info := {"attacker_position": shield.global_position + Vector2(40, 0)}
+	shield.receive_damage(10, front_info)
+	var front_taken := front_before - _enemy_hp(shield)
+	shield.set("_facing", Vector2.RIGHT)
+	var back_before := _enemy_hp(shield)
+	var back_info := {"attacker_position": shield.global_position + Vector2(-40, 0)}
+	shield.receive_damage(10, back_info)
+	var back_taken := back_before - _enemy_hp(shield)
+	_check(front_taken < back_taken,
+		"the shieldbearer takes less from the front than from behind (%d vs %d of 10)"
+			% [front_taken, back_taken])
+	_check(int(front_info.get("blocked", -1)) == 6,
+		"the shield soaks 6 of 10 from the front (got %s)" % str(front_info.get("blocked")))
+	_check(not back_info.has("blocked"), "the shield records nothing for a hit from behind")
+	shield.queue_free()
+	_clear_enemies()
+	await process_frame
+
+	# --- 3b. aura_heal_per_second: the cultist keeps its pack standing ---------
+	var caster := _roster_instance("cultist_caster")
+	# Pinned so the 70 px aura radius stays the number the scene declares; the aura
+	# itself is state independent and runs from _tick, not from a chase state.
+	caster.set("stationary", true)
+	arena.add_child(caster)
+	var patient := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	patient.position = Vector2(50, 0)
+	patient.set_physics_process(false)
+	arena.add_child(patient)
+	_damage_enemy(patient, 20)
+	_check(int(caster.get("aura_heal_per_second")) == 3,
+		"the cultist is authored to heal 3 per second")
+	var aura_before := _enemy_hp(patient)
+	_check(aura_before == 6, "the ally beside the cultist starts wounded at 6 hp (got %d)" % aura_before)
+	for _i in range(66):
+		await physics_frame
+	_check(_enemy_hp(patient) == aura_before + 3,
+		"an ally within 70 px regains 3 hp after one aura tick (got %d)" % _enemy_hp(patient))
+	# And one standing outside the radius must stay exactly as wounded.
+	var outsider := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	outsider.position = Vector2(200, 0)
+	outsider.set_physics_process(false)
+	arena.add_child(outsider)
+	_damage_enemy(outsider, 20)
+	for _i in range(66):
+		await physics_frame
+	_check(_enemy_hp(outsider) == 6,
+		"an ally outside the aura is not healed (got %d)" % _enemy_hp(outsider))
+	_clear_enemies()
+	await process_frame
+
+	# --- 3c. death_pool: the plague bearer leaves a corpse zone ----------------
+	var bearer := _roster_instance("plague_bearer")
+	bearer.position = Vector2(1200, 1200)
+	arena.add_child(bearer)
+	await process_frame
+	_check(String(bearer.get("death_pool")) == "blight"
+			and int(bearer.get("death_pool_damage")) == 5,
+		"the plague bearer is authored to leave a 5 damage blight pool (got '%s' / %d)"
+			% [String(bearer.get("death_pool")), int(bearer.get("death_pool_damage"))])
+	DamageResolver.resolve_hit(null, bearer, {"damage": 999, "hit_id": "roster-dp-1", "damage_type": "physical"})
+	await process_frame
+	var pools := get_nodes_in_group("death_pool")
+	_check(pools.size() == 1,
+		"killing the plague bearer leaves exactly one pool (got %d)" % pools.size())
+	_clear_enemies()
+	_clear_death_pools()
+	await process_frame
+
+	# --- 3d. web_on_hit: a spider swing leaves the player chilled --------------
+	gs.revive_full()
+	var player := (load("res://scenes/player/player.tscn") as PackedScene).instantiate() as Node2D
+	player.position = Vector2.ZERO
+	arena.add_child(player)
+	await process_frame
+	var player_sc := player.get_node_or_null("StatusComponent") as StatusComponent
+	_check(player_sc != null, "the player owns a StatusComponent for the web check")
+	var weaver := _roster_instance("spider")
+	weaver.position = Vector2(10, 0)
+	arena.add_child(weaver)
+	_check(absf(float(weaver.get("web_on_hit")) - 1.2) < 0.001,
+		"the spider is authored with a 1.2 s web (got %.2f)" % float(weaver.get("web_on_hit")))
+	var chill_left := 0.0
+	for _i in range(240):
+		await physics_frame
+		if player_sc != null and player_sc.has_status("chill"):
+			chill_left = player_sc.time_left("chill")
+			break
+	_check(chill_left > 0.9 and chill_left <= 1.2,
+		"a spider hit leaves the player chilled for about 1.2 s (got %.2f)" % chill_left)
+	weaver.queue_free()
+	if player_sc != null:
+		player_sc.clear_all()
+	await process_frame
+
+	# --- 3e. pack_bonus: three ticks close faster than one ---------------------
+	var tick_scene: PackedScene = load("res://scenes/enemies/tick.tscn")
+	var lone := tick_scene.instantiate() as Node2D
+	lone.position = Vector2(0, 90)
+	arena.add_child(lone)
+	_check(absf(float(lone.get("pack_bonus")) - 0.12) < 0.001,
+		"a tick is authored with 0.12 speed per nearby ally (got %.2f)" % float(lone.get("pack_bonus")))
+	_check(absf(float(lone.call("effective_speed_multiplier")) - 1.45) < 0.001,
+		"a lone tick runs at its own speed (got %.3f)" % float(lone.call("effective_speed_multiplier")))
+	# Warm the pack cache up first: it refreshes on a 0.25 s clock, so the first
+	# quarter second of any run reads the seeded base speed either way.
+	for _i in range(20):
+		await physics_frame
+	var lone_from := lone.global_position
+	for _i in range(20):
+		await physics_frame
+	var lone_moved := lone_from.distance_to(lone.global_position)
+	lone.queue_free()
+	await process_frame
+
+	var swarm := tick_scene.instantiate() as Node2D
+	swarm.position = Vector2(0, 90)
+	arena.add_child(swarm)
+	for i in range(2):
+		# Behind it, away from the player, and pinned: the two allies prove the
+		# bonus comes from the pack and not from three bodies shoving one another.
+		var ally := tick_scene.instantiate() as Node2D
+		ally.position = Vector2(0, 90 + (i + 1) * 20)
+		ally.set_physics_process(false)
+		arena.add_child(ally)
+	_check(absf(float(swarm.call("effective_speed_multiplier")) - 1.69) < 0.001,
+		"a tick with two allies within 90 px runs at 1.69 (got %.3f)"
+			% float(swarm.call("effective_speed_multiplier")))
+	for _i in range(20):
+		await physics_frame
+	var swarm_from := swarm.global_position
+	for _i in range(20):
+		await physics_frame
+	var swarm_moved := swarm_from.distance_to(swarm.global_position)
+	_check(swarm_moved > lone_moved * 1.05,
+		"three ticks near each other close on the player faster than one alone (%.1f px vs %.1f px)"
+			% [swarm_moved, lone_moved])
+	_clear_enemies()
+	await process_frame
+
+	# --- 3f. stationary: the root beast holds its post and still hits ----------
+	# Parked in a corner of its own. A CharacterBody2D created on top of another body
+	# is shoved clear by move_and_slide's overlap recovery, and that one-off
+	# separation is not the walk this check forbids, so the post is taken well away
+	# from the player. The player is then stepped to 16 px: inside the 18 px reach,
+	# outside the 12 px at which the two bodies would start pushing each other.
+	var turret := _roster_instance("root_beast")
+	turret.position = Vector2(600, 600)
+	arena.add_child(turret)
+	_check(bool(turret.get("stationary")), "the root beast is authored as a turret")
+	var turret_post := turret.global_position
+	player.global_position = Vector2(640, 600)  # seen, but well out of melee reach
+	await physics_frame
+	await physics_frame
+	for _i in range(60):
+		await physics_frame
+	_check(turret.global_position.distance_to(turret_post) < 0.5,
+		"the root beast does not move over 60 frames (drift %.2f)"
+			% turret.global_position.distance_to(turret_post))
+	player.global_position = Vector2(616, 600)  # inside its reach, still not touching
+	var swung := false
+	for _i in range(150):
+		await physics_frame
+		if int(turret.get("state")) == 4:
+			swung = true
+			break
+	_check(swung, "the root beast still swings at anything that steps into its reach")
+	_check(turret.global_position.distance_to(turret_post) < 0.5,
+		"and it swung without leaving its post (drift %.2f)"
+			% turret.global_position.distance_to(turret_post))
+	_clear_enemies()
+	arena.queue_free()
+	await process_frame
+
+	# --- 4. every post in every zone stands on ground the player can walk ------
+	var main_packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := main_packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var manager := scene.get_node_or_null("ZoneManager")
+	_check(manager != null, "the roster group has a zone manager to walk the zones")
+	var new_posts := 0
+	if manager != null:
+		for leg: Array in [["forest", Vector2i(4, 9)], ["ruins", Vector2i(3, 11)],
+				["dungeon", Vector2i(3, 12)], ["fortress", Vector2i(4, 14)]]:
+			if String(gs.zone) != String(leg[0]):
+				_check(bool(manager.call("travel", leg[0])),
+					"the roster group travelled to %s" % String(leg[0]))
+				await process_frame
+				await process_frame
+			var world := scene.get_node_or_null("World")
+			_check(world != null and String(world.call("zone_id")) == String(leg[0]),
+				"%s is the live world" % String(leg[0]))
+			if world == null:
+				continue
+			var off_ground: Array[String] = []
+			var in_safe_zone: Array[String] = []
+			var zone_types: Array[String] = []
+			var zone_posts := 0
+			var posted := 0
+			for node in get_nodes_in_group("enemy"):
+				if not _is_under(node, world):
+					continue
+				var post := node as Node2D
+				if post == null:
+					continue
+				posted += 1
+				var tile := _tile_of_node(post)
+				var cell := String(world.call("cell_at", tile))
+				if cell != "." and cell != ",":
+					off_ground.append("%s@%s='%s'" % [String(post.name), str(tile), cell])
+				if bool(world.call("is_in_safe_zone", tile)):
+					in_safe_zone.append("%s@%s" % [String(post.name), str(tile)])
+				var post_type := String(post.get("enemy_type"))
+				if not zone_types.has(post_type):
+					zone_types.append(post_type)
+				if ROSTER_NEW_TYPES.has(post_type):
+					zone_posts += 1
+			zone_types.sort()
+			print("  %-9s %2d posts, %d types — %s"
+				% [String(leg[0]), posted, zone_types.size(), ", ".join(zone_types)])
+			_check(off_ground.is_empty(),
+				"every %s enemy stands on a walkable tile (%s)"
+					% [String(leg[0]), ", ".join(off_ground)])
+			_check(in_safe_zone.is_empty(),
+				"no %s enemy stands inside the village safe zone (%s)"
+					% [String(leg[0]), ", ".join(in_safe_zone)])
+			_check(zone_types.size() >= 2,
+				"%s fields more than one kind of enemy (got %d)"
+					% [String(leg[0]), zone_types.size()])
+			_check(zone_posts > 0, "%s fields at least one of the new types (got %d)"
+					% [String(leg[0]), zone_posts])
+			new_posts += zone_posts
+	_check(new_posts >= 18,
+		"the four zones together field every new type at least once (got %d posts)" % new_posts)
+	_check(bool(manager.call("travel", "forest")), "the roster group returns to the forest")
+	await process_frame
+	scene.queue_free()
+	await process_frame
+
+	# --- cleanup ---------------------------------------------------------------
+	_clear_enemies()
+	_clear_death_pools()
+	gs.reset()
+	DamageResolver.reset()
+	Combinations.reset()
+	# Same reason the behaviour-traits group drains the audio: this group hurts the
+	# player for real, so it can leave a `hurt` sample mid-playback, and a stream
+	# still held at exit is counted as a leaked AudioStreamWAV by the acceptance run.
+	var audio := root.get_node_or_null("AudioManager")
+	if audio != null:
+		_audio_stop_all(audio)
+		for _i in range(DRAIN_FRAMES):
+			await process_frame
+	completed["enemy_roster"] = true
 
 
 ## The third zone: the undercroft beneath the ruins, and the stair that reaches it.

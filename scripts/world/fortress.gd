@@ -32,6 +32,13 @@ const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
 const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
 const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
+## The two new garrison types (spec §10). The ash knight is the elite of the zone:
+## the heaviest pool and swing on the map outside the boss, and it soaks 45 % of
+## anything that comes at it from the front, so the only honest way to kill it is
+## to get behind it. The crawler is the opposite trade — a sixteenth of the health
+## and 1.35x the speed, meant to close a room before the player reads the room.
+const ASH_KNIGHT_SCENE := "res://scenes/enemies/ash_knight.tscn"
+const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
 
 const MAP_W := 48
 const MAP_H := 30
@@ -177,6 +184,18 @@ const WISP_A_ANCHOR := Vector2i(28, 6)
 const WISP_B_ANCHOR := Vector2i(32, 22)
 const ARCHER_C_ANCHOR := Vector2i(26, 19)
 
+## The two new posts. The ash knight holds the barracks parade ground, where the
+## bunk bars break a line of sight on both sides and an elite that only has to
+## face one way has a road to be approached down; the crawler takes the archive,
+## where a low fast body can run the length of the shelf runs and come at a player
+## from behind a rack. Both are on the spine, both are well past the six-tile ring
+## the zone asks of every hostile, and neither is anywhere near the ring kept for
+## the final boss. Each is snapped by `_find_prop_tile` against the reserved set
+## the first wave already claimed, so none of them can sit on the stair, the entry
+## or another post.
+const ASH_KNIGHT_A_ANCHOR := Vector2i(19, 14)
+const BONE_CRAWLER_C_ANCHOR := Vector2i(29, 14)
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the entry
@@ -301,6 +320,23 @@ func _spawn_actors() -> void:
 	for tile: Vector2i in _rect_tiles(BOSS_ARENA):
 		reserved[tile] = true
 	_spawn_enemies(spawn_tile, reserved)
+	_spawn_new_posts(spawn_tile, reserved)
+
+
+## The two new posts, on the same reserved-tile flow as the eight originals and
+## placed right after them, so every tile the first wave took is already off
+## limits. The arena is in `reserved` before either call runs, so neither post can
+## be nudged into the ring the final boss needs even if an anchor is edited onto
+## the sanctum side later.
+func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
+	for post: Array in [
+		[ASH_KNIGHT_SCENE, ASH_KNIGHT_A_ANCHOR, "AshKnightA"],
+		[BONE_CRAWLER_SCENE, BONE_CRAWLER_C_ANCHOR, "BoneCrawlerC"],
+	]:
+		var tile := _find_prop_tile(
+			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
+		reserved[tile] = true
+		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
 
 
 ## Two guards, three bowmen, a boar and two lights. Each tile is marked reserved as

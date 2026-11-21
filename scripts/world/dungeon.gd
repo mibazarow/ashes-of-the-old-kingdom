@@ -26,6 +26,11 @@ extends ZoneBase
 const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
 const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
+## The two new undercroft types (spec §10): the crawler is a fast, low melee pest
+## that closes the corridor before you read it, the bearer is a slow carrier whose
+## corpse turns the ground it fell on into `blight` for anyone standing there.
+const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
+const PLAGUE_BEARER_SCENE := "res://scenes/enemies/plague_bearer.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 
 const MAP_W := 44
@@ -155,6 +160,17 @@ const SKELETON_ARCHER_A_ANCHOR := Vector2i(8, 2)
 const SKELETON_ARCHER_B_ANCHOR := Vector2i(38, 25)
 const WISP_A_ANCHOR := Vector2i(13, 7)
 const WISP_B_ANCHOR := Vector2i(25, 20)
+
+## The two new posts, both down a long corridor and well past the six-tile ring the
+## zone asks of every hostile: the crawlers take the south road at either end of
+## it, where a fast melee enemy has the longest run at a player walking the
+## undercroft end to end, and the bearer takes the north road, where its corpse
+## pool lands in the middle of the widest stretch of floor this zone has. Each is
+## snapped by `_find_prop_tile` against the reserved set the plates and the first
+## wave already claimed, so none of them can sit on a trap, a stair or a post.
+const BONE_CRAWLER_A_ANCHOR := Vector2i(7, 25)
+const BONE_CRAWLER_B_ANCHOR := Vector2i(34, 26)
+const PLAGUE_BEARER_A_ANCHOR := Vector2i(21, 2)
 
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
@@ -286,6 +302,7 @@ func _spawn_actors() -> void:
 	var reserved := {spawn_tile: true, exit_tile: true}
 	_spawn_traps(spawn_tile, reserved)
 	_spawn_enemies(spawn_tile, reserved)
+	_spawn_new_posts(spawn_tile, reserved)
 	# Last, after every plate and post has had its turn at the reserved set. The
 	# door's tile is a fixed constant rather than a scan, so the order cannot move
 	# it, but the reserved set is the only thing here that knows which tiles the
@@ -350,6 +367,22 @@ func _spawn_enemies(entry: Vector2i, reserved: Dictionary) -> void:
 		[SKELETON_ARCHER_SCENE, SKELETON_ARCHER_B_ANCHOR, "SkeletonArcherB"],
 		[WISP_SCENE, WISP_A_ANCHOR, "WispA"],
 		[WISP_SCENE, WISP_B_ANCHOR, "WispB"],
+	]:
+		var tile := _find_prop_tile(
+			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
+		reserved[tile] = true
+		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The two new posts, on the same reserved-tile flow as the first wave and placed
+## right after it, so every tile the plates and the seven originals took is
+## already off limits and every tile these three take is still visible to the
+## collision check the door to the fortress makes when it is placed last.
+func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
+	for post: Array in [
+		[BONE_CRAWLER_SCENE, BONE_CRAWLER_A_ANCHOR, "BoneCrawlerA"],
+		[BONE_CRAWLER_SCENE, BONE_CRAWLER_B_ANCHOR, "BoneCrawlerB"],
+		[PLAGUE_BEARER_SCENE, PLAGUE_BEARER_A_ANCHOR, "PlagueBearerA"],
 	]:
 		var tile := _find_prop_tile(
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
