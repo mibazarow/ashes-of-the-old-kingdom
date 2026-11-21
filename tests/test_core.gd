@@ -267,6 +267,9 @@ func _run() -> void:
 	print("== bot soak survival ==")
 	await _test_bot_soak_survival()
 
+	print("== bot extended ==")
+	await _test_bot_extended()
+
 	print("== projectile vs walls ==")
 	await _test_projectile_wall_collision()
 
@@ -375,7 +378,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 63, "every test group ran to completion (got %d/63)" % completed.size())
+	_check(completed.size() == 64, "every test group ran to completion (got %d/64)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -2829,7 +2832,7 @@ func _test_bot_soak_survival() -> void:
 	_check(is_equal_approx(float(consts.get("SCENARIO_TIMEOUT", -1.0)), 75.0),
 		"the shared scenario timeout is still 75 s")
 	var profiles: Dictionary = consts.get("PROFILES", {})
-	_check(profiles.size() == 4, "the four behaviour profiles are still there")
+	_check(profiles.size() == 7, "the seven behaviour profiles are all there (got %d)" % profiles.size())
 	_check(is_equal_approx(float((profiles.get("cautious", {}) as Dictionary).get("heal_at", -1.0)), 0.75),
 		"the cautious profile still heals at 0.75")
 	_check(is_equal_approx(float((profiles.get("aggressive", {}) as Dictionary).get("engage_range", -1.0)), 20.0),
@@ -2873,6 +2876,173 @@ func _test_bot_soak_survival() -> void:
 	await process_frame
 	gs.reset()
 	completed["bot_soak_survival"] = true
+
+
+## The extended bot (spec §19.5): five new scenarios, three new profiles, and
+## the shared machinery they brought — bump memory, threat-aware pathing, the
+## once-per-tick input edge, the potion ledger. Pinned from the bot's own
+## constant map and its own source, the same way the soak group pins its
+## tuning: no 75 s scenario is sat through here, and every literal is one the
+## live code actually reads. The group resets game state on both ends so a
+## failure halfway cannot poison the groups that follow.
+func _test_bot_extended() -> void:
+	gs.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var bot := scene.get_node_or_null("Bot")
+	_check(bot != null, "bot present for the extended-scenarios test")
+	if bot == null:
+		scene.queue_free()
+		await process_frame
+		completed["bot_extended"] = true
+		return
+
+	var consts: Dictionary = {}
+	var bot_script := bot.get_script() as GDScript
+	if bot_script != null:
+		consts = bot_script.get_script_constant_map()
+	_check(not consts.is_empty(), "the live bot exposes its constant map")
+	var source := _read_script_source("res://scripts/debug_bot/bot.gd")
+
+	# --- dispatch: every id known, unknown ids fail clean -----------------------
+	var run_body := _extract_gdscript_func(source, "_run")
+	_check(run_body.contains("func _run("), "the dispatch was located in the bot source")
+	for i in range(1, 12):
+		_check(run_body.contains("\"BOT-%03d\"" % i),
+			"BOT-%03d is dispatched by the live bot" % i)
+	_check(run_body.contains("unknown_scenario") and run_body.contains("_result = \"FAIL\""),
+		"an unknown scenario id fails clean instead of hanging")
+
+	# --- profiles: seven, the old four untouched, the new three real ------------
+	var profiles: Dictionary = consts.get("PROFILES", {})
+	_check(profiles.size() == 7, "seven behaviour profiles are defined (got %d)" % profiles.size())
+	for pname in ["cautious", "normal", "aggressive", "explorer", "collector", "novice", "master"]:
+		_check(profiles.has(pname), "profile %s exists" % pname)
+	var normal: Dictionary = profiles.get("normal", {})
+	_check(is_equal_approx(float(normal.get("heal_at", -1.0)), 0.5)
+			and is_equal_approx(float(normal.get("engage_range", -1.0)), 16.0),
+			"normal still heals at 0.5 and engages at 16 px")
+	var collector: Dictionary = profiles.get("collector", {})
+	var novice: Dictionary = profiles.get("novice", {})
+	var master: Dictionary = profiles.get("master", {})
+	_check(is_equal_approx(float(collector.get("pickup_bias", 0.0)), 1.0)
+			and int(collector.get("merchant_stacks", 0)) == 6,
+			"collector biases to pickups and unloads at six stacks")
+	_check(is_equal_approx(float(novice.get("reaction_delay", -1.0)), 0.35)
+			and bool(novice.get("use_ability", true)) == false,
+			"novice reacts at 0.35 s and refuses abilities")
+	_check(is_equal_approx(float(master.get("retreat_below", -1.0)), 0.25)
+			and bool(master.get("use_ability", false)),
+			"master retreats below 0.25 HP and uses abilities")
+	for pair in [["collector", collector], ["novice", novice], ["master", master]]:
+		var differs := false
+		for key: String in (pair[1] as Dictionary):
+			if not normal.has(key) or (pair[1] as Dictionary)[key] != normal[key]:
+				differs = true
+		_check(differs, "the %s profile differs from normal in at least one parameter" % String(pair[0]))
+	var cmdline := source.substr(source.find("func start_from_cmdline"))
+	cmdline = cmdline.substr(0, cmdline.find("\nfunc "))
+	_check(cmdline.contains("PROFILES.get(profile, PROFILES[\"normal\"])"),
+		"an unknown profile falls back to normal")
+	var pf := _extract_gdscript_func(source, "_pf")
+	_check(pf.contains("_profile.get") and pf.contains("fallback"),
+		"the profile reader answers missing keys with a fallback, so old scenarios keep their old behaviour")
+
+	# --- the input edge: one press is one press ---------------------------------
+	var bot_input_src := source.substr(source.find("class BotInput"))
+	_check(bot_input_src.contains("_just_served"),
+		"BotInput serves each press edge once per physics tick (one tap cannot buy three potions)")
+	_check(_extract_gdscript_func(source, "_finish").contains("clear_override"),
+		"the bot hands the real input back when the run ends")
+
+	# --- the five new scenarios exist and assert what the spec asks -------------
+	var arena := _extract_gdscript_func(source, "_scenario_arena")
+	var magic := _extract_gdscript_func(source, "_scenario_magic")
+	var economy := _extract_gdscript_func(source, "_scenario_economy")
+	var chain := _extract_gdscript_func(source, "_scenario_quest_chain")
+	var traps := _extract_gdscript_func(source, "_scenario_traps")
+	for pair in [
+		["BOT-003 arena", arena, "_scenario_arena"],
+		["BOT-004 magic", magic, "_scenario_magic"],
+		["BOT-005 economy", economy, "_scenario_economy"],
+		["BOT-006 quest chain", chain, "_scenario_quest_chain"],
+		["BOT-007 traps", traps, "_scenario_traps"],
+	]:
+		_check((pair[1] as String).contains("func %s(" % String(pair[2])),
+			"%s scenario was located in the bot source" % String(pair[0]))
+	_check(arena.contains("max_control_ms < 1500") and arena.contains("switches >= 1")
+			and arena.contains("kills_total > 0"),
+			"BOT-003 bounds the control lock at 1.5 s and demands a switch and a kill")
+	_check(arena.contains("_m_kills_by_type") and arena.contains("_m_dmg_by_type"),
+			"BOT-003 reports per-type kills and damage from the EventBus sensors")
+	_check(magic.contains("exact_costs == skills.size()") and magic.contains("cooldown_blocks >= 1")
+			and magic.contains("_m_status_hits > 0"),
+			"BOT-004 demands exact mana, a blocked recast and a landed status")
+	_check(economy.contains("attack_after == attack_before + 6")
+			and economy.contains("ledger_balanced") and economy.contains("ShopManager.new(GameState)"),
+			"BOT-005 measures the equip in total_attack, balances the potion ledger and sells through the shop's own entry")
+	_check(chain.contains("paid_again") and chain.contains("retalk_state"),
+			"BOT-006 measures the reward-once rule as a zero delta across the re-talk")
+	_check(traps.contains("telegraph_seen") and traps.contains("trap_damage_at_distance")
+			and traps.contains("shortcut_forest_south_open"),
+			"BOT-007 demands a seen telegraph, damage-free distance, and the world's own shortcut flag")
+
+	# --- honest playthroughs: the new scenarios write no state ------------------
+	for pair in [
+		["BOT-003 arena", arena], ["BOT-004 magic", magic], ["BOT-005 economy", economy],
+		["BOT-006 quest chain", chain], ["BOT-007 traps", traps],
+	]:
+		var body := pair[1] as String
+		_check(not body.contains("GameState.add_gold") and not body.contains("GameState.hp =")
+				and not body.contains("take_damage(") and not body.contains("global_position ="),
+				"%s never writes gold, HP or position — it plays, it does not author" % String(pair[0]))
+
+	# --- the shared machinery stays out of the original scenarios ---------------
+	var talk := _extract_gdscript_func(source, "_scenario_talk")
+	var kill := _extract_gdscript_func(source, "_scenario_kill")
+	var loop := _extract_gdscript_func(source, "_scenario_quest_loop")
+	var saveload := _extract_gdscript_func(source, "_scenario_save_load")
+	var damage := _extract_gdscript_func(source, "_scenario_take_damage")
+	var soak := _extract_gdscript_func(source, "_scenario_soak")
+	for pair in [
+		["BOT-001 talk", talk], ["BOT-008 kill", kill], ["BOT-002 quest loop", loop],
+		["BOT-009 save/load", saveload], ["BOT-011 take damage", damage], ["BOT-010 soak", soak],
+	]:
+		var body := pair[1] as String
+		_check(not body.contains("_travel_to") and not body.contains("_learn_bump")
+				and not body.contains("_potions_drunk") and not body.contains("_near_boss"),
+				"%s is untouched by the new travel and ledger machinery" % String(pair[0]))
+	# Where the new profiles reach the old scenarios they reach them through
+	# _pf with defaults that reproduce the original behaviour exactly.
+	_check(kill.contains("_pf(\"reaction_delay\", 0.0)") and loop.contains("_pf(\"reaction_delay\", 0.0)")
+			and kill.contains("_pf(\"use_ability\", false)"),
+			"the new profile hooks default to the original scenarios' old behaviour")
+
+	# --- the travel machinery itself --------------------------------------------
+	var travel := _extract_gdscript_func(source, "_travel_to")
+	_check(travel.contains("repath_cooldown"),
+		"the walker re-decides its route on a cooldown, not every frame")
+	var learn := _extract_gdscript_func(source, "_learn_bump")
+	_check(learn.contains("_bumped") and learn.contains("dest"),
+		"the bump memory records the wall but never the destination tile")
+	var walkable := _extract_gdscript_func(source, "_walkable")
+	_check(walkable.contains("ignore_bumped"),
+		"the grid can be consulted with the learned bumps switched off, so a wrong lesson cannot seal the map")
+	var find_path := _extract_gdscript_func(source, "_find_path")
+	_check(find_path.contains("threat_points") and find_path.contains("\"boss\""),
+		"the pathfinder pays to walk past enemies and more to walk past a boss")
+	var heal := _extract_gdscript_func(source, "_heal_if_hurt")
+	_check(heal.contains("heal_impulse") and heal.contains("_potions_drunk += 1"),
+		"the heal rule counts every potion it drinks, which is what balances the economy ledger")
+
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	completed["bot_extended"] = true
 
 
 ## Defect #2 regression: an enemy projectile must stop at walls and trees

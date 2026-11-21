@@ -243,8 +243,8 @@ open /Applications/Godot.app --args --path "$PWD"
 - **Звук** — восемь процедурно сгенерированных эффектов, шесть музыкальных
   дорожек, фоновый эмбиент леса и победный джингл (тоже генерация), шины и
   громкости. У каждой зоны своя музыка, в бою с боссом она меняется на боевую.
-- **Отладочный бот** — шесть сценариев, управляет игроком через тот же
-  `InputSource`, что и человек.
+- **Отладочный бот** — одиннадцать сценариев и семь профилей поведения,
+  управляет игроком через тот же `InputSource`, что и человек.
 
 ## Проверки
 
@@ -255,16 +255,23 @@ godot --headless --path . --script res://tests/test_core.gd
 # боты
 godot --headless --path . -- --bot=BOT-001   # дойти до NPC и взять квест
 godot --headless --path . -- --bot=BOT-002   # полный цикл квеста
+godot --headless --path . -- --bot=BOT-003   # арена: ближний/дальний/поддержка
+godot --headless --path . -- --bot=BOT-004   # магия: умения, мана, кулдаун
+godot --headless --path . -- --bot=BOT-005   # экономика: сундук, лавка, экипировка
+godot --headless --path . -- --bot=BOT-006   # цепочка квеста: взять-сдать-пересдать
+godot --headless --path . -- --bot=BOT-007   # ловушки и тайны: телеграф, завал
 godot --headless --path . -- --bot=BOT-008   # убить врага
 godot --headless --path . -- --bot=BOT-009   # save/load
 godot --headless --path . -- --bot=BOT-010   # soak с движением по карте
 godot --headless --path . -- --bot=BOT-011   # игрок получает урон
 
-# профили поведения: cautious | normal | aggressive | explorer
+# профили поведения:
+#   cautious | normal | aggressive | explorer | collector | novice | master
 godot --headless --path . -- --bot=BOT-002 --profile=cautious
 ```
 
-Агент заявляет: `checks: 1832  failures: 0`, 53 группы, шесть ботов PASS.
+Агент заявляет: `checks: 2810  failures: 0`, 64 группы, все одиннадцать ботов
+PASS на семи профилях.
 **Это его собственные цифры и его собственные тесты — человек их не проверял.**
 
 Подробности: `docs/TEST_REPORT.md`, `TEST_PLAN.md`, `BOT_GUIDE.md`.
