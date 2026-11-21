@@ -74,6 +74,30 @@ class Canvas:
                 if px[3] != 0:
                     self.put(ox + x, oy + y, px)
 
+    def composite(self, other, ox, oy):
+        """Alpha-composite `other` over this canvas at (ox,oy), per-pixel
+        source-over. Unlike blit(), transparent source pixels keep the existing
+        background instead of leaving a hole, so a sprite with empty margins can
+        be dropped over an opaque tile without exposing a transparent gap."""
+        for y in range(other.h):
+            for x in range(other.w):
+                sr, sg, sb, sa = other.px[y][x]
+                if sa == 0:
+                    continue
+                dx, dy = ox + x, oy + y
+                if not (0 <= dx < self.w and 0 <= dy < self.h):
+                    continue
+                dr, dg, db, da = self.px[dy][dx]
+                na = sa + da * (255 - sa) // 255
+                if na == 0:
+                    self.px[dy][dx] = (0, 0, 0, 0)
+                    continue
+                inv = 255 - sa
+                r = (sr * sa + dr * da * inv // 255) // na
+                g = (sg * sa + dg * da * inv // 255) // na
+                b = (sb * sa + db * da * inv // 255) // na
+                self.px[dy][dx] = (r, g, b, na)
+
 
 CLEAR = (0, 0, 0, 0)
 BLACK = (16, 14, 20, 255)
@@ -242,7 +266,18 @@ def make_tiles():
     tree.put(5, 3, (86, 132, 78, 255))
     tree.put(9, 6, (86, 132, 78, 255))
     tree.outline((28, 44, 30, 255))
-    atlas.blit(tree, 48, 0)
+    # The tree is a bush with transparent corners; blitting it straight onto the
+    # transparent atlas left those corners alpha=0, so the TileMapLayer drew a
+    # black square around every tree. Lay the opaque grass tile down first and
+    # composite the bush source-over it, so the margins read as grass (a bush
+    # growing on grass) and the tile is 100% opaque with grass-coloured edges.
+    tree_bg = Canvas(16, 16)
+    tree_bg.rect(0, 0, 15, 15, (74, 108, 62, 255))
+    for x, y in ((2, 3), (7, 1), (12, 6), (4, 9), (10, 12), (1, 13), (14, 2)):
+        tree_bg.put(x, y, (92, 128, 74, 255))
+        tree_bg.put(x, y + 1, (62, 92, 54, 255))
+    atlas.blit(tree_bg, 48, 0)
+    atlas.composite(tree, 48, 0)
     return atlas
 
 
