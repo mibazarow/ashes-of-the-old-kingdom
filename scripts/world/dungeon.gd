@@ -186,6 +186,21 @@ const BELL_RINGER_ANCHOR := Vector2i(32, 25)
 const BELL_RINGER_SCAN_RADIUS := 2
 const BELL_RINGER_CLEAR_FROM_ENTRY := 10
 
+## The undercroft's one quest-giver (spec §12/§13): Нела, the watchwoman who holds
+## the stair and will not go down into the dark herself. She is a `Villager` built
+## in code exactly like the forest's herbwife, carrying `q11_light_the_way`. She is
+## deliberately NOT a landmark (the map marks the way out, the two plates and the
+## boss, and a watchwoman is not a hazard to find) and she carries NO schedule: the
+## undercroft has no day sky and no clearing to pace, so she stands her post on one
+## tile. Her tile is the north alcove — walkable ground carved into the masonry,
+## reachable from the crossing, and eight tiles from the arrival stair so arriving
+## never opens her prompt under the player's feet.
+const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
+const NPC_SPRITE := "res://assets/sprites/npc.png"
+const NELA_ANCHOR := Vector2i(16, 6)
+const NELA_SCAN_RADIUS := 0
+const NELA_CLEAR_FROM_ENTRY := 8
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the
@@ -326,6 +341,13 @@ func _spawn_actors() -> void:
 	# set they claimed and cannot be parked on a trap or a guard, and before the door
 	# to the fortress so its tile is visible to the collision check that door makes.
 	_spawn_bell_ringer(spawn_tile, reserved)
+	# The watchwoman is placed after every plate and post so she inherits the
+	# reserved set they claimed and cannot be parked on a trap, a stair or a guard,
+	# and before the door to the fortress so her tile is visible to the collision
+	# check that door makes. Her tile is the north alcove, snapped by
+	# `_find_prop_tile` against that reserved set with the eight-tile clearance the
+	# zone asks of a prop that is not a hazard.
+	_spawn_nela(spawn_tile, reserved)
 	# Last, after every plate and post has had its turn at the reserved set. The
 	# door's tile is a fixed constant rather than a scan, so the order cannot move
 	# it, but the reserved set is the only thing here that knows which tiles the
@@ -421,6 +443,36 @@ func _spawn_bell_ringer(entry: Vector2i, reserved: Dictionary) -> void:
 		BELL_RINGER_ANCHOR, BELL_RINGER_SCAN_RADIUS, entry, reserved, BELL_RINGER_CLEAR_FROM_ENTRY)
 	reserved[tile] = true
 	_bell_ringer_node = _instantiate(BELL_RINGER_SCENE, _tile_center(tile.x, tile.y), "BellRinger")
+
+
+## The undercroft's quest-giver. Built in code like the forest's villagers (a
+## `Villager` with a `Sprite2D` child added before `add_child` so the base `Npc`'s
+## `@onready` sprite resolves on the first frame), placed on the north alcove by
+## `_find_prop_tile` and marked reserved so nothing later claims her tile. She
+## carries `q11_light_the_way` and no schedule — the undercroft has no day sky to
+## pace by, so she stands her post. The grey tint is set after `add_child` because
+## `Villager._ready` paints every herbwife the same green.
+func _spawn_nela(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		NELA_ANCHOR, NELA_SCAN_RADIUS, entry, reserved, NELA_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	var script: GDScript = load(VILLAGER_SCRIPT)
+	if script == null:
+		push_error("Dungeon: cannot load %s" % VILLAGER_SCRIPT)
+		return
+	var nela: Node2D = script.new() as Node2D
+	nela.name = "Nela"
+	nela.set("display_name", "Смотрящая Нела")
+	nela.set("speaker_id", "nela")
+	nela.set("sprite_texture", load(NPC_SPRITE))
+	nela.set("quest_ids", PackedStringArray(["q11_light_the_way"]))
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load(NPC_SPRITE)
+	nela.add_child(spr)
+	nela.position = _tile_center(tile.x, tile.y)
+	add_child(nela)
+	spr.modulate = Color(0.70, 0.74, 0.82)
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules

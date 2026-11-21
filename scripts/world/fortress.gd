@@ -201,6 +201,21 @@ const ARCHER_C_ANCHOR := Vector2i(26, 19)
 const ASH_KNIGHT_A_ANCHOR := Vector2i(19, 14)
 const BONE_CRAWLER_C_ANCHOR := Vector2i(29, 14)
 
+## The fortress's one quest-giver (spec §12/§13): Орен, the officer who still holds
+## the garrison and prints his orders with a seal the ash knight has cut him off
+## from. He is a `Villager` built in code exactly like the forest's herbwife,
+## carrying `q12_officers_seal`. He is deliberately NOT a landmark (the map marks
+## the way back and the four named rooms, not a person) and carries NO schedule:
+## the sanctum has no sky and an officer does not pace a barracks he is holding
+## alone. His tile is the barracks parade ground north of the spine — walkable,
+## reachable, off the road itself, and eight tiles from the arrival so arriving
+## never opens his prompt under the player's feet.
+const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
+const NPC_SPRITE := "res://assets/sprites/npc.png"
+const OREN_ANCHOR := Vector2i(21, 10)
+const OREN_SCAN_RADIUS := 0
+const OREN_CLEAR_FROM_ENTRY := 8
+
 ## The final boss and his throne, both placed by hand at the far end of the spine
 ## inside the ring the zone kept for exactly this. The King takes the centre of
 ## `BOSS_ARENA`; the throne stands two tiles east of him against the sanctum's back
@@ -343,6 +358,13 @@ func _spawn_actors() -> void:
 		reserved[tile] = true
 	_spawn_enemies(spawn_tile, reserved)
 	_spawn_new_posts(spawn_tile, reserved)
+	# The officer is placed after every post so he inherits the reserved set they
+	# claimed and cannot be parked on the stair, the entry or another post, and
+	# before the final boss so his tile is visible to the reservation the ring keeps.
+	# His tile is the barracks parade ground, snapped by `_find_prop_tile` against
+	# that reserved set with the eight-tile clearance the zone asks of a prop that
+	# is not a hostile.
+	_spawn_oren(spawn_tile, reserved)
 	# The ring the reservation above held empty is filled last, by hand, with the one
 	# enemy it was held for and the throne his death unlocks. Placed after every post
 	# so the arena is the only ground they can take, and never via `_find_prop_tile`
@@ -377,6 +399,36 @@ func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
 		reserved[tile] = true
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
+
+
+## The fortress's quest-giver. Built in code like the forest's villagers (a
+## `Villager` with a `Sprite2D` child added before `add_child` so the base `Npc`'s
+## `@onready` sprite resolves on the first frame), placed on the barracks parade
+## ground by `_find_prop_tile` and marked reserved so nothing later claims his tile.
+## He carries `q12_officers_seal` and no schedule — the sanctum has no sky to pace
+## by, so an officer holds one post. The brass tint is set after `add_child` because
+## `Villager._ready` paints every herbwife the same green.
+func _spawn_oren(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		OREN_ANCHOR, OREN_SCAN_RADIUS, entry, reserved, OREN_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	var script: GDScript = load(VILLAGER_SCRIPT)
+	if script == null:
+		push_error("Fortress: cannot load %s" % VILLAGER_SCRIPT)
+		return
+	var oren: Node2D = script.new() as Node2D
+	oren.name = "Oren"
+	oren.set("display_name", "Офицер Орен")
+	oren.set("speaker_id", "oren")
+	oren.set("sprite_texture", load(NPC_SPRITE))
+	oren.set("quest_ids", PackedStringArray(["q12_officers_seal"]))
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load(NPC_SPRITE)
+	oren.add_child(spr)
+	oren.position = _tile_center(tile.x, tile.y)
+	add_child(oren)
+	spr.modulate = Color(0.85, 0.72, 0.40)
 
 
 ## Two guards, three bowmen, a boar and two lights. Each tile is marked reserved as

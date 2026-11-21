@@ -342,6 +342,9 @@ func _run() -> void:
 	print("== fortress ==")
 	await _test_fortress()
 
+	print("== new npc quests ==")
+	await _test_new_npc_and_quests()
+
 	print("== three new bosses ==")
 	await _test_three_bosses()
 
@@ -353,7 +356,7 @@ func _run() -> void:
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 61, "every test group ran to completion (got %d/61)" % completed.size())
+	_check(completed.size() == 62, "every test group ran to completion (got %d/62)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -6000,7 +6003,7 @@ func _test_day_cycle() -> void:
 	var phases: Array = data.get("phases", []) as Array
 	var npcs_data: Dictionary = data.get("npcs", {}) as Dictionary
 	_check(phases.size() == 4, "schedules data has 4 phases (got %d)" % phases.size())
-	_check(npcs_data.size() == 4, "schedules data has 4 npcs (got %d)" % npcs_data.size())
+	_check(npcs_data.size() == 6, "schedules data has 6 npcs (got %d)" % npcs_data.size())
 	_check(float(data.get("day_length_seconds", 0)) > 0.0, "day_length_seconds is positive")
 	_check(clock != null, "Forest creates a DayClock node")
 
@@ -6382,7 +6385,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- the quest table ------------------------------------------------------
 	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
 	var table: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
-	_check(table.size() == 8, "data/quests.json defines 8 quests (got %d)" % table.size())
+	_check(table.size() == 12, "data/quests.json defines 12 quests (got %d)" % table.size())
 	_check(table.has("q01_ash_wolves") and table.has("q02_gather_fangs") and table.has("q03_clear_boars"),
 		"the quest table holds q01, q02 and q03")
 
@@ -7576,11 +7579,12 @@ func _test_ruins_quests() -> void:
 	for quest_id: String in defs.keys():
 		ids.append(quest_id)
 	ids.sort()
-	_check(defs.size() == 8, "data/quests.json declares eight quests (got %d)" % defs.size())
+	_check(defs.size() == 12, "data/quests.json declares twelve quests (got %d)" % defs.size())
 	_check(ids == ["q01_ash_wolves", "q02_gather_fangs", "q03_clear_boars",
 			"q04_bone_guard", "q05_ruin_key", "q06_the_crown", "q07_captain_guard",
-			"q08_the_bell"],
-		"the three story quests sit beside the two ruins and three forest ones (%s)" % ", ".join(ids))
+			"q08_the_bell", "q09_the_mill", "q10_armor_fit", "q11_light_the_way",
+			"q12_officers_seal"],
+		"the four new villagers' quests sit beside the two ruins and three forest ones (%s)" % ", ".join(ids))
 
 	var bone: Dictionary = defs.get("q04_bone_guard", {})
 	var keyq: Dictionary = defs.get("q05_ruin_key", {})
@@ -10461,6 +10465,349 @@ func _test_fortress() -> void:
 	gs.reset()
 	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
 	completed["fortress"] = true
+
+
+## Spec §12/§13: the four new named NPCs (Серис and Альвена in the village, Нела in
+## the undercroft, Орен in the fortress) and the four quests they give (q09..q12).
+## The group builds the real worlds, finds each newcomer by name in the
+## `interactable` group, checks where it stands (walkable; inside the village safe
+## zone, or clear of the entry and the boss ring in the deep zones; reachable; and
+## far enough from every other NPC that the debug bot's first-interactable route
+## never reaches it), then drives each new quest end to end through the NPC's own
+## interaction — start, the right objective type, and a turn-in that pays exactly
+## once — and finishes with the quest table (twelve quests, every giver a real NPC
+## or the quest stone) and a save round-trip of a new quest. The newcomers use the
+## legacy quest path (no `data/dialogue.json` entries), so `Villager.interact`
+## starts/turns in the quest directly rather than through the dialogue runner.
+## GameState/QuestManager are reset at both ends and the run is left in the forest.
+func _test_new_npc_and_quests() -> void:
+	gs.reset()
+	qm.reset()
+	_check(String(gs.zone) == "forest", "the new-npc group starts in the forest")
+
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	var manager := scene.get_node_or_null("ZoneManager")
+	var hud := scene.get_node_or_null("HUD")
+	_check(manager != null, "the new-npc group has a zone manager to travel with")
+	if manager == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		qm.reset()
+		completed["new_npc_quests"] = true
+		return
+
+	# Speakers that legitimately own a quest-giver id, collected as each zone is
+	# built; the quest table's `giver` values are checked against this set at the end.
+	var giver_speakers: Array[String] = []
+
+	# --- the two new villagers in the forest ----------------------------------
+	var forest := scene.get_node_or_null("World")
+	_check(forest != null and String(forest.call("zone_id")) == "forest",
+		"the new-npc group builds the forest first")
+	var player := forest.get_node_or_null("Player") as Node2D
+	var edrik := _find_interactable_named("interactable", "Edrik")
+	var yorek := _find_interactable_named("interactable", "Yorek")
+	var bran := _find_interactable_named("interactable", "Bran")
+	var mila := _find_interactable_named("interactable", "Mila")
+	var seris := _find_interactable_named("interactable", "Seris")
+	var alvena := _find_interactable_named("interactable", "Alvena")
+	_check(seris != null and alvena != null, "the forest places Seris and Alvena")
+	_check(seris != null and seris.is_in_group("interactable"), "Seris is an interactable")
+	_check(alvena != null and alvena.is_in_group("interactable"), "Alvena is an interactable")
+	var interactables := get_nodes_in_group("interactable")
+	_check(not interactables.is_empty() and String(interactables[0].name) == "Edrik",
+		"Edrik is still the first interactable with the newcomers present")
+
+	if seris != null:
+		var seris_qids: PackedStringArray = (seris.get("quest_ids") as PackedStringArray)
+		_check(seris_qids.size() == 1 and String(seris_qids[0]) == "q09_the_mill",
+			"Seris carries q09_the_mill (got %s)" % str(seris_qids))
+	if alvena != null:
+		var alvena_qids: PackedStringArray = (alvena.get("quest_ids") as PackedStringArray)
+		_check(alvena_qids.size() == 1 and String(alvena_qids[0]) == "q10_armor_fit",
+			"Alvena carries q10_armor_fit (got %s)" % str(alvena_qids))
+
+	# Where the newcomers stand: walkable, inside the safe zone, and at least three
+	# tiles (Chebyshev) from every other villager so the bot's Edrik route never
+	# comes within the 26 px interact radius of anyone else.
+	var forest_npc_tiles := {}
+	for pair: Array in [["Edrik", edrik], ["Yorek", yorek], ["Bran", bran],
+			["Mila", mila], ["Seris", seris], ["Alvena", alvena]]:
+		if pair[1] != null:
+			forest_npc_tiles[String(pair[0])] = _tile_of_node(pair[1] as Node2D)
+	for who: String in ["Seris", "Alvena"]:
+		if not forest_npc_tiles.has(who):
+			continue
+		var vtile: Vector2i = forest_npc_tiles[who]
+		_check(String(forest.call("cell_at", vtile)) in [".", ","],
+			"%s stands on walkable ground ('%s' at %s)"
+			% [who, String(forest.call("cell_at", vtile)), str(vtile)])
+		_check(bool(forest.call("is_in_safe_zone", vtile)),
+			"%s stands inside the village safe zone (%s)" % [who, str(vtile)])
+		var too_close: Array[String] = []
+		for other: String in forest_npc_tiles.keys():
+			if other == who:
+				continue
+			var otile: Vector2i = forest_npc_tiles[other]
+			var clear := maxi(absi(vtile.x - otile.x), absi(vtile.y - otile.y))
+			if clear < 3:
+				too_close.append("%s=%d" % [other, clear])
+		_check(too_close.is_empty(),
+			"%s keeps at least 3 tiles from every other villager (%s)" % [who, ", ".join(too_close)])
+
+	# The two villagers are scheduled and start on their morning spot (= spawn).
+	for pair: Array in [["Seris", seris], ["Alvena", alvena]]:
+		var vill: Node = pair[1]
+		if vill == null:
+			continue
+		var comp: Node = vill.get_node_or_null("ScheduleComponent")
+		_check(comp != null, "%s carries a ScheduleComponent" % String(pair[0]))
+		if comp != null:
+			_check(String(comp.call("current_phase")) == "morning",
+				"%s starts in the morning phase" % String(pair[0]))
+			_check(_tile_of_node(vill as Node2D) == (comp.call("current_spot") as Vector2i),
+				"%s starts on its morning spot" % String(pair[0]))
+
+	for nd in [edrik, mila, seris, alvena]:
+		if nd != null:
+			var spk := String(nd.get("speaker_id"))
+			if spk != "" and not giver_speakers.has(spk):
+				giver_speakers.append(spk)
+
+	# --- q09 through Seris: collect wolf_fang, pay exactly once ---------------
+	qm.reset()
+	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 starts available")
+	seris.call("interact", player)
+	if hud != null and hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "talking to Seris starts q09")
+	gs.add_item("wolf_fang", 2)
+	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 still active at 2 of 3 fangs")
+	gs.add_item("wolf_fang", 1)
+	_check(qm.state_of("q09_the_mill") == qm.STATE_READY, "q09 ready at 3 fangs")
+	gs.xp_to_next = gs.xp + 1000
+	var q9_gold: int = gs.gold
+	var q9_xp: int = gs.xp
+	var q9_potion: int = gs.count_item("health_potion")
+	seris.call("interact", player)
+	if hud != null and hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	_check(qm.state_of("q09_the_mill") == qm.STATE_DONE, "q09 turns in done")
+	_check(gs.gold == q9_gold + 45, "q09 paid 45 gold (got %d)" % (gs.gold - q9_gold))
+	_check(gs.xp == q9_xp + 35, "q09 paid 35 xp (got %d)" % (gs.xp - q9_xp))
+	_check(gs.count_item("health_potion") == q9_potion + 1, "q09 paid 1 health_potion")
+	_check(gs.count_item("wolf_fang") == 0, "q09 consumed the 3 fangs")
+	var q9_gold_after: int = gs.gold
+	seris.call("interact", player)
+	if hud != null and hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	_check(gs.gold == q9_gold_after, "q09 pays nothing on a second turn-in")
+
+	# --- q10 through Alvena: collect bone_shard, pay exactly once --------------
+	qm.reset()
+	alvena.call("interact", player)
+	if hud != null and hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_ACTIVE, "talking to Alvena starts q10")
+	gs.add_item("bone_shard", 2)
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_READY, "q10 ready at 2 bone_shard")
+	gs.xp_to_next = gs.xp + 1000
+	var q10_gold: int = gs.gold
+	var q10_xp: int = gs.xp
+	var q10_boots: int = gs.count_item("leather_boots")
+	alvena.call("interact", player)
+	if hud != null and hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_DONE, "q10 turns in done")
+	_check(gs.gold == q10_gold + 60, "q10 paid 60 gold (got %d)" % (gs.gold - q10_gold))
+	_check(gs.xp == q10_xp + 45, "q10 paid 45 xp (got %d)" % (gs.xp - q10_xp))
+	_check(gs.count_item("leather_boots") == q10_boots + 1, "q10 paid 1 leather_boots")
+	_check(gs.count_item("bone_shard") == 0, "q10 consumed the 2 bone_shard")
+
+	# --- a new quest survives a save round-trip -------------------------------
+	# Slot 2 is the round-trip slot the dedicated save group already owns and
+	# releases; this group runs after it, clears the slot on both sides, and leaves
+	# no residue so the later king group's own round-trip starts from a clean slot.
+	qm.reset()
+	qm.start("q09_the_mill")
+	gs.add_item("wolf_fang", 1)
+	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 active (1 of 3) before the save")
+	_clear_slot(2)
+	var save_res: Dictionary = sm.save_game(2)
+	_check(bool(save_res.get("ok", false)), "save slot 2 ok for a new quest")
+	gs.reset()
+	qm.reset()
+	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 back to available after reset")
+	var load_res: Dictionary = sm.load_game(2)
+	_check(bool(load_res.get("ok", false)), "load slot 2 ok for a new quest")
+	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 state survived the round-trip")
+	_check(qm.progress_of("q09_the_mill") == 1,
+		"q09 progress survived the round-trip (got %d)" % qm.progress_of("q09_the_mill"))
+	_clear_slot(2)
+	_check(_slot_residue(2).is_empty(), "the new-npc round-trip left no slot_2 residue")
+
+	# --- Нела in the undercroft ------------------------------------------------
+	_check(bool(manager.call("travel", "dungeon")), "the group travelled into the undercroft")
+	for i in range(2):
+		await process_frame
+	var undercroft := scene.get_node_or_null("World")
+	_check(undercroft != null and String(undercroft.call("zone_id")) == "dungeon",
+		"the group stands in the undercroft")
+	var nela := _find_interactable_named("interactable", "Nela")
+	_check(nela != null and nela.is_in_group("interactable"),
+		"the undercroft places Nela as an interactable")
+	if nela != null and undercroft != null:
+		var nela_qids: PackedStringArray = (nela.get("quest_ids") as PackedStringArray)
+		_check(nela_qids.size() == 1 and String(nela_qids[0]) == "q11_light_the_way",
+			"Nela carries q11_light_the_way (got %s)" % str(nela_qids))
+		var sp_n := String(nela.get("speaker_id"))
+		if sp_n != "" and not giver_speakers.has(sp_n):
+			giver_speakers.append(sp_n)
+		var nela_tile := _tile_of_node(nela as Node2D)
+		var dentry := Vector2i(3, 12)
+		_check(String(undercroft.call("cell_at", nela_tile)) in [".", ","],
+			"Nela stands on walkable ground ('%s' at %s)"
+			% [String(undercroft.call("cell_at", nela_tile)), str(nela_tile)])
+		_check(maxi(absi(nela_tile.x - dentry.x), absi(nela_tile.y - dentry.y)) >= 8,
+			"Nela is at least 8 tiles from the undercroft entry (%s)" % str(nela_tile))
+		var ddist := _bfs_reachable(undercroft, dentry, {})
+		_check(ddist.has(nela_tile),
+			"Nela stands on ground reachable from the entry (%s)" % str(nela_tile))
+		var nela_on_prop: Array[String] = []
+		for node in get_nodes_in_group("enemy"):
+			if _tile_of_node(node as Node2D) == nela_tile:
+				nela_on_prop.append(String(node.name))
+		for node: Node in undercroft.get_children():
+			if node is SpikeTrap and _tile_of_node(node as Node2D) == nela_tile:
+				nela_on_prop.append(String(node.name))
+		var dexit := undercroft.get_node_or_null("RuinsExit")
+		if dexit != null and _tile_of_node(dexit as Node2D) == nela_tile:
+			nela_on_prop.append("RuinsExit")
+		_check(nela_on_prop.is_empty(),
+			"Nela is not standing on an enemy, a plate or the stair (%s)" % ", ".join(nela_on_prop))
+
+		qm.reset()
+		var nplayer := undercroft.get_node_or_null("Player") as Node2D
+		nela.call("interact", nplayer)
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		_check(qm.state_of("q11_light_the_way") == qm.STATE_ACTIVE, "talking to Nela starts q11")
+		bus.enemy_died.emit(&"c1", &"bone_crawler", Vector2.ZERO)
+		bus.enemy_died.emit(&"c2", &"bone_crawler", Vector2.ZERO)
+		_check(qm.state_of("q11_light_the_way") == qm.STATE_ACTIVE, "q11 still active at 2 of 3 crawlers")
+		bus.enemy_died.emit(&"c3", &"bone_crawler", Vector2.ZERO)
+		_check(qm.state_of("q11_light_the_way") == qm.STATE_READY, "q11 ready after three crawlers")
+		gs.xp_to_next = gs.xp + 1000
+		var q11_gold: int = gs.gold
+		var q11_xp: int = gs.xp
+		var q11_mana: int = gs.count_item("mana_potion")
+		nela.call("interact", nplayer)
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		_check(qm.state_of("q11_light_the_way") == qm.STATE_DONE, "q11 turns in done")
+		_check(gs.gold == q11_gold + 90, "q11 paid 90 gold (got %d)" % (gs.gold - q11_gold))
+		_check(gs.xp == q11_xp + 80, "q11 paid 80 xp (got %d)" % (gs.xp - q11_xp))
+		_check(gs.count_item("mana_potion") == q11_mana + 2, "q11 paid 2 mana_potion")
+		var q11_gold_after: int = gs.gold
+		nela.call("interact", nplayer)
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		_check(gs.gold == q11_gold_after, "q11 pays nothing on a second turn-in")
+
+	# --- Орен in the fortress --------------------------------------------------
+	_check(bool(manager.call("travel", "fortress")), "the group travelled into the fortress")
+	for i in range(2):
+		await process_frame
+	var fortress := scene.get_node_or_null("World")
+	_check(fortress != null and String(fortress.call("zone_id")) == "fortress",
+		"the group stands in the fortress")
+	var oren := _find_interactable_named("interactable", "Oren")
+	_check(oren != null and oren.is_in_group("interactable"),
+		"the fortress places Oren as an interactable")
+	if oren != null and fortress != null:
+		var oren_qids: PackedStringArray = (oren.get("quest_ids") as PackedStringArray)
+		_check(oren_qids.size() == 1 and String(oren_qids[0]) == "q12_officers_seal",
+			"Oren carries q12_officers_seal (got %s)" % str(oren_qids))
+		var sp_o := String(oren.get("speaker_id"))
+		if sp_o != "" and not giver_speakers.has(sp_o):
+			giver_speakers.append(sp_o)
+		var oren_tile := _tile_of_node(oren as Node2D)
+		var fentry := Vector2i(4, 14)
+		_check(String(fortress.call("cell_at", oren_tile)) in [".", ","],
+			"Oren stands on walkable ground ('%s' at %s)"
+			% [String(fortress.call("cell_at", oren_tile)), str(oren_tile)])
+		_check(maxi(absi(oren_tile.x - fentry.x), absi(oren_tile.y - fentry.y)) >= 8,
+			"Oren is at least 8 tiles from the fortress entry (%s)" % str(oren_tile))
+		var fdist := _bfs_reachable(fortress, fentry, {})
+		_check(fdist.has(oren_tile),
+			"Oren stands on ground reachable from the entry (%s)" % str(oren_tile))
+		var arena := Rect2i(42, 11, 5, 8)
+		_check(not arena.has_point(oren_tile),
+			"Oren is not standing in the ring kept for the final boss (%s)" % str(oren_tile))
+		var oren_on_prop: Array[String] = []
+		for node in get_nodes_in_group("enemy"):
+			if _tile_of_node(node as Node2D) == oren_tile:
+				oren_on_prop.append(String(node.name))
+		var fexit := fortress.get_node_or_null("DungeonExit")
+		if fexit != null and _tile_of_node(fexit as Node2D) == oren_tile:
+			oren_on_prop.append("DungeonExit")
+		_check(oren_on_prop.is_empty(),
+			"Oren is not standing on an enemy or the stair (%s)" % ", ".join(oren_on_prop))
+
+		qm.reset()
+		var fplayer := fortress.get_node_or_null("Player") as Node2D
+		oren.call("interact", fplayer)
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		_check(qm.state_of("q12_officers_seal") == qm.STATE_ACTIVE, "talking to Oren starts q12")
+		bus.enemy_died.emit(&"k1", &"ash_knight", Vector2.ZERO)
+		_check(qm.state_of("q12_officers_seal") == qm.STATE_READY, "q12 ready after the ash knight")
+		gs.xp_to_next = gs.xp + 1000
+		var q12_gold: int = gs.gold
+		var q12_xp: int = gs.xp
+		oren.call("interact", fplayer)
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		_check(qm.state_of("q12_officers_seal") == qm.STATE_DONE, "q12 turns in done")
+		_check(gs.gold == q12_gold + 160, "q12 paid 160 gold (got %d)" % (gs.gold - q12_gold))
+		_check(gs.xp == q12_xp + 140, "q12 paid 140 xp (got %d)" % (gs.xp - q12_xp))
+
+	# --- the quest table: twelve quests, every giver a real name ---------------
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
+	var table: Dictionary = (raw as Dictionary).get("quests", {}) if raw is Dictionary else {}
+	_check(table.size() == 12, "the quest table has twelve quests for the new npcs (got %d)" % table.size())
+	var valid_givers := {"ruins_tablet": true}
+	for spk2: String in giver_speakers:
+		valid_givers["npc_" + spk2] = true
+	_check(valid_givers.has("npc_edrik") and valid_givers.has("npc_seris")
+			and valid_givers.has("npc_alvena") and valid_givers.has("npc_nela")
+			and valid_givers.has("npc_oren"),
+		"the villagers that give quests were all seen on a live map (%s)" % ", ".join(giver_speakers))
+	var bad_givers: Array[String] = []
+	for qid: String in table.keys():
+		var giver := String((table[qid] as Dictionary).get("giver", ""))
+		if not valid_givers.has(giver):
+			bad_givers.append("%s->%s" % [qid, giver])
+	_check(bad_givers.is_empty(),
+		"every quest's giver names an existing NPC or the quest stone (%s)" % ", ".join(bad_givers))
+
+	# --- leave no state behind -------------------------------------------------
+	_check(bool(manager.call("travel", "forest")), "the group travels back to the forest")
+	for i in range(2):
+		await process_frame
+	gs.ui_blocking = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	qm.reset()
+	_check(String(gs.zone) == "forest", "the new-npc group leaves the run in the forest")
+	completed["new_npc_quests"] = true
 
 
 ## The single live boss of `type`, or null. Reads the boss group so it works no matter

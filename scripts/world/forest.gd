@@ -42,6 +42,8 @@ var _npc_node: Node2D
 var _merchant_node: Node2D
 var _smith_node: Node2D
 var _mila_node: Node2D
+var _seris_node: Node2D
+var _alvena_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
@@ -82,6 +84,28 @@ const SAFE_ZONE_RECT := Rect2i(2, 5, 9, 8)
 ## never placed in a tree.
 const MILA_ANCHOR := Vector2i(5, 7)
 const MILA_MIN_SEPARATION := 3
+
+## Anchors for the two newest villagers (spec §12): the miller Серис and the
+## tanner Альвена. Both anchors are tiles of the village clearing (rows 6..11 x
+## cols 2..9, all dirt), so the anchor itself is walkable ground and inside the
+## safe zone, and `_find_villager_tile` returns it unchanged on this seed. Серис
+## takes the west edge by the water chute his mill would use; Альвена takes the
+## north-east corner, the three tiles from the forge that read as a pair beside
+## the smith without standing within his reach.
+const SERIS_ANCHOR := Vector2i(2, 6)
+const ALVENA_ANCHOR := Vector2i(8, 6)
+
+## How far the two new villagers keep from every other villager, the merchant,
+## the smith and the arrival tile (Chebyshev). Three tiles is 48 px against the
+## 26 px interact radius and the 18 px bot stop tolerance, so standing at Edrik
+## can never bring a newcomer inside reach and steal a quest dialogue — the same
+## margin the herbwife is held to.
+const VILLAGER_MIN_SEPARATION := 3
+
+## How wide the villager scan looks around an anchor when the anchor itself fails
+## a rule. Three tiles clears a one-tile tree edge without wandering a villager
+## out of the clearing its anchor names.
+const VILLAGER_SCAN_RADIUS := 3
 
 ## Anchors for the two new predator types (roadmap stage D), on the east/south
 ## half of the map: far enough from the wolf pack and the village that the BOT-008
@@ -394,6 +418,32 @@ func _spawn_actors() -> void:
 	add_child(mila)
 	_mila_node = mila
 
+	# The two newest villagers (spec §12/§13) join after Mila and before the chests,
+	# for the same reason every villager joined after the one before: the debug bot
+	# picks the FIRST node of the `interactable` group, so Edrik must stay first or
+	# the quest bots would open a mill instead of the hunt dialogue. Each is a
+	# `Villager` built in code like the herbwife, carrying one of the new quests,
+	# placed by `_find_villager_tile` on the clearing so it is walkable, inside the
+	# safe zone and at least `VILLAGER_MIN_SEPARATION` tiles from every other
+	# villager, the merchant, the smith and the arrival tile. The avoid list is read
+	# back from the live nodes rather than hardcoded, so moving an anchor above
+	# moves the clearance with it.
+	var villager_avoid: Array[Vector2i] = [
+		PLAYER_SPAWN_TILE,
+		_tile_of_node(_npc_node),
+		_tile_of_node(_merchant_node),
+		_tile_of_node(_smith_node),
+		_tile_of_node(_mila_node),
+	]
+	var seris_tile := _find_villager_tile(SERIS_ANCHOR, villager_avoid, VILLAGER_MIN_SEPARATION)
+	_seris_node = _spawn_villager("Seris", "Мельник Серис", "seris",
+		PackedStringArray(["q09_the_mill"]), seris_tile, Color(0.62, 0.78, 0.95))
+	var alvena_avoid: Array[Vector2i] = villager_avoid.duplicate()
+	alvena_avoid.append(seris_tile)
+	var alvena_tile := _find_villager_tile(ALVENA_ANCHOR, alvena_avoid, VILLAGER_MIN_SEPARATION)
+	_alvena_node = _spawn_villager("Alvena", "Кожевница Альвена", "alvena",
+		PackedStringArray(["q10_armor_fit"]), alvena_tile, Color(0.95, 0.80, 0.55))
+
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"
 	_chest_node = chest
@@ -507,6 +557,83 @@ func _spawn_ruins_gate() -> void:
 	gate.position = _tile_center(tile.x, tile.y)
 	add_child(gate)
 	_ruins_gate_node = gate
+
+
+## Builds one `Villager` in code (the herbwife's type) and places it on `tile`,
+## carrying `quests` as its offer list. Mirrors exactly what the Mila block in
+## `_spawn_actors` does by hand: a `Sprite2D` child is added before `add_child` so
+## the base `Npc`'s `@onready` sprite lookup resolves on the first frame, and the
+## per-villager `tint` is applied AFTER `add_child` because `Villager._ready`
+## paints every herbwife the same green and would otherwise overwrite it. Returns
+## the live node so the caller can keep it as a landmark/schedule reference.
+func _spawn_villager(node_name: String, display: String, speaker: String,
+		quests: PackedStringArray, tile: Vector2i, tint: Color) -> Node2D:
+	var script: GDScript = load(VILLAGER_SCRIPT)
+	if script == null:
+		push_error("Forest: cannot load %s" % VILLAGER_SCRIPT)
+		return null
+	var villager: Node2D = script.new() as Node2D
+	villager.name = node_name
+	villager.set("display_name", display)
+	villager.set("speaker_id", speaker)
+	villager.set("sprite_texture", load("res://assets/sprites/npc.png"))
+	villager.set("quest_ids", quests)
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load("res://assets/sprites/npc.png")
+	villager.add_child(spr)
+	villager.position = _tile_center(tile.x, tile.y)
+	add_child(villager)
+	spr.modulate = tint
+	return villager
+
+
+## The tile a new villager stands on: the anchor when it passes every rule, else
+## the first ring tile that does, scanning outward ring-by-ring so the declared
+## corner of the clearing wins over a tile a ring away. Three rules a plain
+## walkability check does not carry: the tile must be inside the village safe zone
+## (a villager belongs in the clearing the enemies are turned back from), and it
+## must keep `min_distance` tiles (Chebyshev) from every point in `avoid` so the
+## debug bot walking to Edrik never comes within the interact radius of anyone
+## else. Deterministic like every other spawn here: the order depends only on the
+## fixed anchors and the fixed grid. Falls back to the anchor when nothing in
+## range passes, which the villager test group notices rather than trusts.
+func _find_villager_tile(anchor: Vector2i, avoid: Array[Vector2i], min_distance: int) -> Vector2i:
+	if _is_villager_tile(anchor, avoid, min_distance):
+		return anchor
+	for ring in range(1, VILLAGER_SCAN_RADIUS + 1):
+		for dy in range(-ring, ring + 1):
+			for dx in range(-ring, ring + 1):
+				if absi(dx) != ring and absi(dy) != ring:
+					continue
+				var t := Vector2i(anchor.x + dx, anchor.y + dy)
+				if _is_villager_tile(t, avoid, min_distance):
+					return t
+	return anchor
+
+
+func _is_villager_tile(tile: Vector2i, avoid: Array[Vector2i], min_distance: int) -> bool:
+	var ch := cell_at(tile)
+	if ch != "." and ch != ",":
+		return false
+	if not SAFE_ZONE_RECT.has_point(tile):
+		return false
+	for point: Vector2i in avoid:
+		if maxi(absi(tile.x - point.x), absi(tile.y - point.y)) < min_distance:
+			return false
+	return true
+
+
+## The tile a live node stands on, in the same 16 px grid the world uses. Used to
+## read the existing villagers' positions back into the newcomer separation rule
+## instead of trusting hardcoded coordinates.
+func _tile_of_node(node: Node2D) -> Vector2i:
+	if node == null:
+		return Vector2i(-9999, -9999)
+	return Vector2i(
+		floori(node.global_position.x / float(TILE)),
+		floori(node.global_position.y / float(TILE))
+	)
 
 
 ## Places one `Pickup` on a tile this function is handed, with its payload set
@@ -645,3 +772,5 @@ func _setup_day_cycle() -> void:
 	_attach_schedule(_merchant_node)
 	_attach_schedule(_smith_node)
 	_attach_schedule(_mila_node)
+	_attach_schedule(_seris_node)
+	_attach_schedule(_alvena_node)

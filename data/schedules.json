@@ -42,6 +42,24 @@
         "evening": [4, 10],
         "night": [5, 7]
       }
+    },
+    "Seris": {
+      "home": [2, 6],
+      "spots": {
+        "morning": [2, 6],
+        "day": [2, 8],
+        "evening": [2, 10],
+        "night": [2, 6]
+      }
+    },
+    "Alvena": {
+      "home": [8, 6],
+      "spots": {
+        "morning": [8, 6],
+        "day": [9, 6],
+        "evening": [8, 6],
+        "night": [8, 6]
+      }
     }
   }
 }
