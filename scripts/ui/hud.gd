@@ -149,6 +149,22 @@ var _victory_box: VBoxContainer
 var _victory_hint: Label
 var _victory_open := false
 
+## The ending-choice panel: the real, in-game three-option screen the throne opens when
+## the player presses E at it after the King has fallen (spec §16.1). It owns its own
+## cursor and reads availability back from the altar (`ending_is_available`), so the
+## gate that decides what can be chosen lives in one place — the altar — and this panel
+## only renders it and routes the confirm back through `EndingAltar.choose()`. It blocks
+## input like any modal (`ui_blocking`) but does not pause the world, and it is mutually
+## exclusive with every other panel: while it is open the `_process` branch below owns
+## the keys, so no other screen can stack over it.
+var _ending_choice_panel: PanelContainer
+var _ending_choice_rows: Array[Label] = []
+var _ending_choice_descs: Array[Label] = []
+var _ending_choice_selected := 0
+var _ending_choice_open := false
+var _ending_choice_lock_input := false
+var _ending_altar: Node = null
+
 ## Edge detector for the pause menu's "В главное меню" key. Q has no InputMap action
 ## (nothing in the game binds it), so it is polled by hand exactly like Enter, Tab
 ## and Space already are.
@@ -362,6 +378,7 @@ func _build_ui() -> void:
 	_build_skills_panel()
 	_build_defeat_panel()
 	_build_victory_panel()
+	_build_ending_choice_panel()
 
 
 ## The defeat screen lives here rather than in its own script (unlike the shop or
@@ -436,6 +453,42 @@ func _build_victory_panel() -> void:
 	# same keys that closed it before now leave the run; the wording says so plainly.
 	_victory_hint = _make_text("↑↓ прокрутка · E или Esc — В главное меню", COLOR_HINT)
 	box.add_child(_victory_hint)
+
+
+## The ending-choice panel: a title, then one pair of rows per fate (name + availability,
+## then its one-line description or, when locked, the reason it is shut), then the
+## controls line. The rows are built once here and only their text/colour are rewritten
+## on each refresh, exactly like the defeat screen's two rows — the panel never rebuilds
+## its node tree while the player walks the cursor.
+func _build_ending_choice_panel() -> void:
+	_ending_choice_panel = PanelContainer.new()
+	_ending_choice_panel.name = "EndingChoicePanel"
+	_ending_choice_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_ending_choice_panel.position = Vector2(-120, -70)
+	_ending_choice_panel.custom_minimum_size = Vector2(240, 0)
+	_ending_choice_panel.visible = false
+	_ending_choice_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.05, 0.06, 0.08, 0.97)))
+	_root.add_child(_ending_choice_panel)
+
+	var box := VBoxContainer.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 1)
+	_ending_choice_panel.add_child(box)
+
+	box.add_child(_make_text("Выбрать судьбу", Color(0.96, 0.86, 0.5)))
+
+	for _ending in range(3):
+		var row := _make_text("", COLOR_ROW)
+		row.custom_minimum_size = Vector2(228, 10)
+		box.add_child(row)
+		_ending_choice_rows.append(row)
+		var desc := _make_text("", COLOR_HINT)
+		desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		desc.custom_minimum_size = Vector2(228, 0)
+		box.add_child(desc)
+		_ending_choice_descs.append(desc)
+
+	box.add_child(_make_text("↑↓ выбор · E или Enter — принять · Esc — уйти", COLOR_HINT))
 
 
 ## The character screen lives in its own script (like SettingsPanel): it owns
@@ -1251,7 +1304,8 @@ func craft_select_row(index: int) -> void:
 ## exactly like the shop and the bench.
 func _recompute_ui_blocking() -> void:
 	GameState.ui_blocking = _skills_open or _inventory_open or _dialogue_open or _journal_open \
-			or _paused or _map_open or _settings_open or _shop_open or _craft_open or _character_open
+			or _paused or _map_open or _settings_open or _shop_open or _craft_open or _character_open \
+			or _ending_choice_open
 
 
 ## K opens the skills screen over everything else: every modal it could visually
@@ -1779,6 +1833,13 @@ func _process(_delta: float) -> void:
 	if _victory_open:
 		_process_victory_navigation()
 		return
+	# The ending-choice panel owns the screen the way a modal does, ahead of every
+	# gameplay and panel branch below, so ↑↓/E/Esc reach only it and no other screen can
+	# stack over the throne. It does not pause the world (only blocks input), so unlike
+	# victory it sits here rather than beside the two screens that freeze the tree.
+	if _ending_choice_open:
+		_process_ending_choice_navigation()
+		return
 	# The settings screen captures raw events itself; while it is open no
 	# action polling may reach the gameplay paths below.
 	if _settings_open:
@@ -2294,6 +2355,7 @@ func _open_defeat() -> void:
 		close_craft()
 	_close_character()
 	_close_skills()
+	_close_ending_choice()
 	if _settings_open:
 		_close_settings()
 	_close_pause()
@@ -2367,6 +2429,7 @@ func return_to_menu() -> void:
 	close_victory()
 	_close_pause()
 	_close_skills()
+	_close_ending_choice()
 	GameState.ui_blocking = false
 	var loop := get_tree()
 	loop.paused = false
@@ -2492,3 +2555,164 @@ func victory_text() -> String:
 ## a real scene change.
 func victory_hint_text() -> String:
 	return _victory_hint.text if _victory_hint != null else ""
+
+
+# --- ending-choice panel (spec §16.1, the reachable ending) ---------------------
+
+## Opens the three-fate choice over the world. Called by `EndingAltar.interact()` when
+## the player presses E at the throne after the King has fallen. Mirrors `open_shop`'s
+## contract: the caller (the altar) owns the truth about which fates are unlocked and
+## what committing one means; this panel only renders that truth and routes the confirm
+## back through `EndingAltar.choose()`, so the gate stays in one place. Every modal it
+## could visually overlap is cleared first, then it takes the screen and blocks input.
+## The opening E press is locked out for one frame so it cannot also confirm a fate.
+func open_ending_choice(altar: Node) -> void:
+	if altar == null:
+		return
+	if _dialogue_open:
+		close_dialogue()
+	if _inventory_open:
+		_toggle_inventory()
+	if _journal_open:
+		_toggle_journal()
+	if _map_open:
+		_close_map()
+	if _shop_open:
+		close_shop()
+	if _craft_open:
+		close_craft()
+	_close_character()
+	_close_skills()
+	if _paused:
+		_close_pause()
+	_ending_altar = altar
+	_ending_choice_selected = 0
+	_ending_choice_lock_input = true
+	_enter_held = false
+	_ending_choice_open = true
+	_refresh_ending_choice()
+	_ending_choice_panel.visible = true
+	GameState.ui_blocking = true
+
+
+## Leaves the choice screen without committing anything (Esc, or a sibling taking over).
+## Routes through `_recompute_ui_blocking` so the block clears exactly when no other
+## modal is left open.
+func _close_ending_choice() -> void:
+	if not _ending_choice_open:
+		return
+	_ending_choice_open = false
+	_ending_choice_lock_input = false
+	_ending_altar = null
+	_enter_held = false
+	if _ending_choice_panel != null:
+		_ending_choice_panel.visible = false
+	_recompute_ui_blocking()
+
+
+## Repaints the three fate rows from the altar: name + доступ/закрыт marker on the first
+## line, the one-line description (available) or the lock reason (locked) on the second.
+## Availability is read live from `EndingAltar.ending_is_available`, never cached here.
+func _refresh_ending_choice() -> void:
+	if _ending_altar == null or not is_instance_valid(_ending_altar):
+		return
+	var ids: Array = _ending_altar.call("ending_ids")
+	for i in _ending_choice_rows.size():
+		var row := _ending_choice_rows[i]
+		var desc := _ending_choice_descs[i]
+		if i >= ids.size():
+			row.text = ""
+			desc.text = ""
+			continue
+		var id := String(ids[i])
+		var available := bool(_ending_altar.call("ending_is_available", id))
+		var cursor := "> " if i == _ending_choice_selected else "  "
+		var name_ru := String(ENDING_NAMES_RU.get(id, id))
+		row.text = "%s%s — %s" % [cursor, name_ru, "доступно" if available else "закрыто"]
+		if i == _ending_choice_selected:
+			row.add_theme_color_override("font_color", Color(1.0, 0.97, 0.62))
+		else:
+			row.add_theme_color_override("font_color", COLOR_ROW if available else COLOR_WARNING)
+		if available:
+			desc.text = String(_ending_altar.call("ending_description", id))
+			desc.add_theme_color_override("font_color", Color(0.7, 0.78, 0.66))
+		else:
+			desc.text = String(_ending_altar.call("ending_lock_reason", id))
+			desc.add_theme_color_override("font_color", COLOR_WARNING)
+
+
+## The choice screen owns the input while it is open, exactly like the shop and the
+## bench: Esc closes it without committing, the movement actions walk the three fates,
+## E / Enter confirms the highlighted one. Enter has no InputMap action, so it is
+## edge-detected by hand the way it is in the inventory; the bot drives selection through
+## `interact` alone.
+func _process_ending_choice_navigation() -> void:
+	if _ending_choice_lock_input:
+		_ending_choice_lock_input = false
+		return
+	if _consume_action(&"pause"):
+		_close_ending_choice()
+		return
+	var delta := 0
+	if _consume_action(&"move_up"):
+		delta -= 1
+	if _consume_action(&"move_down"):
+		delta += 1
+	if delta != 0:
+		_ending_choice_selected = clampi(_ending_choice_selected + delta, 0, _ending_choice_rows.size() - 1)
+		_refresh_ending_choice()
+	var enter_now := Input.is_key_pressed(KEY_ENTER)
+	var enter_edge := enter_now and not _enter_held
+	_enter_held = enter_now
+	if _consume_action(&"interact") or enter_edge:
+		_confirm_ending_choice()
+
+
+## Confirms the highlighted fate by handing the id straight to the altar — the single
+## source of truth. A locked fate is refused there (the altar toasts the reason) and the
+## panel stays open so the player can pick another; an accepted one opens the victory
+## screen, which takes over `ui_blocking` and the pause itself, so the choice panel steps
+## aside WITHOUT recomputing the block (that would clear the victory screen's own block).
+func _confirm_ending_choice() -> void:
+	if _ending_altar == null or not is_instance_valid(_ending_altar):
+		return
+	var ids: Array = _ending_altar.call("ending_ids")
+	if _ending_choice_selected < 0 or _ending_choice_selected >= ids.size():
+		return
+	var id := String(ids[_ending_choice_selected])
+	if bool(_ending_altar.call("choose", id)):
+		_ending_choice_open = false
+		_ending_choice_lock_input = false
+		_ending_altar = null
+		_enter_held = false
+		if _ending_choice_panel != null:
+			_ending_choice_panel.visible = false
+
+
+# Read-only views of the choice panel, so a test or a screenshot probe can read the
+# three rows and the cursor without reaching into the panel's private node tree — the
+# same contract `defeat_row_texts` gives. `ending_choice_text` joins rows and descriptions
+# so a test can prove the lock reason is on screen, not only in a toast.
+
+func is_ending_choice_open() -> bool:
+	return _ending_choice_open
+
+
+func ending_choice_selection() -> int:
+	return _ending_choice_selected
+
+
+func ending_choice_row_texts() -> Array[String]:
+	var out: Array[String] = []
+	for row in _ending_choice_rows:
+		out.append(row.text)
+	return out
+
+
+func ending_choice_text() -> String:
+	var parts: PackedStringArray = []
+	for row in _ending_choice_rows:
+		parts.append(row.text)
+	for desc in _ending_choice_descs:
+		parts.append(desc.text)
+	return "\n".join(parts)

@@ -1594,7 +1594,7 @@ func _test_enemy_variants() -> void:
 		_check(wisp.get("projectile_scene") != null, "the wisp carries the shared projectile scene")
 		_check(int(boar.get("max_health")) == 46, "the boar pool is 46 hp")
 		_check(int(wisp.get("max_health")) == 16, "the wisp pool is 16 hp")
-		_check(String(boar.get("loot_item")) == "wolf_fang"
+		_check(String(boar.get("loot_item")) == "boar_tusk"
 			and String(wisp.get("loot_item")) == "mana_potion",
 			"both new enemies drop items that already exist in the data")
 
@@ -12049,7 +12049,7 @@ func _test_king_and_endings() -> void:
 		_check(not bool(altar.call("choose", "memory")), "a second ending is refused")
 		_check(String(gs.ending) == "dawn", "the refused second ending left the first in place")
 		altar.call("interact", null)
-		_check(toasts.has("Судьба уже выбрана"), "the throne says the fate is taken once chosen (%s)" % ", ".join(toasts))
+		_check(toasts.has("Судьба уже решена"), "the throne says the fate is taken once chosen (%s)" % ", ".join(toasts))
 	bus.toast.disconnect(toast_listener)
 	if hud != null:
 		hud.call("close_victory")
@@ -12059,6 +12059,11 @@ func _test_king_and_endings() -> void:
 	for ending_id: String in ending_names.keys():
 		gs.reset()
 		gs.set_flag("king_defeated", true)
+		# memory needs the pilgrim truth, crown needs the truth plus the King's seal.
+		if ending_id == "memory" or ending_id == "crown":
+			gs.set_flag("pilgrim_truth_known", true)
+		if ending_id == "crown":
+			gs.add_item("rusted_seal", 1)
 		if altar != null:
 			_check(bool(altar.call("choose", ending_id)), "%s is accepted by the throne" % ending_id)
 		_check(String(gs.ending) == ending_id, "%s persists to GameState.ending" % ending_id)
@@ -12088,6 +12093,147 @@ func _test_king_and_endings() -> void:
 	gs.from_dict(snapshot)
 	_check(String(gs.ending) == "crown", "the ending survives a save round-trip (got '%s')" % String(gs.ending))
 	gs.reset()
+
+	# --- 7b. the choice is reachable through the real input path -----------------
+	# The P0 this pins: the throne used to only print a toast, so a player who beat
+	# the King still could not finish the game. Everything below drives the way a
+	# player does — interact at the throne, then real key events to walk the three
+	# fates and confirm — and never calls choose() directly.
+	var hero := get_first_node_in_group("player") as Node2D
+	_check(hero != null and hud != null and altar != null,
+		"player, hud and altar are alive for the real ending path")
+	if hero != null and hud != null and altar != null:
+		var path_toasts: Array[String] = []
+		var path_listener := func(message: String) -> void: path_toasts.append(message)
+		bus.toast.connect(path_listener)
+
+		# The King is still alive: the throne only refuses.
+		gs.reset()
+		altar.call("interact", hero)
+		for _a in range(2):
+			await process_frame
+		_check(path_toasts.has("Сначала победите короля"),
+			"alive King: the throne refuses with the fight-first toast (%s)" % ", ".join(path_toasts))
+		_check(not bool(hud.call("is_ending_choice_open")), "alive King: no choice panel opens")
+		_check(String(gs.ending) == "", "alive King: nothing was committed")
+		path_toasts.clear()
+
+		# The King is dead: the same interact now opens a real, playable panel.
+		gs.set_flag("king_defeated", true)
+		altar.call("interact", hero)
+		for _a in range(2):
+			await process_frame
+		_check(bool(hud.call("is_ending_choice_open")),
+			"dead King: interacting with the throne opens the ending-choice panel")
+		_check(gs.ui_blocking, "the open choice panel blocks gameplay input")
+		var fate_rows: Array = hud.call("ending_choice_row_texts")
+		_check(fate_rows.size() == 3, "the panel lists three fates (got %d)" % fate_rows.size())
+		var fate_text := String(hud.call("ending_choice_text"))
+		_check(fate_text.contains("Новый рассвет") and fate_text.contains("Память короля")
+				and fate_text.contains("Пепельный венец"),
+			"the panel names all three fates in Russian (got '%s')" % fate_text)
+		_check(String(fate_rows[0]).contains("доступно"), "dawn reads available with the King dead")
+		_check(String(fate_rows[1]).contains("закрыто") and String(fate_rows[2]).contains("закрыто"),
+			"memory and crown read locked without the pilgrim truth")
+
+		# Walk down onto the locked «memory» and confirm it with real keys.
+		await _tap_key(KEY_S)
+		_check(int(hud.call("ending_choice_selection")) == 1,
+			"move_down moves the cursor onto the second fate")
+		await _tap_key(KEY_E)
+		_check(String(gs.ending) == "", "confirming a locked fate commits nothing")
+		_check(not bool(hud.call("is_victory_open")), "a locked fate never opens the victory screen")
+		_check(bool(hud.call("is_ending_choice_open")), "a refused fate leaves the panel open")
+		_check(path_toasts.has("Нужно узнать правду о печати"),
+			"the locked memory fate answers with its reason (%s)" % ", ".join(path_toasts))
+
+		# Walk back onto «dawn» and confirm it with real keys.
+		await _tap_key(KEY_W)
+		_check(int(hud.call("ending_choice_selection")) == 0,
+			"move_up returns the cursor to the first fate")
+		await _tap_key(KEY_E)
+		_check(String(gs.ending) == "dawn",
+			"choosing dawn through real key input sets GameState.ending (got '%s')" % String(gs.ending))
+		_check(bool(hud.call("is_victory_open")), "choosing dawn opens the victory screen")
+		_check(String(hud.call("victory_title_text")).contains("Новый рассвет"),
+			"the victory screen names «Новый рассвет» after the real choice")
+		_check(not bool(hud.call("is_ending_choice_open")),
+			"the choice panel steps aside once a fate is committed")
+
+		# A second interact after the fate is decided is refused with its own toast.
+		path_toasts.clear()
+		altar.call("interact", hero)
+		for _a in range(2):
+			await process_frame
+		_check(path_toasts.has("Судьба уже решена"),
+			"a second interact after an ending is refused (%s)" % ", ".join(path_toasts))
+		_check(not bool(hud.call("is_ending_choice_open")), "the refused second interact opens no panel")
+
+		bus.toast.disconnect(path_listener)
+		hud.call("close_victory")
+		gs.reset()
+		await process_frame
+
+	# --- 7c. the gating matrix and the loot that feeds it ------------------------
+	if altar != null:
+		gs.reset()
+		gs.set_flag("king_defeated", true)
+		_check(bool(altar.call("ending_is_available", "dawn")), "dawn is available the moment the King falls")
+		_check(not bool(altar.call("ending_is_available", "memory")), "memory is locked without the truth")
+		_check(not bool(altar.call("ending_is_available", "crown")), "crown is locked without the truth")
+		_check(String(altar.call("ending_lock_reason", "memory")) == "Нужно узнать правду о печати",
+			"the locked memory fate names the truth as its reason")
+		_check(String(altar.call("ending_lock_reason", "crown")) == "Нужна печать короля",
+			"the locked crown fate names the seal as its reason")
+		_check(not bool(altar.call("choose", "crown")), "choosing the locked crown is refused")
+		_check(String(gs.ending) == "", "the refused crown left no ending behind")
+		gs.set_flag("pilgrim_truth_known", true)
+		_check(bool(altar.call("ending_is_available", "memory")), "the pilgrim truth unlocks memory")
+		_check(not bool(altar.call("ending_is_available", "crown")), "the truth alone does not unlock crown")
+		gs.add_item("rusted_seal", 1)
+		_check(bool(altar.call("ending_is_available", "crown")), "truth plus the King's seal unlocks crown")
+		_check(String(altar.call("ending_lock_reason", "crown")) == "",
+			"an unlocked crown reports no lock reason")
+		gs.reset()
+
+	# The King now hands over his seal, and the boar stops dropping a wolf's fang.
+	var boar_probe := (load("res://scenes/enemies/boar.tscn") as PackedScene).instantiate() as Node2D
+	_check(boar_probe != null, "the boar scene instantiates for the loot check")
+	if boar_probe != null:
+		_check(String(boar_probe.get("loot_item")) == "boar_tusk",
+			"the boar drops its own tusk (got '%s')" % String(boar_probe.get("loot_item")))
+		_check(String(boar_probe.get("loot_item")) != "wolf_fang", "the boar no longer drops wolf_fang")
+		boar_probe.free()
+	var king_probe := (load("res://scenes/enemies/king_without_crown.tscn") as PackedScene).instantiate() as Node2D
+	_check(king_probe != null, "the King scene instantiates for the loot check")
+	if king_probe != null:
+		_check(String(king_probe.get("loot_item")) == "rusted_seal",
+			"the King's loot is his seal (got '%s')" % String(king_probe.get("loot_item")))
+		_check(is_equal_approx(float(king_probe.get("loot_chance")), 1.0),
+			"the King drops the seal every single kill (got %.2f)" % float(king_probe.get("loot_chance")))
+		king_probe.free()
+
+	# The new boar material is real, priced, sourced, and keeps the icon table unique.
+	var loot_raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/items.json"))
+	var loot_items: Dictionary = (loot_raw as Dictionary).get("items", {}) if loot_raw is Dictionary else {}
+	var tusk_def: Dictionary = loot_items.get("boar_tusk", {})
+	_check(not tusk_def.is_empty(), "data/items.json declares boar_tusk")
+	_check(String(tusk_def.get("type", "")) == "material"
+			and int(tusk_def.get("price", -1)) == 7
+			and String(tusk_def.get("source", "")) == "кабан",
+		"boar_tusk is a material worth 7 gold sourced from the boar")
+	var icon_clash := ""
+	var seen_icons: Dictionary = {}
+	for loot_id: String in loot_items.keys():
+		var block: Variant = loot_items[loot_id]
+		var glyph := String((block as Dictionary).get("icon", "")) if block is Dictionary else ""
+		if glyph != "" and seen_icons.has(glyph):
+			icon_clash = "'%s' shared by %s and %s" % [glyph, String(seen_icons[glyph]), loot_id]
+		seen_icons[glyph] = loot_id
+	_check(icon_clash == "", "every item keeps its own icon after boar_tusk (%s)" % icon_clash)
+	_check(String(tusk_def.get("icon", "")) != ""
+			and String(tusk_def.get("icon", "")) == String(ItemDB.icon("boar_tusk")),
+		"boar_tusk reads through ItemDB with its own glyph")
 
 	# free the live world before the bare-arena behaviour pass, so its player is the
 	# only one the wave and pillar rings can see.
@@ -12230,6 +12376,8 @@ func _test_king_and_endings() -> void:
 	_check(gs.kill_count("king_without_crown") == 1, "the King kill is credited once")
 	_check(gs.gold == 300, "the King paid exactly 300 gold (got %d)" % gs.gold)
 	_check(bool(gs.get_flag("king_defeated", false)), "the King's death sets king_defeated")
+	_check(gs.count_item("rusted_seal") == 1,
+		"the King's kill hands over exactly one rusted_seal (got %d)" % gs.count_item("rusted_seal"))
 	_check(death_toasts.has("Король пал"), "the King's death says «Король пал» (%s)" % ", ".join(death_toasts))
 	king6.queue_free()
 	await process_frame
