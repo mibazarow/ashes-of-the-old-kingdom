@@ -3060,6 +3060,16 @@ func _test_bot_soak_survival() -> void:
 	var budget := float(consts.get("SOAK_RETREAT_BUDGET", -1.0))
 	_check(budget > 0.0, "the run-wide disengage budget is positive")
 	_check(budget <= 30.0, "the disengage budget stays a bounded slice of the 75 s scenario (got %.1f s)" % budget)
+	# The constant above is sized for a 75 s window, and the window is now eight times
+	# that by default. A budget that is not scaled against the window runs out with most
+	# of the run still to go, which turns the last nine minutes into a soak that cannot
+	# break contact — the same failure the budget was invented to prevent, arriving
+	# later. The scaling factor is a constant of its own so the pinned budget stays the
+	# number this group was written to hold.
+	_check(soak_body.contains("SOAK_BUDGET_REFERENCE_SECONDS"),
+		"the disengage budget is scaled against the soak window rather than frozen at 75 s")
+	_check(is_equal_approx(float(consts.get("SOAK_BUDGET_REFERENCE_SECONDS", -1.0)), 75.0),
+		"the scaling reference is the window the budget was originally sized for")
 	_check(soak_body.contains("SOAK_MELEE_RANGE"), "the disengage only triggers inside melee range")
 	_check(soak_body.contains("retreat_left"), "the soak loop spends a bounded retreat budget")
 	_check(soak_body.contains("_soak_retreat"), "the soak loop calls the retreat helper")
@@ -3213,7 +3223,7 @@ func _test_bot_extended() -> void:
 	# --- dispatch: every id known, unknown ids fail clean -----------------------
 	var run_body := _extract_gdscript_func(source, "_run")
 	_check(run_body.contains("func _run("), "the dispatch was located in the bot source")
-	for i in range(1, 12):
+	for i in range(1, 14):
 		_check(run_body.contains("\"BOT-%03d\"" % i),
 			"BOT-%03d is dispatched by the live bot" % i)
 	_check(run_body.contains("unknown_scenario") and run_body.contains("_result = \"FAIL\""),
@@ -3330,9 +3340,41 @@ func _test_bot_extended() -> void:
 			"BOT-007 demands a seen telegraph, damage-free distance, and the world's own shortcut flag")
 
 	# --- honest playthroughs: the new scenarios write no state ------------------
+	var dungeon := _extract_gdscript_func(source, "_scenario_dungeon")
+	var fortress := _extract_gdscript_func(source, "_scenario_fortress")
+	_check(dungeon.contains("func _scenario_dungeon(") and fortress.contains("func _scenario_fortress("),
+		"BOT-012 and BOT-013 scenarios were located in the bot source")
+	# The two zone-crossing scenarios travel the way a player does: stand on the exit,
+	# press the interact key, wait for the zone to answer. A scenario that wrote
+	# `GameState.zone` or teleported the hero would prove nothing about a zone line and
+	# could pass while the travel itself was broken.
+	_check(dungeon.contains("_zone_travel(\"RuinsGate\", \"ruins\"")
+			and dungeon.contains("_zone_travel(\"DungeonGate\", \"dungeon\"")
+			and dungeon.contains("_zone_travel(\"RuinsExit\", \"ruins\"")
+			and dungeon.contains("_zone_travel(\"ForestGate\", \"forest\""),
+			"BOT-012 walks the whole round trip through the world's own ZoneExit nodes")
+	_check(dungeon.contains("_arena_open_ruins_door") and dungeon.contains("_dungeon_engage_distinct")
+			and dungeon.contains("_dungeon_trap_lesson"),
+			"BOT-012 opens the ruins door, fights two distinct undercroft kinds and meets a spike plate")
+	var dungeon_fight := _extract_gdscript_func(source, "_dungeon_engage_distinct")
+	var blood := _extract_gdscript_func(source, "_dungeon_blood")
+	var unbled := _extract_gdscript_func(source, "_dungeon_unbled_kind")
+	_check(blood.contains("DUNGEON_KINDS") and blood.contains("_m_dmg_by_type")
+			and (dungeon.contains("_dungeon_blood") or dungeon_fight.contains("_dungeon_unbled_kind")),
+			"BOT-012 counts the dungeon kinds it actually drew blood from, off the damage sensor")
+	_check(fortress.contains("_zone_travel(\"FortressGate\", \"fortress\"")
+			and fortress.contains("_fortress_fight_king"),
+			"BOT-013 reaches the fortress through the undercroft and fights the King")
+	_check(fortress.contains("phase_changed") and fortress.contains("_king_phases"),
+			"BOT-013 reads the phase transition off the boss's own signal, not off a health guess")
+	var king_fight := _extract_gdscript_func(source, "_fortress_fight_king")
+	_check(fortress.contains("king_engaged") and fortress.contains("respawned")
+			and king_fight.contains("no_respawn"),
+			"BOT-013 separates a legitimate death (the world gave the hero back) from a softlock")
 	for pair in [
 		["BOT-003 arena", arena], ["BOT-004 magic", magic], ["BOT-005 economy", economy],
 		["BOT-006 quest chain", chain], ["BOT-007 traps", traps],
+		["BOT-012 dungeon", dungeon], ["BOT-013 fortress", fortress],
 	]:
 		var body := pair[1] as String
 		_check(not body.contains("GameState.add_gold") and not body.contains("GameState.hp =")
@@ -3372,10 +3414,205 @@ func _test_bot_extended() -> void:
 		"the grid can be consulted with the learned bumps switched off, so a wrong lesson cannot seal the map")
 	var find_path := _extract_gdscript_func(source, "_find_path")
 	_check(find_path.contains("threat_points") and find_path.contains("\"boss\""),
-		"the pathfinder pays to walk past enemies and more to walk past a boss")
+			"the pathfinder pays to walk past enemies and more to walk past a boss")
+	# The search used to stop at a fixed 4096 pops with no closed set, so a lane
+	# that legitimately winds the width of the undercroft returned an empty path.
+	# An empty path is not the world refusing a route — it is the search giving up,
+	# and the walker obeys it as if it were a wall.
+	_check(find_path.contains("closed.has(current)") and find_path.contains("closed[current] = true"),
+			"the pathfinder expands each tile once instead of once per improvement")
+	_check(find_path.contains("search_budget") and find_path.contains("size.x * size.y"),
+			"the search budget is derived from the grid, not from a constant that fits the forest only")
 	var heal := _extract_gdscript_func(source, "_heal_if_hurt")
 	_check(heal.contains("heal_impulse") and heal.contains("_potions_drunk += 1"),
 		"the heal rule counts every potion it drinks, which is what balances the economy ledger")
+
+	# --- the watchdog (spec §19.6): thresholds, wiring, and no aborting ---------
+	# The four numbers are read from the live constant map and then required to be the
+	# ones the detector actually consults, so a threshold cannot be widened until it
+	# never fires while the test still quotes the old value.
+	var wd_stuck_px := float(consts.get("WATCHDOG_STUCK_PX", -1.0))
+	var wd_stuck_ms := int(consts.get("WATCHDOG_STUCK_MS", -1))
+	var wd_cycle := int(consts.get("WATCHDOG_CYCLE_REPEATS", -1))
+	var wd_zero := int(consts.get("WATCHDOG_ZERO_PROGRESS_MS", -1))
+	_check(wd_stuck_px > 0.0 and wd_stuck_px <= 16.0,
+			"the stuck detector fires under one tile of drift (got %.1f px)" % wd_stuck_px)
+	_check(wd_stuck_ms >= 1000 and wd_stuck_ms <= 10000,
+			"the stuck detector waits between 1 and 10 s before calling it (got %d ms)" % wd_stuck_ms)
+	_check(wd_cycle == 12, "the cycle detector repeats after 12 identical actions (got %d)" % wd_cycle)
+	_check(wd_zero >= 30000 and wd_zero <= 60000,
+			"the zero-progress detector reports an active goal between 30 and 60 s (got %d ms)" % wd_zero)
+	var wd_tick := _extract_gdscript_func(source, "_watchdog_tick")
+	_check(wd_tick.contains("WATCHDOG_STUCK_PX") and wd_tick.contains("WATCHDOG_STUCK_MS")
+			and wd_tick.contains("WATCHDOG_ZERO_PROGRESS_MS"),
+			"the watchdog consults its own thresholds instead of duplicating them")
+	_check(wd_tick.contains("_wd_progress_token"),
+			"the watchdog measures progress off the world, so a fight is not read as a stall")
+	# A watchdog that ends the run hides the very thing it found: the log would stop at
+	# the interesting part. Detection is a note and a counter, never a verdict.
+	var wd_report := _extract_gdscript_func(source, "_report_watchdog")
+	_check(wd_report.contains("no_progress_ms") and wd_report.contains("blocked_tiles")
+			and wd_report.contains("held"),
+			"a stall report carries the elapsed time, the keys held and the tiles in the way")
+	_check(wd_report.contains("Telemetry.decision") and wd_report.contains("Telemetry.note_anomaly"),
+			"a stall is written to decisions.jsonl and counted into the verdict")
+	_check(not wd_report.contains("get_tree().quit") and not wd_report.contains("_result =")
+			and not wd_tick.contains("get_tree().quit") and not wd_tick.contains("_result ="),
+			"the watchdog reports a stall instead of aborting the run that hit it")
+	_check(_extract_gdscript_func(source, "start_from_cmdline").contains("_set_watchdog(true)"),
+			"every bot run arms the watchdog, not only the scenarios that ask for it")
+	_check(_extract_gdscript_func(source, "_tap").contains("_wd_note_action"),
+			"every key the bot taps is counted, which is what a cycle is made of")
+	# The progress token is the whole difference between «busy» and «making progress»,
+	# so it is driven rather than read: paying a coin has to change it, and standing
+	# still must not.
+	var token_before := String(bot.call("_wd_progress_token"))
+	gs.add_gold(3)
+	_check(String(bot.call("_wd_progress_token")) != token_before,
+			"the progress token moves when the world moves (gold paid in)")
+	gs.add_gold(-3)
+	_check(String(bot.call("_wd_progress_token")) == token_before,
+			"and the same token is stable when the world is handed back what it was given")
+	# End to end: a reported stall has to reach the log with its evidence and reach the
+	# verdict with its count. This is the chain the release gate reads, so the chain is
+	# walked here rather than assumed from the source above.
+	var telemetry_node: Node = root.get_node_or_null("Telemetry")
+	_check(telemetry_node != null, "telemetry is loaded for the watchdog chain check")
+	if telemetry_node != null:
+		var stuck_before := int(telemetry_node.get("stuck_count"))
+		var anomaly_before := String(telemetry_node.get("first_anomaly"))
+		bot.call("_report_watchdog", "stuck", 4321)
+		_check(int(telemetry_node.get("stuck_count")) == stuck_before + 1,
+				"a watchdog detection is counted into STUCK (%d -> %d)"
+				% [stuck_before, int(telemetry_node.get("stuck_count"))])
+		var decisions_path := String(telemetry_node.get("run_dir")).path_join("decisions.jsonl")
+		var decisions := FileAccess.get_file_as_string(decisions_path)
+		_check(decisions.contains("\"action\":\"watchdog_stuck\"")
+				and decisions.contains("4321"),
+				"the stall landed in decisions.jsonl with its no_progress_ms attached")
+		# FIRST ANOMALY is the first, not the latest — so the assertion depends on
+		# whether this process had one before, and says so either way.
+		if anomaly_before == "":
+			_check(String(telemetry_node.get("first_anomaly")).contains("stuck"),
+					"the first stall of the process is the one named in FIRST ANOMALY")
+		else:
+			_check(String(telemetry_node.get("first_anomaly")) == anomaly_before,
+					"a later stall never overwrites the first anomaly the process saw")
+
+	# The two things that actually made the long legs finish, pinned because both
+	# were silent failures: a route re-priced around every moving enemy flips
+	# between two roads and spends the budget changing its mind, and a hero held by
+	# a body in the lane keeps being asked to walk by a loop that never lets go of
+	# the keys. Neither shows up as an error — they show up as a run that takes
+	# fifteen minutes and then fails.
+	var zone_travel := _extract_gdscript_func(source, "_zone_travel")
+	_check(zone_travel.contains("_travel_to(stand_point, GATE_KNOCK_RANGE, minf(30.0, left), false)"),
+			"a zone leg is walked with the threat price off, so a route is not re-priced every frame")
+	_check(zone_travel.contains("_nearest_walkable_tile("),
+			"a leg aims at the nearest ground rather than at wherever the world parked the gate node")
+	_check(zone_travel.contains("distance_to(stand_point) <= GATE_KNOCK_RANGE"),
+			"the leg stops walking when it is within reach of the exit, instead of asking a walker that answers instantly")
+	_check(zone_travel.contains("await _unstick(stand_point)"),
+			"a leg that bought no ground in a chunk lets go and wiggles out instead of repeating the chunk")
+	_check(zone_travel.contains("_unstick(stand_point)"),
+			"the leg hands its own goal to the escape, so the wiggle is not a coin toss")
+	var unstick := _extract_gdscript_func(source, "_unstick")
+	_check(unstick.contains("bot_input.release_all()") and unstick.contains("_avoid_frames = 0")
+			and unstick.contains("_bumped.clear()"),
+			"the unstick drops the keys, the borrowed slide and the learned walls")
+	_check(unstick.contains("_find_path(candidate, _tile_of(goal), true, false)"),
+			"the escape is chosen by whether a road to the goal exists from the tile being stepped onto")
+	_check(not unstick.contains("global_position =") and not unstick.contains("GameState.hp"),
+			"and it gets the hero moving without teleporting him or touching his health")
+	# The sawtooth the trace showed — stuck climbing to 39, resetting on the repath,
+	# climbing again, the hero never moving an inch — was the walker swinging at
+	# something at arm's length that was neither dying nor stepping aside. Swinging
+	# presses no movement key, so a fight can hold a lane forever without the walk
+	# ever noticing it is being held.
+	var travel_body := _extract_gdscript_func(source, "_travel_to")
+	_check(travel_body.contains("dodged[enemy.get_instance_id()] = true")
+			and travel_body.contains("not dodged.has(enemy.get_instance_id())"),
+			"a fight that neither dies nor moves is stepped around, not swung at for the whole budget")
+	_check(travel_body.contains("swing_target == enemy"),
+			"the swing count is kept per opponent, so a lane of three wolves is still three fights")
+	# A modal is the one obstacle a repath cannot route around: the hero reads no
+	# input at all, so the walk reports a wall in the middle of an open corridor.
+	_check(travel_body.contains("if GameState.ui_blocking:")
+			and travel_body.contains("leg_ui_stuck="),
+			"a walk that cannot move checks whether a panel owns the keyboard, and says so")
+	var ui_rescue := travel_body.substr(travel_body.find("if GameState.ui_blocking:"))
+	_check(ui_rescue.contains("_tap(&\"pause\")") and not ui_rescue.contains("_tap(&\"interact\")"),
+			"and it closes that panel with Esc only — interact at a till spends the player's gold")
+	_check(_extract_gdscript_func(source, "_find_path").contains("if avoid_threats:"),
+			"the pathfinder can be asked for a road that ignores who is standing on it")
+
+	# --- the soak window: simulated seconds, and a flag that moves it -----------
+	# 75 s of wandering was a smoke test that had been allowed to call itself an
+	# endurance run. The spec's own table asks for tens of minutes, so the default is
+	# now six hundred seconds, counted in physics steps so that a busy machine runs the
+	# same simulation and not a shorter one.
+	var soak_seconds_default := float(consts.get("SOAK_SECONDS_DEFAULT", -1.0))
+	_check(soak_seconds_default >= 600.0,
+			"the soak defaults to at least 600 s of simulated time (got %.0f)" % soak_seconds_default)
+	_check(soak.contains("Engine.get_physics_frames() < frame_budget")
+			and soak.contains("soak_seconds * 60.0"),
+			"the soak is bounded by physics steps, so its length is simulated time and not machine load")
+	_check(not soak.contains("Time.get_ticks_msec() < deadline"),
+			"and no longer by how busy the machine was")
+	_check(cmdline.contains("--soak="),
+			"the bot reads --soak= from the command line")
+	_check(soak.contains("SOAK_TELEPORT_PX"),
+			"the soak keeps respawn jumps out of the distance its movement term is judged on")
+
+	# --- the §20.1 evidence chain and the §20.5 verdict block -------------------
+	if telemetry_node != null:
+		var run_path := String(telemetry_node.get("run_dir"))
+		for file_name: String in ["run_meta.json", "events.jsonl", "decisions.jsonl", "combat.jsonl",
+				"errors.log", "performance.csv", "inputs.jsonl", "observations.jsonl",
+				"quest_economy.jsonl", "replay/seed.txt", "replay/commands.jsonl"]:
+			_check(FileAccess.file_exists(run_path.path_join(file_name)),
+					"the run directory carries %s" % file_name)
+		var perf := FileAccess.get_file_as_string(run_path.path_join("performance.csv"))
+		_check(perf.begins_with("elapsed_ms,physics_frames,fps"),
+				"performance.csv is a header plus samples, not a jsonl (got %s)"
+				% perf.get_slice("\n", 0))
+		var seed_txt := FileAccess.get_file_as_string(run_path.path_join("replay/seed.txt"))
+		_check(seed_txt.contains("seed=%d" % int(telemetry_node.get("seed_value"))),
+				"replay/seed.txt names the seed the process is actually running on")
+		# The verdict block is built by a pure function so it can be held against the
+		# spec without sitting through a run. Every field the spec lists must be there
+		# even when the caller supplies nothing: a summary that quietly drops DEATHS is
+		# indistinguishable from a run that had none.
+		var tscript := telemetry_node.get_script() as GDScript
+		var required: Array = (tscript.get_script_constant_map().get("SUMMARY_KEYS", [])
+				as Array) if tscript != null else []
+		_check(required.size() >= 17,
+				"the summary names its required fields in one place the suite can read (got %d)"
+				% required.size())
+		var synthetic: PackedStringArray = telemetry_node.call("build_summary", "FAIL", {
+			"scenario": "BOT-099", "profile": "cautious", "zones": "Ruins > Dungeon",
+			"goals": "3/4", "rerun": "godot -- --bot=BOT-099",
+		})
+		var joined := "\n".join(synthetic)
+		for key: String in required:
+			_check(joined.contains("\n%s: " % key) or joined.begins_with("%s: " % key),
+					"the summary builder emits %s even from a bare synthetic run" % key)
+		_check(joined.contains("SCENARIO: BOT-099") and joined.contains("PROFILE: cautious")
+				and joined.contains("ZONES: Ruins > Dungeon") and joined.contains("GOALS: 3/4"),
+				"the summary builder passes the caller's own verdict fields through")
+		_check(joined.contains("RESULT: FAIL"),
+				"the summary builder reports the result it was handed")
+		# The counters the caller does not supply come from telemetry itself, which is
+		# what stops a run from grading its own homework.
+		var counted: PackedStringArray = telemetry_node.call("build_summary", "PASS", {})
+		var counted_text := "\n".join(counted)
+		_check(counted_text.contains("STUCK: %d" % int(telemetry_node.get("stuck_count"))),
+				"the STUCK field is read off telemetry's own counter")
+		_check(counted_text.contains("ERRORS: %d" % int(telemetry_node.get("error_count"))),
+				"the ERRORS field is read off the engine-error counter")
+		_check(counted_text.contains("FIRST ANOMALY: -")
+				or counted_text.contains("FIRST ANOMALY: 0"),
+				"FIRST ANOMALY is always a line, with - when nothing was anomalous")
 
 	# --- the seed: recorded, honoured, and enough to re-run the run -------------
 	# The critic's finding was that the pre-release gate could not be executed at

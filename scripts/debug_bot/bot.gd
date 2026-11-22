@@ -6,11 +6,57 @@ extends Node
 ## Scenarios: BOT-001 talk, BOT-002 quest loop, BOT-003 combat arena,
 ##            BOT-004 magic, BOT-005 inventory/economy, BOT-006 quest chain,
 ##            BOT-007 traps/secrets, BOT-008 kill, BOT-009 save/load,
-##            BOT-010 soak, BOT-011 take damage.
+##            BOT-010 soak, BOT-011 take damage, BOT-012 dungeon descent,
+##            BOT-013 fortress and the King without a Crown.
 ## Profiles: cautious, normal, aggressive, explorer, collector, novice, master.
+##
+## Run length: BOT-010 is bounded in simulated seconds (`--soak=<seconds>`,
+## default SOAK_SECONDS_DEFAULT), every other scenario by its own wall-clock
+## budget. The soak is the one scenario whose whole point is elapsed simulation.
 
 const QUEST_ID := "q01_ash_wolves"
 const SCENARIO_TIMEOUT := 75.0
+## How long BOT-010 runs when nobody says otherwise, counted in simulated seconds
+## (physics steps at 60 Hz), not in wall-clock ones. The spec's own table asks for a
+## soak of half an hour to an hour; 75 s was a smoke test that had been allowed to
+## call itself an endurance run. Six hundred seconds is the floor at which a soak can
+## actually find a slow leak, and `--soak=` moves the number for a quick local check
+## without touching the default a release gate runs on.
+const SOAK_SECONDS_DEFAULT := 600.0
+## The soak's own budget in the unit the other scenarios use, so the retreat budget
+## below can be scaled against a run that is eight times longer without the constant
+## the test suite pins having to move.
+const SOAK_BUDGET_REFERENCE_SECONDS := 75.0
+
+## The watchdog (spec §19.6 «BotWatchdog»). These four numbers are the whole
+## detector; the test suite reads them off the live constant map, so a threshold
+## cannot be quietly widened until it never fires.
+##
+## The watchdog never aborts a run. Its job is to make a stall visible in the log
+## and counted in the verdict (`STUCK: N`), not to end the run that stalled — a bot
+## that quits on its own anomaly reports nothing about it.
+##
+## A hero who holds a movement key and moves less than this far in
+## `WATCHDOG_STUCK_MS` is against something. Eight pixels is half a tile: less than
+## the distance a body-blocked player slides along a wall, more than the jitter of a
+## collision resolution.
+const WATCHDOG_STUCK_PX := 8.0
+const WATCHDOG_STUCK_MS := 3000
+## The same (goal, action) pair issued this many times with no change in the world
+## between them is a loop rather than an attempt. Twelve is deliberately above the
+## three-to-four presses a leg legitimately repeats (knock a gate twice, swing twice
+## at the same wolf) and below the hundreds a stuck run would rack up.
+const WATCHDOG_CYCLE_REPEATS := 12
+## A streak shorter than this is a fast hand, not a cycle: twelve taps of the same
+## key take half a second, and a hero mid-swing is not stuck.
+const WATCHDOG_CYCLE_MIN_MS := 2000
+## An active goal that has not moved the world at all for this long is reported even
+## when the hero is walking, because «busy» and «making progress» are different facts
+## and only the second one is what a soak is for.
+const WATCHDOG_ZERO_PROGRESS_MS := 45000
+## One observation per this many milliseconds, written by the same tick that samples
+## the watchdog. `Telemetry.PERF_INTERVAL_MS` is the performance file's own beat.
+const WATCHDOG_SAMPLE_MS := 1000
 ## Absolute physics frame every scenario parks to before it acts, so a run begins
 ## on the same simulation step regardless of how many frames the world's deferred
 ## load took. Comfortably past world build (the forest spawns its cast within the
@@ -79,13 +125,35 @@ class BotInput:
 
 	func hold(action: StringName, on: bool) -> void:
 		var key := String(action)
-		if on and not bool(_pressed.get(key, false)):
+		var was := bool(_pressed.get(key, false))
+		if was == on:
+			# Restating a held key is not an event. The walker calls `hold` on all
+			# four movement keys every physics step, and a run that logged each of
+			# those would write 240 identical lines a second to say the hero kept
+			# walking east. The spec's §20.3 says input is recorded по событию, and
+			# this is the one place that knows which of those calls was a change.
+			return
+		if on and not was:
 			_just[key] = Engine.get_physics_frames() + 1
 		_pressed[key] = on
+		Telemetry.input({
+			"action": key,
+			"pressed": on,
+			"frame": Engine.get_physics_frames(),
+			"source": "bot",
+		})
 
 	func release_all() -> void:
 		for key: String in _pressed.keys():
+			if not bool(_pressed[key]):
+				continue
 			_pressed[key] = false
+			Telemetry.input({
+				"action": key,
+				"pressed": false,
+				"frame": Engine.get_physics_frames(),
+				"source": "bot",
+			})
 
 
 ## Behaviour profiles from the spec (§19.3). They change how the bot weighs
@@ -137,6 +205,12 @@ const SOAK_DISENGAGE_RANGE := 60.0
 ## what keeps the bot out of reach once the bursts are spent.
 const SOAK_RETREAT_TIME := 0.6
 const SOAK_RETREAT_BUDGET := 25.0
+## A distance change between two soak samples larger than this is not walking. The
+## hero covers about 12 px between the loop's samples at a full run, and a disengage
+## burst inside the same iteration adds another 40; a respawn puts him back on the
+## zone's spawn point, which is hundreds. Anything past this is counted as a jump and
+## kept out of the distance the movement term is judged on.
+const SOAK_TELEPORT_PX := 80.0
 
 ## BOT-003 — which enemy kinds stand in for the three roles the spec's arena
 ## (§19.5: «ближний, дальний и поддерживающий враг») asks for. The list is a
@@ -189,6 +263,31 @@ const ARENA_BREAK_COOLDOWN := 20.0
 ## An empty role list: a leg that is only about getting somewhere.
 const NO_ROLES: Array[String] = []
 const ARENA_CRITERION := "dealt damage to >=1 kind from each of melee/ranged/support, survived, no control lock >=1500ms, >=1 target switch, >=1 kill"
+
+## BOT-012 — the kinds the undercroft is made of. Named as a constant for the same
+## reason the arena names its three roles: "engaged two kinds of dungeon enemy" has
+## to mean two kinds that live in the dungeon, and the nearest skeleton on the screen
+## is not evidence of anything unless the list it was matched against is written down
+## somewhere. `ruin_skeleton` and `ruin_skeleton_archer` patrol the undercroft too,
+## and they count — they are what a hero meets first on the way down.
+const DUNGEON_KINDS: Array[String] = ["ruin_skeleton", "ruin_skeleton_archer",
+	"ash_wisp", "bone_crawler", "plague_bearer"]
+## Three zones down and back again is the longest road a scenario in this file walks:
+## the forest's supply run, the ruins' door, the undercroft, the stair back and the
+## gate home. The budget is a ceiling on a route that normally finishes in half of
+## it, and it is a ceiling rather than a wait because the legs exit as soon as the
+## world answers.
+const DUNGEON_TIMEOUT := 900.0
+const FORTRESS_TIMEOUT := 1200.0
+
+## How close the bot has to stand before walking toward an exit stops being the
+## job and knocking becomes it. The interact reach of a `ZoneExit` is 26 px, so
+## inside this radius the walk is over by definition; a travel loop that keeps
+## calling a walker which answers «already there» without spending a frame does
+## not wait for the world, it freezes the engine.
+const GATE_KNOCK_RANGE := 22.0
+const DUNGEON_CRITERION := "reached the dungeon through the ruins' door, dealt damage to >=2 distinct dungeon kinds, met a spike trap with its telegraph visible and took no unpreventable damage from it (or said so, when this seed's undercroft has no reachable ground to watch a plate from), travelled back to the forest, survived"
+const FORTRESS_CRITERION := "reached the fortress through the undercroft, engaged the King without a Crown, survived past the phase 2 transition, and either won, broke off, or died and got back up — never stalled"
 
 var scenario: String = ""
 var profile: String = "normal"
@@ -267,10 +366,184 @@ var _travel_heal_at := -1.0
 var _a_control_since := -1
 var _a_max_control_ms := 0
 
+## BOT-010's window in simulated seconds. Read from `--soak=` when the operator names
+## one, so a two-minute sanity check does not have to edit a constant and a release
+## gate does not have to trust a flag.
+var soak_seconds := SOAK_SECONDS_DEFAULT
+## Every zone this run stood in, in the order it stood there, repeated entries
+## included: `forest > ruins > dungeon > ruins > forest` is the sentence the verdict
+## field ZONES exists to say, and a set would lose the part that matters.
+var _zone_path: Array[String] = []
+## The scenario's own checklist. A goal is declared when a leg starts and confirmed
+## when the world answers it, so GOALS in the summary is "3/4" rather than a PASS or
+## a FAIL, and a run that got most of the way says so.
+var _goals_total := 0
+var _goals_done := 0
+
+## Watchdog state. The reference position and its timestamp are re-armed by any
+## movement greater than `WATCHDOG_STUCK_PX`, so a stuck report is an episode and not
+## a per-frame scream; the token is the world's own progress (zone, kills, gold, HP,
+## level, tile, quest state), and a token that has not moved is the only thing that
+## makes a cycle and a zero-progress stall distinguishable from ordinary work.
+var _wd_enabled := false
+var _wd_goal := ""
+var _wd_ref_pos := Vector2.ZERO
+var _wd_ref_ms := 0
+var _wd_token := ""
+var _wd_token_ms := 0
+var _wd_action := ""
+var _wd_action_ms := 0
+var _wd_repeat := 0
+var _wd_sample_ms := 0
+var _wd_stuck := 0
+var _wd_cycles := 0
+var _wd_zero_progress := 0
+
 
 func _physics_process(_delta: float) -> void:
 	if _a_watch:
 		_track_control_lock()
+	if _wd_enabled:
+		_watchdog_tick()
+
+
+## One sample of the watchdog. Runs every physics step for the whole of every bot
+## run, because the stall it is looking for is exactly the kind that happens while
+## the scenario's own coroutine is busy waiting for something else.
+##
+## Nothing here aborts the run. A bot that stops on an anomaly hides it: the log
+## ends at the interesting part. Every detection is instead written to
+## `decisions.jsonl` with the evidence a human needs to tell a wall from a fight, and
+## counted into the verdict's STUCK field.
+func _watchdog_tick() -> void:
+	var now := Time.get_ticks_msec()
+	var pos := _player_pos()
+	var token := _wd_progress_token()
+	if token != _wd_token:
+		# The world moved — a kill, a coin, a zone line, a quest step, a tile. That
+		# single fact retires every stall timer at once, which is what keeps a hero
+		# trading blows (HP down, position down, enemy dead) from reading as stuck.
+		_wd_token = token
+		_wd_token_ms = now
+		_wd_ref_pos = pos
+		_wd_ref_ms = now
+		_wd_repeat = 0
+		_wd_action = ""
+	elif pos.distance_to(_wd_ref_pos) > WATCHDOG_STUCK_PX:
+		_wd_ref_pos = pos
+		_wd_ref_ms = now
+	elif _wd_movement_held() and now - _wd_ref_ms >= WATCHDOG_STUCK_MS:
+		_wd_stuck += 1
+		_report_watchdog("stuck", now - _wd_ref_ms)
+		# Re-arm from this instant: the episode is over, the next one is a fresh
+		# three seconds of pressing into something. Without the re-arm a single
+		# corner would write one line per frame for the rest of the run.
+		_wd_ref_ms = now
+	if _wd_goal != "" and now - _wd_token_ms >= WATCHDOG_ZERO_PROGRESS_MS:
+		_wd_zero_progress += 1
+		_report_watchdog("zero_progress", now - _wd_token_ms)
+		_wd_token_ms = now
+	if now - _wd_sample_ms >= WATCHDOG_SAMPLE_MS:
+		_wd_sample_ms = now
+		_write_observation()
+
+
+## The world's own progress, as one comparable string. Deliberately coarse: the tile
+## rather than the pixel, so a hero sliding along a wall (real motion, no ground
+## gained) does not count as progress, while a hero walking the map does.
+func _wd_progress_token() -> String:
+	var kills := 0
+	for killed_type: String in GameState.kills:
+		kills += int(GameState.kills[killed_type])
+	return "%s|%d|%d|%d|%d|%s|%s" % [
+		String(GameState.zone), kills, GameState.gold, GameState.hp, GameState.level,
+		str(_tile_of(_player_pos())), str(QuestManager.state_of(QUEST_ID)),
+	]
+
+
+## Whether any movement key is currently down. A hero who is not pressing anything
+## and standing still is resting, which is a decision, not a defect.
+func _wd_movement_held() -> bool:
+	for action: String in ["move_up", "move_down", "move_left", "move_right"]:
+		if bool(bot_input._pressed.get(action, false)):
+			return true
+	return false
+
+
+## One key press, counted against the current goal. Twelve of the same key with no
+## change in the world between them is the loop the spec's «повторение одного и того
+## же (цель, действие)» describes.
+func _wd_note_action(action: String) -> void:
+	if not _wd_enabled:
+		return
+	var now := Time.get_ticks_msec()
+	if action == _wd_action:
+		_wd_repeat += 1
+	else:
+		_wd_action = action
+		_wd_repeat = 1
+		_wd_action_ms = now
+	if _wd_repeat > WATCHDOG_CYCLE_REPEATS \
+			and now - _wd_action_ms >= WATCHDOG_CYCLE_MIN_MS:
+		_wd_cycles += 1
+		_report_watchdog("cycle", now - _wd_token_ms)
+		_wd_repeat = 0
+		_wd_action = ""
+
+
+## The evidence line a stall has to carry: how long nothing moved, where the hero
+## stood, which keys he was holding, and which tiles the zone itself calls solid
+## around him. Read off the grid with the bot's own bump memory switched off, so the
+## report says what the world is, not what the bot has decided to believe.
+func _report_watchdog(kind: String, no_progress_ms: int) -> void:
+	var pos := _player_pos()
+	var held: Array[String] = []
+	for action: String in ["move_up", "move_down", "move_left", "move_right",
+			"attack", "interact", "ability", "dash", "block", "quick_slot_1"]:
+		if bool(bot_input._pressed.get(action, false)):
+			held.append(action)
+	var blocked: Array[String] = []
+	var here := _tile_of(pos)
+	for offset in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+			Vector2i(1, 1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(-1, -1)]:
+		if not _walkable(here + offset, true):
+			blocked.append(str(here + offset))
+	Telemetry.decision({
+		"action": "watchdog_" + kind,
+		"reason": "scenario_" + scenario,
+		"goal": _wd_goal,
+		"no_progress_ms": no_progress_ms,
+		"at": [int(pos.x), int(pos.y)],
+		"tile": str(here),
+		"held": ",".join(held),
+		"blocked_tiles": ",".join(blocked),
+		"frame": Engine.get_physics_frames(),
+	})
+	# The detail travels to FIRST ANOMALY because «stuck» alone does not localise
+	# anything: the tile is what tells the reader which wall to go look at, and the
+	# verdict is read on its own far more often than the log is opened.
+	Telemetry.note_anomaly(kind, "%s (goal %s)" % [str(here), _wd_goal])
+	_notes.append("watchdog_%s no_progress_ms=%d at=%s" % [kind, no_progress_ms, str(here)])
+
+
+## One second of the world, as the bot sees it. Cheap by construction: the player's
+## own position and pools, the nearest body and its distance, the zone, the goal. No
+## scans beyond the enemy group the walker already iterates every step anyway.
+func _write_observation() -> void:
+	var pos := _player_pos()
+	var foe := _nearest_enemy()
+	Telemetry.observation({
+		"goal": _wd_goal,
+		"zone": String(GameState.zone),
+		"at": [int(pos.x), int(pos.y)],
+		"tile": str(_tile_of(pos)),
+		"hp": GameState.hp,
+		"mana": GameState.mana,
+		"gold": GameState.gold,
+		"nearest_enemy": String(foe.get("enemy_type")) if foe != null else "",
+		"nearest_dist": int(pos.distance_to(foe.global_position)) if foe != null else -1,
+		"frame": Engine.get_physics_frames(),
+	})
 
 
 ## One sample of the stun-lock clock: how long the player has been under a
@@ -292,7 +565,43 @@ func _track_control_lock() -> void:
 func _set_control_watch(on: bool) -> void:
 	_a_watch = on
 	_a_control_since = -1
-	set_physics_process(on)
+	set_physics_process(on or _wd_enabled)
+
+
+## Start/stop the watchdog. On for every bot run, not only for the scenarios that
+## ask: a stall in a scenario nobody instrumented is the stall that ships.
+func _set_watchdog(on: bool) -> void:
+	_wd_enabled = on
+	if on:
+		var now := Time.get_ticks_msec()
+		_wd_ref_pos = _player_pos()
+		_wd_ref_ms = now
+		_wd_token = _wd_progress_token()
+		_wd_token_ms = now
+		_wd_sample_ms = now
+		_wd_action = ""
+		_wd_repeat = 0
+	set_physics_process(on or _a_watch)
+
+
+## Declare the goal the watchdog measures progress against, and the checklist entry
+## the verdict counts. An empty goal switches the zero-progress detector off (a leg
+## that is only about getting somewhere has no goal to stall on) while the stuck and
+## cycle detectors keep running.
+func _wd_set_goal(goal: String) -> void:
+	_wd_goal = goal
+
+
+## One term of the scenario's checklist: counted, named in the notes, and reported
+## either way, because a goal that was attempted and missed is information while a
+## goal nobody checked is silence.
+func _goal(label: String, ok: bool) -> void:
+	_goals_total += 1
+	if ok:
+		_goals_done += 1
+		_notes.append("goal_%s=ok" % label)
+	else:
+		_notes.append("goal_%s=missed" % label)
 
 
 func _ready() -> void:
@@ -307,6 +616,7 @@ func start_from_cmdline() -> void:
 		args = OS.get_cmdline_args()
 	var requested_seed := 0
 	var has_requested_seed := false
+	var requested_soak := -1.0
 	for a in args:
 		if a.begins_with("--bot="):
 			scenario = a.substr("--bot=".length())
@@ -315,8 +625,19 @@ func start_from_cmdline() -> void:
 		elif a.begins_with("--seed="):
 			requested_seed = int(a.trim_prefix("--seed="))
 			has_requested_seed = true
+		elif a.begins_with("--soak="):
+			requested_soak = float(a.trim_prefix("--soak="))
 	if scenario == "":
 		return
+	# A soak window has to be a window. `--soak=0` would end the scenario before it
+	# swung once, and a negative one would end it before it started; both read as a
+	# PASS-shaped silence, so the flag is refused back to the default it came from
+	# and the refusal is said out loud in the notes.
+	soak_seconds = SOAK_SECONDS_DEFAULT
+	if requested_soak > 0.0:
+		soak_seconds = requested_soak
+	elif requested_soak >= 0.0:
+		_notes.append("soak_flag_ignored=%.1f" % requested_soak)
 	# `Telemetry` already seeded the global RNG before the world was built, which is
 	# the only point early enemy rolls can be caught. When the operator named a
 	# seed, hand it back down so the process is genuinely running on the number the
@@ -333,9 +654,28 @@ func start_from_cmdline() -> void:
 	_running = true
 	_start_ms = Time.get_ticks_msec()
 	InputSource.set_override(bot_input)
+	# The watchdog is on for every scenario, not only for the ones that ask for it.
+	# The stall it exists to catch is the one a scenario walks into while its own
+	# coroutine is waiting on a timer, which is precisely where a per-scenario hook
+	# would never be reached.
+	_set_watchdog(true)
+	_wd_set_goal("scenario_" + scenario)
+	_note_zone()
 	Telemetry.event(&"bot_start",
-		{"scenario": scenario, "profile": profile, "seed": run_seed, "seed_source": seed_source})
+		{"scenario": scenario, "profile": profile, "seed": run_seed,
+			"seed_source": seed_source, "soak_seconds": soak_seconds})
 	_run()
+
+
+## Record the zone the hero is standing in, if it is not the last one already
+## written. Read off `GameState.zone` — the world's own answer after a travel — so
+## the path in the verdict is the route the game took and not the route the scenario
+## meant to walk.
+func _note_zone() -> void:
+	var zone := String(GameState.zone)
+	if zone == "" or (_zone_path.size() > 0 and _zone_path[_zone_path.size() - 1] == zone):
+		return
+	_zone_path.append(zone)
 
 
 func _run() -> void:
@@ -375,6 +715,10 @@ func _run() -> void:
 			await _scenario_soak()
 		"BOT-011":
 			await _scenario_take_damage()
+		"BOT-012":
+			await _scenario_dungeon()
+		"BOT-013":
+			await _scenario_fortress()
 		_:
 			_notes.append("unknown_scenario")
 			_result = "FAIL"
@@ -382,6 +726,7 @@ func _run() -> void:
 
 
 func _finish() -> void:
+	_set_watchdog(false)
 	# Hand the engine's physics ceiling back before anything else: an in-process
 	# bot test keeps running the suite after this scenario, and a leaked pin of 1
 	# would slow every later group without changing its result.
@@ -419,6 +764,13 @@ func _finish() -> void:
 		"notes": "; ".join(_notes),
 		"hp": GameState.hp,
 		"kills": GameState.kills,
+		# The §20.5 verdict fields the bot owns. DEATHS, STUCK, WARNINGS, ERRORS and
+		# FATAL are read from Telemetry's own counters by the builder, because a run
+		# that died twice and a run that never died must not differ only in whether
+		# the bot felt like mentioning it.
+		"zones": " > ".join(_zone_path) if not _zone_path.is_empty() else "-",
+		"goals": "%d/%d" % [_goals_done, _goals_total],
+		"run_dir": String(Telemetry.run_dir),
 	})
 	# The seed rides on the verdict line rather than only in the log directory: the
 	# line is what a human pastes into a report, and a PASS with no seed next to it
@@ -735,30 +1087,49 @@ func _scenario_soak() -> void:
 	# its own private fixed number into a run whose seed is reported elsewhere is a
 	# soak whose wander cannot be reproduced by re-running the seed it printed.
 	rng.seed = run_seed
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
+	# The window is counted in physics steps, not in wall milliseconds. A soak bounded
+	# by the wall clock runs a different number of simulation steps on a busy machine
+	# than on an idle one, which makes the run it reports a function of load and not
+	# of the seed printed next to the verdict — the same coupling that made the kill
+	# scenario diverge, and the reason `BOT-008` counts frames too.
+	var frame_budget := Engine.get_physics_frames() + int(soak_seconds * 60.0)
 	var heading := Vector2.RIGHT
 	var segments := 0
 	var last_pos := _player_pos()
 	var stuck := 0
 	var travelled := 0.0
+	var teleports := 0
 	var attack_attempts := 0
 	var heals := 0
+	var impulse_heals := 0
 	var retreats := 0
-	var retreat_left := SOAK_RETREAT_BUDGET
+	# The disengage budget scales with the window, because a budget sized for 75 s of
+	# wandering buys the same safety eight times over and then runs out with nine
+	# tenths of the run still to go. The constant the test suite pins stays what it
+	# is; only its share of a longer run grows.
+	var retreat_left := SOAK_RETREAT_BUDGET \
+		* clampf(soak_seconds / SOAK_BUDGET_REFERENCE_SECONDS, 1.0, 8.0)
+	# The ground the run has to cover, for the same reason: 300 px proved a hero was
+	# walking during a 75 s window, and the same 300 px over ten minutes would prove
+	# he stood still for nine of them. Capped rather than proportional, because the
+	# forest is 52x32 tiles and a wander that crossed it four times over is a
+	# different scenario, not a longer one.
+	var travel_goal := 300.0 * clampf(soak_seconds / SOAK_BUDGET_REFERENCE_SECONDS, 1.0, 4.0)
 	# Instance id of the enemy the bot has broken off from, or -1. Tracked by id so
 	# the bot stops running from a corpse the moment that enemy dies.
 	var fled_id := -1
 	# Bank the map's only potion before the wandering starts. The forest carries a
-	# single health_potion about 145 px east of the spawn, and 75 s of random walk
-	# almost never crosses its tile again: measured runs asked for a heal dozens of
-	# times and held a potion in none of them, so the raised threshold had nothing
-	# to fire on. Walking there is real movement through the real input path, and
-	# the pickup is taken by touching it, exactly as a player takes it.
+	# single health_potion about 145 px east of the spawn, and a random walk almost
+	# never crosses its tile again: measured runs asked for a heal dozens of times and
+	# held a potion in none of them, so the raised threshold had nothing to fire on.
+	# Walking there is real movement through the real input path, and the pickup is
+	# taken by touching it, exactly as a player takes it.
 	var pickup := _find_node("pickup")
 	if pickup != null:
 		await _move_to(pickup.global_position, 10.0, 12.0)
+	_notes.append("window=%.0fs goal_travel=%.0fpx" % [soak_seconds, travel_goal])
 	_notes.append("potion_banked=%s" % str(_soak_has_potion()))
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < frame_budget:
 		# Heal the instant the threshold is crossed, ahead of the attack. Tapping
 		# the potion after the swing spends two physics frames trading blows, and
 		# that is exactly the window a 13-damage boar charge gets paid for out of
@@ -766,6 +1137,15 @@ func _scenario_soak() -> void:
 		if _soak_needs_heal() and _soak_has_potion():
 			await _tap(&"quick_slot_1")
 			heals += 1
+		elif _soak_needs_heal() and not _soak_has_potion():
+			# Out of medicine on a run that is eight times longer than the map's
+			# one potion can cover. The impulse is the second heal every hero learns
+			# in the first minute, cast through the same select-and-tap path as any
+			# other spell, and it is what a ten minute soak actually survives on: the
+			# forest holds one flask and 60 mana, and both are spent by the third
+			# minute of it.
+			if await _heal_if_hurt(SOAK_HEAL_AT):
+				impulse_heals += 1
 
 		var enemy := _nearest_enemy()
 		var enemy_dist := INF if enemy == null else _player_pos().distance_to(enemy.global_position)
@@ -829,7 +1209,18 @@ func _scenario_soak() -> void:
 
 		var pos := _player_pos()
 		var step := pos.distance_to(last_pos)
-		travelled += step
+		# A step bigger than anything the hero can cover between two samples is not
+		# walking: it is the respawn putting him back on the zone's spawn point after a
+		# death. Counting it would let a run that died nine times report nine hundred
+		# pixels of ground it never crossed, which is exactly the sort of number the
+		# movement term exists to refuse.
+		if step <= SOAK_TELEPORT_PX:
+			travelled += step
+		else:
+			teleports += 1
+			# Re-anchor on the arrival point, or the next sample measures the same
+			# jump a second time and one death is reported as two.
+			last_pos = pos
 		if step < 0.4:
 			stuck += 1
 		else:
@@ -847,9 +1238,12 @@ func _scenario_soak() -> void:
 	bot_input.release_all()
 	_notes.append("segments=%d" % segments)
 	_notes.append("travelled=%.0fpx" % travelled)
+	_notes.append("respawn_jumps=%d" % teleports)
 	_notes.append("attacks=%d" % attack_attempts)
 	_notes.append("heal_taps=%d" % heals)
+	_notes.append("impulse_heals=%d" % impulse_heals)
 	_notes.append("retreats=%d" % retreats)
+	_notes.append("deaths=%d" % int(Telemetry.death_count))
 	_notes.append("hp=%d/%d" % [GameState.hp, GameState.max_hp])
 	_notes.append("kills=%s" % str(GameState.kills))
 
@@ -859,10 +1253,23 @@ func _scenario_soak() -> void:
 	# window. The attack check is what stops the disengage rule above from being
 	# quietly traded for a run that walks away from everything and survives by
 	# never being hit.
+	#
+	# Dying inside a soak is reported, not hidden: `deaths` counts every fall the
+	# world saw. A fall is content — the forest has boars in it on purpose — and the
+	# hero gets back up, so the verdict asks whether the run was still standing when
+	# the window closed and lets the number of falls be read next to it.
 	var survived: bool = GameState.hp > 0 and GameState.hp <= GameState.max_hp
-	var moved_enough: bool = travelled > 300.0
+	var moved_enough: bool = travelled > travel_goal
 	var fought: bool = attack_attempts > 0
 	var state_coherent: bool = GameState.gold >= 0 and GameState.level >= 1
+	_goal("survived", survived)
+	_goal("moved", moved_enough)
+	_goal("fought", fought)
+	_goal("state_coherent", state_coherent)
+	# A stall found here is reported through STUCK in the verdict and is not a term
+	# of this verdict on its own. The soak wanders into corners on purpose — that is
+	# what it is for — and a detector that also decided the pass mark would be a
+	# detector nobody could tell a defect apart from a design.
 	_result = "PASS" if survived and moved_enough and fought and state_coherent else "FAIL"
 
 
@@ -1583,6 +1990,448 @@ func _arena_open_ruins_door(deadline: int, rally: Vector2) -> bool:
 	return false
 
 
+## The ground the hero wakes on wherever he currently stands. The forest's clearing is
+## a constant, because every scenario that never leaves it can name it; a scenario
+## that crosses a zone line needs the spawn of the zone it is in, and the player
+## carries that number himself — every zone sets it the moment it places him.
+func _rally_point() -> Vector2:
+	var p := _player()
+	if p != null:
+		var spawn: Variant = p.get("spawn_point")
+		if spawn is Vector2 and (spawn as Vector2) != Vector2.ZERO:
+			return spawn as Vector2
+	return _player_spawn()
+
+
+## Get the hero moving again. A leg that spends two chunks inside the same eight
+## pixels is not lost — the planner has a route and keeps walking it — it is held:
+## a skeleton standing in the lane at a distance the walker's own thresholds do not
+## cover (too far for the melee swing at 22 px, and not the waypoint, so not a
+## target either), or a slide direction learned three tiles back and never
+## forgotten, which keeps pressing the hero into a wall he has already touched.
+## Both are answered the same way: let go of every key, drop the borrowed slide and
+## the learned walls, hit whatever is close enough to be the reason, and take one
+## honest step onto the neighbouring tile with the most ground beyond it. Nothing
+## here teleports, heals, or writes state — it is what a player does when the
+## character stops answering: wiggles out.
+func _unstick(goal: Vector2 = Vector2.INF) -> void:
+	bot_input.release_all()
+	_avoid_frames = 0
+	_avoid_dir = Vector2.ZERO
+	_bumped.clear()
+	var foe := _nearest_enemy()
+	if foe != null and _player_pos().distance_to(foe.global_position) <= 48.0:
+		bot_input.set_aim(foe.global_position)
+		await _tap(&"attack")
+	var here := _tile_of(_player_pos())
+	var best := here
+	var best_score := INF
+	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+			Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1)]:
+		var candidate := here + offset
+		if not _walkable(candidate, true):
+			continue
+		# With a goal in hand the escape is chosen by the one thing that matters:
+		# whether the planner can see a road to that goal from the tile being
+		# stepped onto, and how long it is. «Most open ground» sounds sensible and
+		# is how one run spent ten minutes crossing the same corridor twice — the
+		# escape walked out of the pocket and straight back into it, because the
+		# pocket had more open tiles around it.
+		var score := INF
+		if goal != Vector2.INF:
+			var route := _find_path(candidate, _tile_of(goal), true, false)
+			if route.is_empty():
+				continue
+			score = float(route.size())
+		else:
+			var open_beyond := 0.0
+			for probe: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				if _walkable(candidate + probe, true):
+					open_beyond += 1.0
+			score = -open_beyond
+		if score < best_score:
+			best_score = score
+			best = candidate
+	if best == here:
+		await _wait(0.5)
+		return
+	var step_to := _tile_center(best)
+	for i in 60:
+		if _player_pos().distance_to(step_to) < 6.0:
+			break
+		await _move_step(step_to)
+	bot_input.release_all()
+
+
+## Walk to a named `ZoneExit` and ask it for the far side, through the same
+## `interact` the interact key uses. The leg is over when `GameState.zone` answers the
+## zone on the other side, because a gate the bot walked up to without pressing E is a
+## travel that never happened.
+##
+## This is the arena's entry leg generalised, and it was generalised the moment a
+## second scenario needed it: two copies of «stand on the tile, knock, wait for the
+## zone to answer» are two copies that can drift apart, and the one that drifts is the
+## one that starts reporting a zone the hero never entered.
+func _zone_travel(gate_name: String, target_zone: String, deadline: int, rally: Vector2) -> bool:
+	var gate := _named(gate_name)
+	if gate == null:
+		_notes.append("gate_missing=%s zone=%s" % [gate_name, String(GameState.zone)])
+		Telemetry.warning("gate %s is not in the zone called %s" % [gate_name, String(GameState.zone)])
+		return false
+	# Where the hero has to be to use the exit. The node's own position is the
+	# obvious answer and sometimes a lie: an exit the world could not seat on floor
+	# sits in a wall, and a wall has no route to it. Aim at the nearest ground
+	# within three tiles and say in the log when that is not the node's own tile,
+	# because `gate_stuck` two tiles from a column reads as a broken bot otherwise.
+	var gate_tile := _tile_of(gate.global_position)
+	var stand_tile := _nearest_walkable_tile(gate_tile, 3)
+	var stand_point := _tile_center(stand_tile)
+	if stand_tile != gate_tile:
+		_notes.append("gate_off_ground=%s tile=%s stand=%s" % [gate_name, str(gate_tile), str(stand_tile)])
+	# The long leg is walked by the planner with the threat price switched off, in
+	# chunks long enough to cross a zone and short enough to re-plan from where the
+	# hero actually got to. Fighting on the way is not skipped — `_travel_to` swings
+	# at anything that comes into melee and closes on a shooter downrange of the
+	# waypoint — but a route across a zone is not re-priced every time a skeleton
+	# shifts its weight, which is what made a five-tile corridor cost the whole run.
+	# A leg is also a fresh objective: walls learned leaning into a plate alcove
+	# must not be the reason the road out of the undercroft cannot be found.
+	_bumped.clear()
+	# The knock itself is thrown from a little closer than the tile the planner
+	# stopped on: an exit seated in a wall is one tile (32 px) from the nearest
+	# ground, and the interact reach is 26 px, so standing dead centre on that
+	# ground is too far to be heard. The nudge is only taken while the tile under
+	# it is still ground the zone admits.
+	var knock_point := stand_point
+	var toward_gate := gate.global_position - stand_point
+	if toward_gate.length() > 1.0:
+		var nudged: Vector2 = stand_point \
+				+ toward_gate.normalized() * minf(14.0, toward_gate.length())
+		if _walkable(_tile_of(nudged), true):
+			knock_point = nudged
+	var unsticks := 0
+	while Time.get_ticks_msec() < deadline and String(GameState.zone) != target_zone:
+		if GameState.hp <= 0:
+			await _wait_for_alive(12.0)
+			bot_input.release_all()
+			break
+		# Standing within reach of the exit ends the walk. `_travel_to` answers
+		# «already there» on the spot without spending a physics frame, so a loop
+		# that kept asking it would run a million times a second and stop the
+		# engine rather than wait for a zone that was never going to change.
+		if _player_pos().distance_to(stand_point) <= GATE_KNOCK_RANGE:
+			break
+		if await _heal_if_hurt(ARENA_HEAL_AT):
+			_a_heals += 1
+		# Breaking off is reserved for a hero who is actually dying. On a full pool
+		# the same call would read a crowded undercroft as a losing fight and walk
+		# the leg back to the rally point every few seconds, which is a second way
+		# to spend a run crossing the same corridor.
+		if GameState.hp <= int(GameState.max_hp * 0.40) and await _arena_break_step(rally):
+			continue
+		var left := float(deadline - Time.get_ticks_msec()) / 1000.0
+		if left <= 1.0:
+			break
+		var before := _player_pos()
+		await _travel_to(stand_point, GATE_KNOCK_RANGE, minf(30.0, left), false)
+		await _wait(0.1)
+		# A chunk that bought no ground is a chunk to learn from, not a chunk to
+		# repeat: the same plan from the same eight pixels buys the same nothing for
+		# the remaining eight minutes of the budget, which is exactly how one run
+		# spent five hundred seconds being held by a skeleton at twenty-six.
+		if _player_pos().distance_to(before) < 12.0:
+			unsticks += 1
+			if unsticks <= 5:
+				_notes.append("leg_unstick=%s at=%s" % [gate_name, str(_tile_of(_player_pos()))])
+			await _unstick(stand_point)
+	for attempt in 4:
+		if String(GameState.zone) == target_zone:
+			return true
+		# The press itself is three physics frames and is always allowed, even after
+		# the leg's own clock has run out: a bot out of time still knocks before it
+		# leaves, and one knock on the right tile is the difference between a zone
+		# entered and a run that walked all this way for nothing.
+		if Time.get_ticks_msec() >= deadline and attempt > 0:
+			break
+		# Stand on the exit's own tile rather than near it. The interact reaches 26 px,
+		# which is exactly the distance at which arriving "close" from the wrong side
+		# of a wall asks the wrong thing. The step is only taken while the hero is
+		# still off that tile: an exit whose exact centre the body cannot occupy (a
+		# gate node set into the wall line) would otherwise cost four full approach
+		# budgets and still leave the key pressed from two tiles away.
+		var stand_on := knock_point
+		if _player_pos().distance_to(stand_on) > 8.0:
+			await _travel_to(stand_on, 6.0, 15.0, false)
+		await _tap(&"interact")
+		await _wait(0.8)
+		if String(GameState.zone) == target_zone:
+			# The old world and everything in it is gone now, including the tile
+			# memory built up walking to this gate. A bump learned against a tree in
+			# the forest must not become a wall in the ruins.
+			_bumped.clear()
+			_note_zone()
+			_notes.append("entered_%s at=%d" % [target_zone, Engine.get_physics_frames()])
+			return true
+	var detail := "gate_stuck=%s zone=%s dist=%d me=%s hp=%d" % [
+		gate_name, String(GameState.zone),
+		int(_player_pos().distance_to(gate.global_position)),
+		str(_tile_of(_player_pos())), GameState.hp]
+	_notes.append(detail)
+	Telemetry.warning(detail)
+	return false
+
+
+## The dungeon kinds this run has actually drawn blood from, read off the damage
+## sensor. "Engaged" means the bot hit it — not that it walked past one, and not that
+## it got hit back by one.
+func _dungeon_blood() -> Dictionary:
+	var blood: Dictionary = {}
+	for kind in DUNGEON_KINDS:
+		var dealt := int(_m_dmg_by_type.get(String(kind), 0))
+		if dealt > 0:
+			blood[String(kind)] = dealt
+	return blood
+
+
+func _dungeon_distinct_count() -> int:
+	return _dungeon_blood().size()
+
+
+## The nearest live dungeon kind this run has not yet hit. Nearest rather than first
+## in the list, because the undercroft is a grid of corridors and the kind a hero can
+## actually reach is the kind he is going to fight.
+func _dungeon_unbled_kind() -> String:
+	var here := _player_pos()
+	var best := ""
+	var best_d := INF
+	for node in get_tree().get_nodes_in_group("enemy"):
+		var e := node as Node2D
+		if e == null or not is_instance_valid(e) or e.is_in_group("boss"):
+			continue
+		var kind := String(e.get("enemy_type"))
+		if not DUNGEON_KINDS.has(kind) or int(_m_dmg_by_type.get(kind, 0)) > 0:
+			continue
+		var d := e.global_position.distance_to(here)
+		if d < best_d:
+			best_d = d
+			best = kind
+	return best
+
+
+## Draw blood from at least `wanted` distinct kinds of the undercroft, one kind at a
+## time. The arena already knows how to hold onto one role until the sensor has a hit
+## of its own on it; what it never needed was the plural, because its three roles are
+## three different lists. Handing `_arena_pin_kind` a list one kind wide is what turns
+## "engaged the nearest thing" into "engaged two things that are not the same thing".
+##
+## A pin that comes back with no new blood is given one more slice at the same kind
+## before the run moves on, and the number reported at the end is the number the
+## sensor holds, not the number of pins attempted.
+func _dungeon_engage_distinct(wanted: int, budget_each: float, deadline: int,
+		rally: Vector2) -> int:
+	var engaged := _dungeon_distinct_count()
+	var misses := 0
+	while engaged < wanted and Time.get_ticks_msec() < deadline:
+		var kind := _dungeon_unbled_kind()
+		if kind == "":
+			_notes.append("dungeon_no_unbled_kind engaged=%d" % engaged)
+			break
+		await _arena_pin_kind([kind], budget_each, deadline, rally)
+		var now := _dungeon_distinct_count()
+		if now <= engaged:
+			misses += 1
+			if misses >= 2:
+				_notes.append("dungeon_kind_refused=%s engaged=%d" % [kind, engaged])
+				break
+			continue
+		misses = 0
+		engaged = now
+	return engaged
+
+
+## One of the undercroft's spike plates, watched the way BOT-007 watches the forest's:
+## from the standoff, long enough for a whole cycle, counting only the plate's own
+## hits. Then the lane past it, walked while the warning is still on the record.
+##
+## The promise being tested is the same one and it matters more here than it does in
+## the forest: these plates sit on the two narrowed stretches of a zone that has
+## nothing else, so a hazard that cannot be seen here is a hazard a hero cannot walk
+## around at all.
+func _dungeon_trap_lesson(deadline: int, rally: Vector2) -> Dictionary:
+	var out := {"found": false, "telegraph_seen": false, "damage_at_distance": 0,
+		"crossed": false, "damage_crossing": 0, "skipped": false}
+	var plates: Array = []
+	for plate_name: String in ["TrapA", "TrapB"]:
+		var plate_node := _named(plate_name)
+		if plate_node != null:
+			plates.append(plate_node)
+	if plates.is_empty():
+		_notes.append("dungeon_trap_missing")
+		Telemetry.warning("no spike plate in the undercroft")
+		return out
+	out["found"] = true
+	_bumped.clear()
+	var spot := _reachable_standoff(plates)
+	if spot.is_empty():
+		# Every plate in this seed's undercroft sits where no walkable, reachable
+		# ground looks out on it. That is a fact about the generated map, not a
+		# broken warning, and the run says which of the two it is instead of
+		# failing a promise it was never given the ground to keep.
+		_notes.append("dungeon_trap_unreachable")
+		out["skipped"] = true
+		return out
+	var trap: Node2D = spot["trap"]
+	var trap_pos: Vector2 = trap.global_position
+	_m_trap_id = trap.get_instance_id()
+	_m_trap_damage = 0
+	var watch_point: Vector2 = spot["point"]
+	if not await _travel_to(watch_point, 10.0, 70.0, false) \
+			and _player_pos().distance_to(trap_pos) > 60.0:
+		_notes.append("dungeon_trap_watch_unreachable")
+		out["skipped"] = true
+		return out
+	var telegraph_seen := false
+	var watch_until := mini(Time.get_ticks_msec() + 9000, deadline + 9000)
+	while Time.get_ticks_msec() < watch_until:
+		var plate: ColorRect = trap.get("visual")
+		if plate != null and plate.color.a > 0.5:
+			telegraph_seen = true
+			break
+		var threat := _nearest_enemy()
+		if threat != null and _player_pos().distance_to(threat.global_position) < 20.0:
+			bot_input.set_aim(threat.global_position)
+			await _tap(&"attack")
+		await _wait(0.1)
+	out["telegraph_seen"] = telegraph_seen
+	out["damage_at_distance"] = _m_trap_damage
+	# The lane past the plate, on whichever side of it the zone calls ground two
+	# tiles out. Walking to it either steps over the plate or goes around it, and the
+	# scenario accepts either — what it does not accept is damage from a plate that
+	# gave no warning, which is the half the watch above is there to settle.
+	var here_tile := _tile_of(trap_pos)
+	var beyond := Vector2.INF
+	var from_here := _tile_of(_player_pos())
+	for offset in [Vector2i(0, 2), Vector2i(2, 0), Vector2i(0, -2), Vector2i(-2, 0),
+			Vector2i(2, 2), Vector2i(-2, 2), Vector2i(2, -2), Vector2i(-2, -2)]:
+		if not _walkable(here_tile + offset, true):
+			continue
+		if _find_path(from_here, here_tile + offset, true, false).is_empty():
+			continue
+		beyond = _tile_center(here_tile + offset)
+		break
+	if beyond != Vector2.INF and GameState.hp >= int(GameState.max_hp * 0.4):
+		_m_trap_damage = 0
+		out["crossed"] = await _travel_to(beyond, 8.0, 45.0, false)
+		out["damage_crossing"] = _m_trap_damage
+	else:
+		_notes.append("dungeon_plate_skipped hp=%d" % GameState.hp)
+	bot_input.release_all()
+	_notes.append("trap telegraph=%s dmg_at_distance=%d crossed=%s dmg_crossing=%d hp=%d" % [
+		str(bool(out["telegraph_seen"])), int(out["damage_at_distance"]),
+		str(bool(out["crossed"])), int(out["damage_crossing"]), GameState.hp])
+	_m_trap_id = -1
+	return out
+
+
+## Phases of the King this run has seen, straight off his own `phase_changed`.
+var _king_phases: Array[int] = []
+
+
+func _on_king_phase(phase: int) -> void:
+	if _king_phases.has(phase):
+		return
+	_king_phases.append(phase)
+	# What the bot has paid into the King's pool by the moment the phase changed, read
+	# off the bot's own damage sensor. The verdict is the signal's, never a number the
+	# bot computed for itself — this line is here so a reader can see how much of the
+	# 600 the transition cost, not so it can be argued with.
+	_notes.append("king_phase_%d at=%d hp=%d dealt=%d" % [
+		phase, Engine.get_physics_frames(), GameState.hp,
+		int(_m_dmg_by_type.get("king_without_crown", 0))])
+
+
+## The King's own fight loop. The arena's role machinery refuses bosses on purpose,
+## which is right for an arena and wrong for the one scenario whose verdict is a boss.
+## This loop keeps the same survival rules — drink early, break off when the ring
+## closes, cast at bowshot, close, swing — and points them at one named body.
+##
+## It ends the moment phase 2 has been seen, because that is the term. Grinding the
+## King's last 396 HP out for the sake of a kill the scenario never promised spends
+## the rest of the run's budget on a fight nobody is measuring.
+func _fortress_fight_king(deadline: int, rally: Vector2) -> Dictionary:
+	var out := {"found": false, "phase2": false, "outcome": "king_missing"}
+	var king := _named("KingWithoutCrown")
+	if king == null:
+		_notes.append("king_missing zone=%s" % String(GameState.zone))
+		Telemetry.warning("the fortress has no King in it")
+		return out
+	out["found"] = true
+	_bumped.clear()
+	_king_phases = []
+	if king.has_signal("phase_changed"):
+		king.connect("phase_changed", _on_king_phase)
+	var march_rally := rally
+	# The spine is forty tiles and the yard at the end of it is where the King stands.
+	# The approach is a planned walk, not a straight line: the spine has a wall down
+	# its middle, and a bot that prices its route around every guard in the yard
+	# re-prices it the moment one of them steps, which reads as a change of mind and
+	# costs the run its budget two tiles at a time. The fight itself is the arena's
+	# own — heal, break off to the zone's spawn, answer what is in the lane.
+	while Time.get_ticks_msec() < deadline \
+			and _player_pos().distance_to(king.global_position) > 40.0:
+		if GameState.hp <= 0:
+			await _wait_for_alive(12.0)
+			bot_input.release_all()
+			break
+		if await _heal_if_hurt(ARENA_HEAL_AT):
+			_a_heals += 1
+		var march_left := float(deadline - Time.get_ticks_msec()) / 1000.0
+		if march_left <= 1.0:
+			break
+		var march_before := _player_pos()
+		await _travel_to(king.global_position, 40.0, minf(30.0, march_left), false)
+		if _player_pos().distance_to(march_before) < 12.0:
+			await _unstick(king.global_position)
+	await _wait_for_alive(12.0)
+	while Time.get_ticks_msec() < deadline:
+		if _king_phases.has(2) or _king_phases.has(3):
+			break
+		if GameState.hp <= 0:
+			await _wait_for_alive(12.0)
+			if GameState.hp <= 0:
+				out["outcome"] = "no_respawn"
+				return out
+		if not is_instance_valid(king):
+			# The King died without ever reaching his second phase — a kill bought
+			# with the whole budget is still a fight the hero finished on his feet.
+			out["outcome"] = "king_dead"
+			break
+		if await _heal_if_hurt(ARENA_HEAL_AT):
+			_a_heals += 1
+		if await _arena_break_step(march_rally):
+			continue
+		var dist := _player_pos().distance_to(king.global_position)
+		if dist > 44.0:
+			await _travel_to(king.global_position, 36.0, 10.0, false)
+			continue
+		await _arena_strike(king)
+	out["phase2"] = _king_phases.has(2) or _king_phases.has(3)
+	if GameState.hp <= 0:
+		# The budget ran out with the hero on the ground. Whether the world gives him
+		# back is the whole difference between a hard fight and a broken one, so it is
+		# waited for rather than assumed.
+		await _wait_for_alive(20.0)
+		out["outcome"] = "respawned" if GameState.hp > 0 else "no_respawn"
+	elif String(out["outcome"]) != "king_dead":
+		out["outcome"] = "alive"
+	if king.has_signal("phase_changed"):
+		king.disconnect("phase_changed", _on_king_phase)
+	_notes.append("king fight outcome=%s phases=%s dmg=%d hp=%d" % [
+		String(out["outcome"]), str(_king_phases),
+		int(_m_dmg_by_type.get("king_without_crown", 0)), GameState.hp])
+	return out
+
+
 
 
 ## BOT-004 — magic. Every skill in `GameState.known_skills` is selected through
@@ -2240,6 +3089,191 @@ func _scenario_traps() -> void:
 	_result = "PASS" if trap_honest and broke and flag_open and GameState.hp > 0 else "FAIL"
 
 
+## BOT-012 — the descent, and the road back up it. The forest's supply run and the
+## iron sword in its eastern chest, the gate at the end of the forest road, the key
+## and the lever behind it, the stair down into the undercroft, two kinds of the
+## things that live down there, one of the plates that guard the only two lanes the
+## undercroft has — and then the whole route walked back to the forest, because a
+## scenario that only ever goes down has never once proved that a zone line is
+## something a hero can cross twice.
+##
+## Every leg is walked through the same `interact` a player uses and confirmed by the
+## zone's own answer. Nothing here writes a zone, a position or an item: the bot
+## arrives, knocks, and waits to be let in.
+func _scenario_dungeon() -> void:
+	_connect_combat_sensors()
+	_set_control_watch(true)
+	_a_melee = 0
+	_a_walker_melee = 0
+	_a_casts = 0
+	_a_heals = 0
+	_a_switches = 0
+	_a_last_target = -1
+	_a_broken = false
+	_a_pick_spell()
+	var deadline := Time.get_ticks_msec() + int(DUNGEON_TIMEOUT * 1000.0)
+	var forest_rally := _player_spawn()
+
+	# Supply first, for the same reason the arena takes it: the undercroft hands a
+	# hero nothing, and a level-one fist walks into it exactly once.
+	await _arena_prep(deadline)
+	_wd_set_goal("dungeon_arm")
+	await _arena_arm(deadline, forest_rally)
+
+	var reached_dungeon := false
+	var kinds_engaged := 0
+	var trap := {}
+	var back_in_forest := false
+	_wd_set_goal("dungeon_gate")
+	if await _zone_travel("RuinsGate", "ruins", deadline, forest_rally):
+		var hall_rally := _named("ForestGate").global_position \
+				if _named("ForestGate") != null else _player_pos()
+		_wd_set_goal("dungeon_descent")
+		if await _arena_open_ruins_door(deadline, hall_rally):
+			if await _zone_travel("DungeonGate", "dungeon", deadline, hall_rally):
+				reached_dungeon = true
+				var undercroft_rally := _rally_point()
+				_wd_set_goal("dungeon_fight")
+				kinds_engaged = await _dungeon_engage_distinct(2, 70.0, deadline, undercroft_rally)
+				_wd_set_goal("dungeon_traps")
+				trap = await _dungeon_trap_lesson(deadline, undercroft_rally)
+				# The way out is the way in. The door behind the lever stays open
+				# because the world says it does (`ruin_door_open`), so the climb back
+				# is a route, not a puzzle replayed.
+				_wd_set_goal("road_home")
+				if await _zone_travel("RuinsExit", "ruins", deadline, undercroft_rally):
+					back_in_forest = await _zone_travel("ForestGate", "forest",
+							deadline, _rally_point())
+	_set_control_watch(false)
+	bot_input.release_all()
+
+	# The plate term is met when the bot watched a plate arm itself and paid nothing
+	# for the privilege. It is also honestly met when this seed's undercroft has no
+	# reachable ground to watch from at all — a fact about a generated map, said out
+	# loud in the notes as `trap_skipped`, and not a warning that went unseen. What
+	# it never accepts is silence read as success: a trap that was reachable, watched
+	# from real ground, and hit the bot without arming first fails the run by name.
+	var trap_skipped := bool(trap.get("skipped", false))
+	var trap_met := bool(trap.get("found", false)) \
+			and bool(trap.get("telegraph_seen", false)) \
+			and int(trap.get("damage_at_distance", 0)) == 0 \
+			and (int(trap.get("damage_crossing", 0)) == 0 or GameState.hp > 0)
+	var trap_honest := trap_met or trap_skipped
+	if trap_skipped:
+		_notes.append("trap_skipped=no_reachable_watch_ground")
+	_goal("reached_dungeon", reached_dungeon)
+	_goal("two_dungeon_kinds", kinds_engaged >= 2)
+	_goal("trap_honest", trap_honest)
+	_goal("back_in_forest", back_in_forest)
+	_goal("alive", GameState.hp > 0)
+	_notes.append("kinds=%d dmg=%s kills=%s" % [
+		kinds_engaged, _fmt_counts(_dungeon_blood()), _fmt_counts(_m_kills_by_type)])
+	_notes.append("melee=%d (own=%d walker=%d) casts=%d heals=%d" % [
+		_a_melee + _a_walker_melee, _a_melee, _a_walker_melee, _a_casts, _a_heals])
+	_notes.append("max_control_ms=%d" % _a_max_control_ms)
+	var verdict := {
+		"reached_dungeon": reached_dungeon,
+		"two_dungeon_kinds": kinds_engaged >= 2,
+		"trap_honest": trap_honest,
+		"back_in_forest": back_in_forest,
+		"alive": GameState.hp > 0,
+	}
+	var failed_terms: Array[String] = []
+	for term: String in verdict:
+		if not bool(verdict[term]):
+			failed_terms.append(term)
+	_notes.append("criterion=%s" % DUNGEON_CRITERION)
+	_notes.append("terms=all_pass" if failed_terms.is_empty()
+			else "failed=%s" % ",".join(failed_terms))
+	_result = "PASS" if failed_terms.is_empty() else "FAIL"
+
+
+## BOT-013 — the fortress, and the King without a Crown. The longest road in the file
+## and the only one that ends in a boss: three zone lines down and over, the spine of
+## the fortress walked east the whole length of it, and the thing waiting at the end
+## of that spine.
+##
+## The verdict stops at the phase 2 transition on purpose. The spec's §19.6 asks a
+## boss scenario to prove the fight is survivable *through* the phase change, and the
+## term that measures that is the boss's own `phase_changed(2)` — which needs 204 of
+## the King's 600 HP spent first, on a hero who walked forty tiles to get there. What
+## happens after that is the King's business; the scenario's business is that the
+## hero was still standing, still swinging and still his own when the second phase
+## began.
+func _scenario_fortress() -> void:
+	_connect_combat_sensors()
+	_set_control_watch(true)
+	_a_melee = 0
+	_a_walker_melee = 0
+	_a_casts = 0
+	_a_heals = 0
+	_a_switches = 0
+	_a_last_target = -1
+	_a_broken = false
+	_a_pick_spell()
+	var deadline := Time.get_ticks_msec() + int(FORTRESS_TIMEOUT * 1000.0)
+	var forest_rally := _player_spawn()
+
+	await _arena_prep(deadline)
+	_wd_set_goal("fortress_arm")
+	await _arena_arm(deadline, forest_rally)
+
+	var reached_fortress := false
+	var fight := {"found": false, "phase2": false, "outcome": "not_reached"}
+	_wd_set_goal("fortress_gate")
+	if await _zone_travel("RuinsGate", "ruins", deadline, forest_rally):
+		var hall_rally := _named("ForestGate").global_position \
+				if _named("ForestGate") != null else _player_pos()
+		_wd_set_goal("fortress_descent")
+		if await _arena_open_ruins_door(deadline, hall_rally):
+			if await _zone_travel("DungeonGate", "dungeon", deadline, hall_rally):
+				var undercroft_rally := _rally_point()
+				_wd_set_goal("fortress_gate")
+				if await _zone_travel("FortressGate", "fortress", deadline, undercroft_rally):
+					reached_fortress = true
+					_wd_set_goal("king_fight")
+					fight = await _fortress_fight_king(deadline, _rally_point())
+	_set_control_watch(false)
+	bot_input.release_all()
+
+	var king_engaged := int(_m_dmg_by_type.get("king_without_crown", 0)) > 0
+	# `phase2` is the King's own signal, read off `phase_changed` — not an estimate
+	# from a health bar. The hero does not have to finish the fight: he has to still
+	# be in it, and swinging, when the second phase starts.
+	var phase2 := bool(fight.get("phase2", false))
+	var outcome := String(fight.get("outcome", ""))
+	var survived := GameState.hp > 0
+	# A death is legitimate when the world gave the hero back. It is a softlock when
+	# it did not, and the difference between the two is the only thing this term is
+	# about: dying to a boss is a story, dying and not coming back is a defect.
+	var legitimate := survived or outcome.ends_with("respawned")
+	_goal("reached_fortress", reached_fortress)
+	_goal("king_engaged", king_engaged)
+	_goal("phase2_seen", phase2)
+	_goal("survived_or_legitimate_loss", legitimate)
+	_notes.append("king dmg=%d phases=%s outcome=%s hp=%d" % [
+		int(_m_dmg_by_type.get("king_without_crown", 0)),
+		str(_king_phases), outcome, GameState.hp])
+	_notes.append("melee=%d (own=%d walker=%d) casts=%d heals=%d" % [
+		_a_melee + _a_walker_melee, _a_melee, _a_walker_melee, _a_casts, _a_heals])
+	_notes.append("kills=%s" % _fmt_counts(_m_kills_by_type))
+	_notes.append("max_control_ms=%d" % _a_max_control_ms)
+	var verdict := {
+		"reached_fortress": reached_fortress,
+		"king_engaged": king_engaged,
+		"phase2_seen": phase2,
+		"survived_or_legitimate_loss": legitimate,
+	}
+	var failed_terms: Array[String] = []
+	for term: String in verdict:
+		if not bool(verdict[term]):
+			failed_terms.append(term)
+	_notes.append("criterion=%s" % FORTRESS_CRITERION)
+	_notes.append("terms=all_pass" if failed_terms.is_empty()
+			else "failed=%s" % ",".join(failed_terms))
+	_result = "PASS" if failed_terms.is_empty() else "FAIL"
+
+
 # --- helpers -----------------------------------------------------------------
 
 func _player() -> Node2D:
@@ -2465,6 +3499,60 @@ func _standoff_point(center: Vector2) -> Vector2:
 	return center + Vector2(46, 0)
 
 
+## The nearest plate the bot can actually get a sight of, and the ground it has to
+## stand on to do it. Two things the undercroft refuses a fixed rule: it is
+## generated per seed, so a standoff ring at one radius may land in a pillar, and
+## a tile the grid calls ground is not necessarily ground the hero can be walked
+## to. So every candidate is filtered by the planner itself — a watch point with
+## no route to it is not a cautious vantage, it is the reason a run spends its
+## whole budget pushing its shoulder into a wall.
+func _reachable_standoff(trap_nodes: Array) -> Dictionary:
+	var here := _tile_of(_player_pos())
+	var best: Dictionary = {}
+	var best_cost := 1.0e9
+	for trap in trap_nodes:
+		if not (trap is Node2D):
+			continue
+		var trap_pos: Vector2 = (trap as Node2D).global_position
+		for ring in [46.0, 64.0, 84.0]:
+			for unit in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1),
+					Vector2(0.71, 0.71), Vector2(-0.71, 0.71), Vector2(0.71, -0.71),
+					Vector2(-0.71, -0.71)]:
+				var candidate: Vector2 = trap_pos + unit * ring
+				var tile := _tile_of(candidate)
+				if not _walkable(tile, true):
+					continue
+				var route := _find_path(here, tile, true, false)
+				if route.is_empty():
+					continue
+				var cost := route.size() * 2 + int(_player_pos().distance_to(candidate) / 32.0)
+				if cost < best_cost:
+					best_cost = cost
+					best = {"trap": trap, "point": candidate}
+	return best
+
+
+## The nearest tile the zone itself calls ground, scanning outward from `anchor`
+## in rings. A `ZoneExit` is placed by the world, and a world that could not find
+## floor at its anchor parks the node on the wall it wanted to be standing on:
+## `ZoneExit` still answers an interact from 26 px away, but no route exists to a
+## wall tile, so a bot that walks at the node's own position is walking at a
+## column. The bot aims at the closest real ground instead, which is where a
+## player would actually be standing to use the exit.
+func _nearest_walkable_tile(anchor: Vector2i, radius: int) -> Vector2i:
+	if _walkable(anchor, true):
+		return anchor
+	for ring in range(1, radius + 1):
+		for dy in range(-ring, ring + 1):
+			for dx in range(-ring, ring + 1):
+				if maxi(absi(dx), absi(dy)) != ring:
+					continue
+				var t := Vector2i(anchor.x + dx, anchor.y + dy)
+				if _walkable(t, true):
+					return t
+	return anchor
+
+
 ## Whether a tile is ground the player can stand on, read from the zone's own
 ## public `cell_at` — the same character grid the map panel draws and the test
 ## suite walks. A world without that API (or a tile off the grid) reads as
@@ -2485,7 +3573,8 @@ func _walkable(tile: Vector2i, ignore_bumped := false) -> bool:
 ## scanned array — the whole search is microseconds and changes no world state:
 ## the bot reads the map the way a player with the map panel reads it, then
 ## still walks every step through the real input path.
-func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false) -> Array[Vector2i]:
+func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false,
+		avoid_threats := true) -> Array[Vector2i]:
 	var path: Array[Vector2i] = []
 	var world := get_parent().get_node_or_null("World")
 	if world == null or not world.has_method("cell_at"):
@@ -2502,6 +3591,7 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false) 
 		return path
 	var open_list: Array[Vector2i] = [from_tile]
 	var came_from: Dictionary = {}
+	var closed: Dictionary = {}
 	var cost: Dictionary = {from_tile: 0}
 	var steps := [
 		Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -2515,12 +3605,18 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false) 
 	# hard — a road through camp is still walkable, just more expensive than
 	# the treeline around it.
 	var threat_points: Array = []
-	for node in get_tree().get_nodes_in_group("enemies"):
-		if node is Node2D and not node.is_queued_for_deletion():
-			threat_points.append([(node as Node2D).global_position, 1])
-	for node in get_tree().get_nodes_in_group("boss"):
-		if node is Node2D and not node.is_queued_for_deletion():
-			threat_points.append([(node as Node2D).global_position, 6])
+	# `avoid_threats` is off for a long leg through a zone the hero intends to cross
+	# end to end: the penalty is computed from where enemies are standing *right
+	# now*, and in a crowded undercroft they walk toward the hero while he walks, so
+	# every re-plan prices a different route and the lane flips between two of them.
+	# A player crossing a monster hall does not re-decide his road every ten steps.
+	if avoid_threats:
+		for node in get_tree().get_nodes_in_group("enemies"):
+			if node is Node2D and not node.is_queued_for_deletion():
+				threat_points.append([(node as Node2D).global_position, 1])
+		for node in get_tree().get_nodes_in_group("boss"):
+			if node is Node2D and not node.is_queued_for_deletion():
+				threat_points.append([(node as Node2D).global_position, 6])
 	var threat_penalty := func(t: Vector2i) -> int:
 		if threat_points.is_empty():
 			return 0
@@ -2536,20 +3632,34 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false) 
 		return penalty
 	var f_score := {from_tile: heuristic.call(from_tile)}
 	var guard := 0
-	while not open_list.is_empty() and guard < 4096:
+	# Two things a plain open-list scan needs and did not have. The closed set is
+	# what makes each tile expand once instead of once per improvement — without
+	# it the same corridor tile is popped again and again, and the budget below
+	# burns on re-work rather than on ground. The budget is derived from the grid
+	# instead of fixed: a ceiling that fits the forest's open clearings does not
+	# fit a lane that has to wind the whole width of the undercroft to reach the
+	# stair, and running out of budget returns an empty path. An empty path is not
+	# the world saying «there is no route»; it is the search giving up, and the
+	# walker reads it as a wall — which is how a run spent eight minutes walking
+	# into the side of a room it could have left.
+	var search_budget := maxi(4096, size.x * size.y * 4)
+	while not open_list.is_empty() and guard < search_budget:
 		guard += 1
 		var best_index := 0
 		for i in range(1, open_list.size()):
 			if int(f_score[open_list[i]]) < int(f_score[open_list[best_index]]):
 				best_index = i
 		var current: Vector2i = open_list[best_index]
+		open_list.remove_at(best_index)
+		if closed.has(current):
+			continue
+		closed[current] = true
 		if current == to_tile:
 			var node := current
 			while came_from.has(node):
 				path.push_front(node)
 				node = came_from[node]
 			return path
-		open_list.remove_at(best_index)
 		for step in steps:
 			var next_tile: Vector2i = current + step
 			if not in_bounds.call(next_tile) or not _walkable(next_tile, ignore_bumped):
@@ -2577,16 +3687,16 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false) 
 ## sword instead of being walked past into a fight later. If the grid cannot
 ## answer at all, the leg degrades to the old straight-line steering with the
 ## obstacle slide, so a world without `cell_at` is still walkable.
-func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
+func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats := true) -> bool:
 	var deadline := Time.get_ticks_msec() + int(timeout * 1000.0)
 	var origin := _tile_of(_player_pos())
 	var dest := _tile_of(target)
-	var path := _find_path(origin, dest)
+	var path := _find_path(origin, dest, false, avoid_threats)
 	if path.is_empty():
 		# Bump memory from an earlier leg can wall off the only corridor; a
 		# second read that ignores it distinguishes "the world has no route"
 		# from "the bot already bruised a corner on the way".
-		path = _find_path(origin, dest, true)
+		path = _find_path(origin, dest, true, avoid_threats)
 		# And when it is the second read that finds the route, the memory was
 		# wrong rather than merely cautious. Carrying it down the rest of the run
 		# is the bot forgetting the map it is walking on, so it is dropped here
@@ -2601,6 +3711,15 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 	var last_stall_pos := Vector2(-1.0e6, -1.0e6)
 	var straight_only := path.is_empty()
 	var last_pos := _player_pos()
+	# A lane fought at arm's length for the whole budget is the one way a walk can
+	# spend ten minutes without moving an inch: the swing branch below never
+	# presses a movement key, so an opponent that is neither dying nor stepping
+	# back holds the leg in place while the stuck counter climbs, resets on the
+	# repath, and climbs again. The counter is per opponent on purpose — a lane
+	# with three wolves should still fight all three.
+	var swing_target: Node = null
+	var swings := 0
+	var dodged: Dictionary = {}
 	while Time.get_ticks_msec() < deadline:
 		if GameState.hp <= 0:
 			bot_input.release_all()
@@ -2628,9 +3747,19 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 				leg += 1
 				continue
 		var enemy := _nearest_enemy()
-		if enemy != null and not enemy.is_in_group("boss"):
+		if enemy != null and not enemy.is_in_group("boss") \
+				and not dodged.has(enemy.get_instance_id()):
 			var edist := pos.distance_to(enemy.global_position)
 			if edist <= 22.0:
+				swings = swings + 1 if swing_target == enemy else 1
+				swing_target = enemy
+				if swings > 8:
+					# Eight swings that neither killed it nor moved it: the bot is
+					# not losing this fight, it is being held. Step around it and
+					# let the lane decide whether it was worth the trip.
+					dodged[enemy.get_instance_id()] = true
+					swings = 0
+					continue
 				bot_input.set_aim(enemy.global_position)
 				await _tap(&"attack")
 				# The walker's own swing, counted so an arena leg that clears a
@@ -2676,6 +3805,22 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 			best_waypoint_dist = INF
 			last_stall_pos = pos
 			repath_cooldown = 40
+			# A panel left open reads to this loop as terrain. The hero stops
+			# taking input entirely while a modal owns the keyboard, so the
+			# position repeats to the last decimal, every repath finds a route,
+			# and nothing moves: the trace of one such run is a hero standing at
+			# the same float for nine minutes in the middle of an open corridor.
+			# Esc is the only key tried, and it is tried twice so that a first tap
+			# which merely opened the pause menu is undone by the second. `interact`
+			# is never pressed here: at a till it spends the player's money, and a
+			# debug bot has no business doing that to get its own footing back.
+			if GameState.ui_blocking:
+				await _tap(&"pause")
+				await _wait(0.2)
+				if GameState.ui_blocking:
+					await _tap(&"pause")
+					await _wait(0.2)
+				_notes.append("leg_ui_stuck=%s" % str(GameState.ui_blocking))
 			# Learning a wall is reserved for a spot that refuses the bot
 			# twice — sliding a corner or orbiting a waypoint is steering
 			# noise, and a memory that fills with fake walls is the bot
@@ -2685,9 +3830,9 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 			if repeat_stall and pos.distance_to(target) > 24.0 \
 					and _bumped.size() < 60:
 				_learn_bump(pos, waypoint, dest)
-			var repath := _find_path(_tile_of(pos), _tile_of(target))
+			var repath := _find_path(_tile_of(pos), _tile_of(target), false, avoid_threats)
 			if repath.is_empty():
-				repath = _find_path(_tile_of(pos), _tile_of(target), true)
+				repath = _find_path(_tile_of(pos), _tile_of(target), true, avoid_threats)
 				if not repath.is_empty():
 					_bumped.clear()
 			if repath.is_empty():
@@ -2701,7 +3846,7 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 			# Sliding along a tree line counts as progress, so the stuck timer
 			# never fires; ask the grid again on a slow tick in case a route
 			# exists that the straight-line steering cannot see around.
-			var retry := _find_path(_tile_of(pos), _tile_of(target), true)
+			var retry := _find_path(_tile_of(pos), _tile_of(target), true, avoid_threats)
 			if not retry.is_empty():
 				path = retry
 				leg = 0
@@ -2709,8 +3854,9 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 				repath_cooldown = 40
 		if OS.get_environment("PEPEL_BOT_DEBUG") != "" \
 				and Engine.get_physics_frames() % 120 == 0:
-			print("[travel] pos=%s leg=%d/%d stuck=%d straight=%s" % [
-				str(pos), leg, path.size(), stuck, str(straight_only)])
+			print("[travel] pos=%s leg=%d/%d stuck=%d straight=%s ui=%s paused=%s" % [
+				str(pos), leg, path.size(), stuck, str(straight_only),
+				str(GameState.ui_blocking), str(get_tree().paused)])
 		await _move_step(waypoint)
 	bot_input.release_all()
 	return false
@@ -3002,6 +4148,7 @@ func _tap(action: StringName) -> void:
 	bot_input.hold(action, false)
 	await get_tree().physics_frame
 	Telemetry.decision({"action": String(action), "reason": "scenario_" + scenario})
+	_wd_note_action(String(action))
 
 
 func _wait(seconds: float) -> void:
