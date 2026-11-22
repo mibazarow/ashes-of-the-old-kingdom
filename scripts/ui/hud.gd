@@ -1517,6 +1517,15 @@ func close_dialogue() -> void:
 	EventBus.dialogue_closed.emit()
 
 
+## The conversation currently on screen, or null when none is open. A read-only
+## view in the same shape as `craft_row_texts()`: a test that drives an NPC's
+## interaction needs the runner the NPC actually handed over, because the effects
+## of the chosen option land on the live GameState/QuestManager through that
+## object. Nothing here renders or advances anything — the caller only reads.
+func dialogue_runner() -> DialogueRunner:
+	return _dialogue_runner
+
+
 ## Opens a data-driven conversation handed over by an NPC (spec §12.2). Mirrors
 ## open_shop's contract: the caller owns the runner, the HUD only renders and
 ## drives it, and every modal it could visually overlap is closed first. The

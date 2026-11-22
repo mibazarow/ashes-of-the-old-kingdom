@@ -3596,7 +3596,8 @@ func _test_bot_extended() -> void:
 		var joined := "\n".join(synthetic)
 		for key: String in required:
 			_check(joined.contains("\n%s: " % key) or joined.begins_with("%s: " % key),
-					"the summary builder emits %s even from a bare synthetic run" % key)
+					"the summary builder emits the %s field even from a bare synthetic run"
+							% key.to_lower())
 		_check(joined.contains("SCENARIO: BOT-099") and joined.contains("PROFILE: cautious")
 				and joined.contains("ZONES: Ruins > Dungeon") and joined.contains("GOALS: 3/4"),
 				"the summary builder passes the caller's own verdict fields through")
@@ -3609,7 +3610,7 @@ func _test_bot_extended() -> void:
 		_check(counted_text.contains("STUCK: %d" % int(telemetry_node.get("stuck_count"))),
 				"the STUCK field is read off telemetry's own counter")
 		_check(counted_text.contains("ERRORS: %d" % int(telemetry_node.get("error_count"))),
-				"the ERRORS field is read off the engine-error counter")
+				"the errors field is read off the engine-error counter")
 		_check(counted_text.contains("FIRST ANOMALY: -")
 				or counted_text.contains("FIRST ANOMALY: 0"),
 				"FIRST ANOMALY is always a line, with - when nothing was anomalous")
@@ -7317,9 +7318,207 @@ func _test_dialogues() -> void:
 	sk.skip_remaining()
 	_check(sk.is_revealed(), "skip_remaining reveals the whole current line")
 
+	# --- every quest giver speaks, in both contexts ---------------------------
+	# The critic's finding was that six of the nine named NPCs had no conversation
+	# at all. `Villager.interact` and `Npc.interact` both ask the runner for
+	# `<speaker_id>_intro` and `<speaker_id>_after_hunt`, and with neither in the
+	# table every conversation fell back to one quest toast, so the named villagers
+	# never said a line of their own. These are the speakers the quest table names
+	# as givers, pinned against the runner's naming convention rather than a list
+	# kept by hand next to the data.
+	for giver_id: String in ["edrik", "mila", "seris", "alvena", "nela", "oren"]:
+		_check(DialogueDB.has_dialogue("%s_intro" % giver_id),
+				"%s has an _intro conversation" % giver_id)
+		_check(DialogueDB.has_dialogue("%s_after_hunt" % giver_id),
+				"%s has an _after_hunt conversation" % giver_id)
+	# The two NPCs that hand over a panel instead of a quest still have to speak
+	# before the panel opens, so they own an intro even though they own no quest.
+	_check(DialogueDB.has_dialogue("yorek_intro"), "the merchant has an _intro conversation")
+	_check(DialogueDB.has_dialogue("bran_intro"), "the smith has an _intro conversation")
+
+	# --- the shape of every entry in the table --------------------------------
+	# Held against the whole file rather than only the new entries: a node with no
+	# text renders as a blank panel the player cannot read past, and an option with
+	# no effect and no `cosmetic` marker is exactly the unlabelled dead choice that
+	# spec §12.2 forbids. A condition reading a flag no effect ever writes is the
+	# same class of defect one level up — it locks a conversation out permanently.
+	var known_quest_ids := {}
+	var quests_raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
+	for known_id: Variant in (quests_raw as Dictionary).get("quests", {}).keys():
+		known_quest_ids[String(known_id)] = true
+	var shape_offenders: Array[String] = []
+	var unlabelled_options: Array[String] = []
+	var bad_refs: Array[String] = []
+	var flags_read := {}
+	var flags_written := {}
+	for did: String in DialogueDB.dialogue_ids():
+		var entry := DialogueDB.get_dialogue(did)
+		var nodes: Variant = entry.get("nodes", {})
+		if not (nodes is Dictionary):
+			shape_offenders.append("%s has no node table" % did)
+			continue
+		var node_table := nodes as Dictionary
+		if node_table.size() < 1 or node_table.size() > 4:
+			shape_offenders.append("%s has %d nodes" % [did, node_table.size()])
+			continue
+		for nid: Variant in node_table.keys():
+			var block: Variant = node_table.get(nid, {})
+			if not (block is Dictionary):
+				shape_offenders.append("%s:%s is not an object" % [did, String(nid)])
+				continue
+			var node_block := block as Dictionary
+			var site := "%s:%s" % [did, String(nid)]
+			if String(node_block.get("text", "")).strip_edges() == "":
+				shape_offenders.append("%s has no text" % site)
+			var options: Variant = node_block.get("options", [])
+			if options is Array:
+				for raw_opt: Variant in (options as Array):
+					if not (raw_opt is Dictionary):
+						shape_offenders.append("%s option is not an object" % site)
+						continue
+					var opt := raw_opt as Dictionary
+					if String(opt.get("text", "")).strip_edges() == "":
+						shape_offenders.append("%s option has no label" % site)
+					if opt.get("effects", null) == null and opt.get("cosmetic", false) != true:
+						unlabelled_options.append(site)
+					_collect_dialogue_effects(opt.get("effects", null), known_quest_ids,
+							flags_written, bad_refs, "%s option" % site)
+			_collect_dialogue_effects(node_block.get("effects", null), known_quest_ids,
+					flags_written, bad_refs, "%s node" % site)
+		_collect_dialogue_conditions(entry.get("condition", null), known_quest_ids,
+				flags_read, bad_refs, did)
+	_check(shape_offenders.is_empty(),
+			"every dialogue has 1-4 nodes and every node and option carries text (%s)"
+			% ", ".join(shape_offenders))
+	_check(unlabelled_options.is_empty(),
+			"every option without effects is marked cosmetic, spec §12.2 (%s)"
+			% ", ".join(unlabelled_options))
+	_check(bad_refs.is_empty(),
+			"every dialogue quest reference names a quest in data/quests.json (%s)"
+			% ", ".join(bad_refs))
+	var orphan_flags: Array[String] = []
+	for read_flag: Variant in flags_read.keys():
+		if not flags_written.has(String(read_flag)):
+			orphan_flags.append(String(read_flag))
+	_check(orphan_flags.is_empty(),
+			"every flag a condition reads is written by some effect in the table (%s)"
+			% ", ".join(orphan_flags))
+
+	# --- Mila's conversation actually leads to her quest ----------------------
+	# Her lines existed before this change but never led anywhere, so the herbwife
+	# could not hand out the quest the quest table names her for. The offer is
+	# traced through the node graph rather than read off a fixed node id, so
+	# rewording or re-ordering her lines cannot quietly drop the errand.
+	_check(_find_dialogue_quest_offer("mila_intro", "q02_gather_fangs"),
+			"mila_intro leads to an option that starts q02_gather_fangs")
+	_check(_find_dialogue_quest_offer("mila_after_hunt", "q03_clear_boars"),
+			"mila_after_hunt leads to the option that starts q03_clear_boars")
+	# The four new villagers offer their own quest the same way, from their intro.
+	for offer: Array in [["seris_intro", "q09_the_mill"], ["alvena_intro", "q10_armor_fit"],
+			["nela_intro", "q11_light_the_way"], ["oren_intro", "q12_officers_seal"]]:
+		_check(_find_dialogue_quest_offer(String(offer[0]), String(offer[1])),
+				"%s leads to the option that starts %s" % [String(offer[0]), String(offer[1])])
+
 	gs.reset()
 	qm.reset()
 	completed["dialogues"] = true
+
+
+## Walks one dialogue `effects` value — a single effect object or an array of them,
+## which is both shapes the runner accepts — and records the quest ids it names and
+## the flags it writes. `where` labels the site so a bad reference points at the
+## dialogue, node and kind that carries it rather than at the file as a whole.
+func _collect_dialogue_effects(raw: Variant, known_quest_ids: Dictionary, written: Dictionary,
+		bad: Array[String], where: String) -> void:
+	var items: Array = []
+	if raw is Array:
+		items = raw as Array
+	elif raw is Dictionary:
+		items = [raw]
+	for item: Variant in items:
+		if not (item is Dictionary):
+			continue
+		var effect := item as Dictionary
+		if effect.has("quest"):
+			var quest_id := String(effect["quest"])
+			if not known_quest_ids.has(quest_id):
+				bad.append("%s->%s" % [where, quest_id])
+		if effect.has("flag"):
+			var flag_name := String(effect["flag"])
+			if flag_name == "":
+				bad.append("%s->empty flag" % where)
+			else:
+				written[flag_name] = true
+
+
+## The same walk over a dialogue-level `condition`, collecting the quest ids and the
+## flags it READS. Conditions are the more dangerous half: a `not_flag` naming a flag
+## no effect ever sets reads as false forever, and the conversation it gates can then
+## never be opened by anyone — with no error anywhere, because a refused condition is
+## the runner's normal, correct answer.
+func _collect_dialogue_conditions(raw: Variant, known_quest_ids: Dictionary, read: Dictionary,
+		bad: Array[String], where: String) -> void:
+	if raw is Array:
+		for item: Variant in (raw as Array):
+			_collect_dialogue_conditions(item, known_quest_ids, read, bad, where)
+		return
+	if not (raw is Dictionary):
+		return
+	var cond := raw as Dictionary
+	for key: String in ["quest_done", "quest_active"]:
+		if cond.has(key):
+			var quest_id := String(cond[key])
+			if not known_quest_ids.has(quest_id):
+				bad.append("%s condition->%s" % [where, quest_id])
+	for key: String in ["flag", "not_flag"]:
+		if cond.has(key):
+			var flag_name := String(cond[key])
+			if flag_name == "":
+				bad.append("%s condition->empty flag" % where)
+			else:
+				read[flag_name] = true
+
+
+## True when walking `dialogue_id` from its start node reaches an option whose
+## effects start `quest_id`. Plain lines are followed through `next`; a choice node
+## is judged by its options. The walk is bounded so a malformed cycle of `next`
+## pointers spends a fixed number of steps rather than spinning the suite.
+func _find_dialogue_quest_offer(dialogue_id: String, quest_id: String) -> bool:
+	var entry := DialogueDB.get_dialogue(dialogue_id)
+	if entry.is_empty():
+		return false
+	var node_id := String(entry.get("start", ""))
+	for _guard in range(16):
+		var node := DialogueDB.node(dialogue_id, node_id)
+		if node.is_empty():
+			return false
+		var options: Variant = node.get("options", [])
+		if options is Array:
+			for raw_opt: Variant in (options as Array):
+				if raw_opt is Dictionary \
+						and _effect_starts_quest((raw_opt as Dictionary).get("effects", null), quest_id):
+					return true
+		node_id = String(node.get("next", ""))
+		if node_id == "":
+			return false
+	return false
+
+
+## One effect value, judged narrowly: it counts only when it names this quest and
+## asks to start it, so a `turn_in` on the same quest is not mistaken for the offer.
+func _effect_starts_quest(raw: Variant, quest_id: String) -> bool:
+	var items: Array = []
+	if raw is Array:
+		items = raw as Array
+	elif raw is Dictionary:
+		items = [raw]
+	for item: Variant in items:
+		if item is Dictionary:
+			var effect := item as Dictionary
+			if String(effect.get("quest", "")) == quest_id \
+					and String(effect.get("action", "start")) == "start":
+				return true
+	return false
 
 
 ## Village safe zone + the herbwife's two new quests (roadmap stage D). Data half:
@@ -11887,6 +12086,32 @@ func _test_fortress() -> void:
 	completed["fortress"] = true
 
 
+## Walks the conversation an NPC just handed to the HUD down to its first option
+## and takes it, the way a player stepping through the lines and pressing E does.
+## Returns false when no conversation is open at all — which is exactly the signal
+## that the NPC fell back to its legacy one-line quest toast instead of speaking.
+## The panel is closed on the way out either way, so the caller's next assertion
+## reads quest state with a free keyboard rather than behind a modal.
+func _take_dialogue_offer(hud: Node) -> bool:
+	if hud == null or not hud.has_method("dialogue_runner"):
+		return false
+	var runner: DialogueRunner = hud.call("dialogue_runner") as DialogueRunner
+	if runner == null:
+		return false
+	for _guard in range(8):
+		if runner.is_finished() or not runner.current_options().is_empty():
+			break
+		if runner.advance() == "":
+			break
+	var chose := false
+	if not runner.is_finished() and not runner.current_options().is_empty():
+		var picked: Dictionary = runner.choose(0)
+		chose = bool(picked.get("ok", false))
+	if hud.has_method("close_dialogue"):
+		hud.call("close_dialogue")
+	return chose
+
+
 ## Spec §12/§13: the four new named NPCs (Серис and Альвена in the village, Нела in
 ## the undercroft, Орен in the fortress) and the four quests they give (q09..q12).
 ## The group builds the real worlds, finds each newcomer by name in the
@@ -11896,9 +12121,11 @@ func _test_fortress() -> void:
 ## never reaches it), then drives each new quest end to end through the NPC's own
 ## interaction — start, the right objective type, and a turn-in that pays exactly
 ## once — and finishes with the quest table (twelve quests, every giver a real NPC
-## or the quest stone) and a save round-trip of a new quest. The newcomers use the
-## legacy quest path (no `data/dialogue.json` entries), so `Villager.interact`
-## starts/turns in the quest directly rather than through the dialogue runner.
+## or the quest stone) and a save round-trip of a new quest. The newcomers take
+## their quest through the conversation in `data/dialogue.json` (spec §12.2), so the
+## start leg below walks the runner's accepting option; the turn-in still goes
+## through the legacy path in `Villager.interact`, because every `_after_hunt` entry
+## is gated on `quest_done` and therefore refuses while the quest is only `ready`.
 ## GameState/QuestManager are reset at both ends and the run is left in the forest.
 func _test_new_npc_and_quests() -> void:
 	gs.reset()
@@ -12005,8 +12232,7 @@ func _test_new_npc_and_quests() -> void:
 	_satisfy_gates("q09_the_mill")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 starts available")
 	seris.call("interact", player)
-	if hud != null and hud.has_method("close_dialogue"):
-		hud.call("close_dialogue")
+	_check(_take_dialogue_offer(hud), "Seris offers her errand as a conversation, not a toast")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "talking to Seris starts q09")
 	gs.add_item("wolf_fang", 2)
 	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 still active at 2 of 3 fangs")
@@ -12037,8 +12263,7 @@ func _test_new_npc_and_quests() -> void:
 	qm.reset()
 	_satisfy_gates("q10_armor_fit")
 	alvena.call("interact", player)
-	if hud != null and hud.has_method("close_dialogue"):
-		hud.call("close_dialogue")
+	_check(_take_dialogue_offer(hud), "Alvena offers the fitting as a conversation, not a toast")
 	_check(qm.state_of("q10_armor_fit") == qm.STATE_ACTIVE, "talking to Alvena starts q10")
 	gs.add_item("bone_shard", 2)
 	_check(qm.state_of("q10_armor_fit") == qm.STATE_READY, "q10 ready at 2 bone_shard")
@@ -12122,8 +12347,7 @@ func _test_new_npc_and_quests() -> void:
 		_satisfy_gates("q11_light_the_way")
 		var nplayer := undercroft.get_node_or_null("Player") as Node2D
 		nela.call("interact", nplayer)
-		if hud != null and hud.has_method("close_dialogue"):
-			hud.call("close_dialogue")
+		_check(_take_dialogue_offer(hud), "Nela offers the stair as a conversation, not a toast")
 		_check(qm.state_of("q11_light_the_way") == qm.STATE_ACTIVE, "talking to Nela starts q11")
 		bus.enemy_died.emit(&"c1", &"bone_crawler", Vector2.ZERO)
 		bus.enemy_died.emit(&"c2", &"bone_crawler", Vector2.ZERO)
@@ -12191,8 +12415,7 @@ func _test_new_npc_and_quests() -> void:
 		_satisfy_gates("q12_officers_seal")
 		var fplayer := fortress.get_node_or_null("Player") as Node2D
 		oren.call("interact", fplayer)
-		if hud != null and hud.has_method("close_dialogue"):
-			hud.call("close_dialogue")
+		_check(_take_dialogue_offer(hud), "Oren offers the archive as a conversation, not a toast")
 		_check(qm.state_of("q12_officers_seal") == qm.STATE_ACTIVE, "talking to Oren starts q12")
 		bus.enemy_died.emit(&"k1", &"ash_knight", Vector2.ZERO)
 		_check(qm.state_of("q12_officers_seal") == qm.STATE_READY, "q12 ready after the ash knight")
