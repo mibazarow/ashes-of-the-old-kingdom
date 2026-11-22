@@ -87,6 +87,32 @@ checks: 1832  failures: 0
 120` → 0 строк `ERROR` / `SCRIPT ERROR`; боты `BOT-001`, `BOT-002`, `BOT-008`,
 `BOT-009`, `BOT-010`, `BOT-011` → `PASS`.
 
+### 2.3. 2026-11-21 — полный прогон
+
+Числа §2, §2.1 и §2.2 — история прогонов 2026-11-18, 2026-11-19 и 2026-11-20;
+они не переписываются. Ниже — текущий результат, 65 тестовых групп вместо 53:
+добавлены черты поведения врагов и реестр из 18 механически разных типов
+(`enemy_behaviour_traits`, `enemy_roster`), три промежуточных босса и финальный
+Король Без Венца с тремя концовками (`three_bosses`, `king_and_endings`), зоны
+подземелья и крепости (`dungeon`, `fortress`), главное меню и экран навыков
+(`main_menu`, `skills_panel`), четыре новых NPC и квесты q09–q12
+(`new_npc_quests`), сквозная нить Паломника (`pilgrim`) и музыка с эмбиентом
+(`audio_music`).
+
+```
+$ godot --headless --path . --script res://tests/test_core.gd
+  PASS  every test group ran to completion (got 65/65)
+
+checks: 2919  failures: 0
+```
+
+Сопровождающие прогоны того же дня: `godot --headless --path . --quit-after 120`
+→ 0 строк `ERROR` / `SCRIPT ERROR`. Все одиннадцать ботов проходят: `BOT-001`,
+`BOT-002`, `BOT-003`, `BOT-004`, `BOT-005`, `BOT-006`, `BOT-007`, `BOT-008`,
+`BOT-009`, `BOT-010`, `BOT-011` → `PASS`. Семь профилей (`cautious`, `normal`,
+`aggressive`, `explorer`, `collector`, `novice`, `master`) на `BOT-002` дают
+`PASS`.
+
 ## 3. Отладочный бот
 
 | Сценарий | Что проверяет | Результат |
