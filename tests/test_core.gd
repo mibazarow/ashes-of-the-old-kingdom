@@ -3256,8 +3256,13 @@ func _test_bot_extended() -> void:
 
 	# --- the input edge: one press is one press ---------------------------------
 	var bot_input_src := source.substr(source.find("class BotInput"))
-	_check(bot_input_src.contains("_just_served"),
-		"BotInput serves each press edge once per physics tick (one tap cannot buy three potions)")
+	bot_input_src = bot_input_src.substr(0, bot_input_src.find("\n## Behaviour profiles"))
+	# The press is armed for the step after the one the bot observed (so delivery
+	# lands on one unambiguous step regardless of where in the frame the coroutine
+	# resumed) and is disarmed the instant it is handed out (so a tap polled several
+	# times within that step still fires once — one tap cannot buy three potions).
+	_check(bot_input_src.contains("_just[key] = -1") and bot_input_src.contains("get_physics_frames() + 1"),
+		"BotInput arms each press for the next step and serves it once (one tap cannot buy three potions)")
 	_check(_extract_gdscript_func(source, "_finish").contains("clear_override"),
 		"the bot hands the real input back when the run ends")
 
@@ -3398,6 +3403,22 @@ func _test_bot_extended() -> void:
 		_check(String(meta.get("seed_source", "")) == String(telemetry.get("seed_source")),
 			"the recorded seed source matches the live one (got '%s' vs '%s')"
 				% [str(meta.get("seed_source", "")), String(telemetry.get("seed_source"))])
+		# The number written into run_meta has to be the number the operator asked
+		# for, not merely a number the process happens to carry. Parse `--seed=` the
+		# same way `Telemetry._apply_seed_from_cmdline` does and require the record
+		# to agree with it. When the suite itself was not launched with `--seed=`
+		# there is nothing to disagree with, so the check is honest rather than a
+		# tautology: it fails the moment a named seed stops reaching the record.
+		var parsed_seed := 0
+		var has_parsed_seed := false
+		for argument: String in OS.get_cmdline_user_args() + OS.get_cmdline_args():
+			if argument.begins_with("--seed="):
+				parsed_seed = int(argument.trim_prefix("--seed="))
+				has_parsed_seed = true
+		_check(not has_parsed_seed or (int(meta.get("seed", -1)) == parsed_seed
+				and int(telemetry.get("seed_value")) == parsed_seed),
+			"the run_meta seed equals the --seed the command line named (parsed %d, meta %s, live %s)"
+				% [parsed_seed, str(meta.get("seed", null)), str(telemetry.get("seed_value"))])
 	# 2. the world seed is read off the zone that generates procedurally, not copied
 	#    into a second constant that would silently disagree after an edit;
 	var forest_script := load("res://scripts/world/forest.gd") as GDScript
@@ -3450,8 +3471,19 @@ func _test_bot_extended() -> void:
 		"the kill scenario is bounded by physics frames, so its result depends only on the seed")
 	_check(not kill_block.contains("Time.get_ticks_msec() < deadline"),
 		"and no longer by how busy the machine was")
-	_check(_extract_gdscript_func(source, "_silence_audio_rng").contains("_pools"),
-		"a bot run parks the audio pool, whose pitch rolls share the simulation's RNG")
+	_check(_extract_gdscript_func(source, "_silence_audio_rng").contains("park_for_bot"),
+		"a bot run parks the audio layer, whose pitch rolls share the simulation's RNG")
+	# The parking has to release the voices, not just drop the dictionary: the old
+	# `_pools.clear()` orphaned the still-playing music bed, so `_exit_tree` iterated
+	# an empty dict and the process exited with leaked audio objects and a stream
+	# "still in use". Pinning the stop + stream-null in the manager's own source is
+	# what keeps that regression from coming back.
+	var audio_src := _read_script_source("res://scripts/core/audio_manager.gd")
+	var park_src := _extract_gdscript_func(audio_src, "park_for_bot")
+	_check(park_src.contains("player.stop()") and park_src.contains("player.stream = null"),
+		"park_for_bot stops every pool voice and drops its stream before clearing the pools")
+	_check(park_src.contains("_parked"),
+		"park_for_bot raises the parked flag so the playback layer loads nothing during the run")
 
 	scene.queue_free()
 	await process_frame
@@ -7355,6 +7387,36 @@ func _test_audio() -> void:
 	await _test_audio_playback(am)
 	_test_audio_volume(am)
 	_test_audio_settings(am)
+
+	# Defect A regression: parking the audio layer for a bot run must release the
+	# live voices, not just drop the pool dictionary. The old `_pools.clear()`
+	# orphaned the still-playing music bed, so `_exit_tree` iterated an empty dict,
+	# never released the server-side playbacks, and the process exited with leaked
+	# AudioStreamPlaybackWAV instances plus a stream "still in use". Put a live voice
+	# on every bus, capture the player nodes (parking `queue_free`s them, which is
+	# deferred, so a node captured beforehand stays readable this frame), park, and
+	# require each captured voice to be stopped with a null stream — the exact state
+	# that keeps the shutdown clean. Then unpark so the rest of the suite gets a
+	# working manager back.
+	var parked_voices: Array = []
+	for child in am.get_children():
+		if child is AudioStreamPlayer:
+			parked_voices.append(child)
+	am.call("play_sfx", "hit")
+	am.call("play_music", "music_forest", 0.0)
+	am.call("play_ambience", "ambience_forest")
+	am.call("park_for_bot")
+	var all_released := not parked_voices.is_empty()
+	for voice in parked_voices:
+		if voice.stream != null or voice.playing:
+			all_released = false
+	_check(all_released,
+		"park_for_bot leaves every voice stopped with a null stream (%d voices captured)"
+			% parked_voices.size())
+	am.call("unpark_for_bot")
+	_apply_audio_defaults(am)
+	_check(bool(am.call("play_sfx", "hit")),
+		"the manager plays again after unpark_for_bot rebuilds the pools")
 
 	# No residue: silence, default volumes, no settings file.
 	_audio_stop_all(am)

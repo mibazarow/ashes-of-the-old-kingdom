@@ -11,14 +11,28 @@ extends Node
 
 const QUEST_ID := "q01_ash_wolves"
 const SCENARIO_TIMEOUT := 75.0
+## Absolute physics frame every scenario parks to before it acts, so a run begins
+## on the same simulation step regardless of how many frames the world's deferred
+## load took. Comfortably past world build (the forest spawns its cast within the
+## first few frames) yet early enough to leave the full budget to the scenario.
+const RUN_START_FRAME := 120
 
 
 class BotInput:
 	extends RefCounted
 
 	var _pressed: Dictionary = {}
+	## The physics frame a press edge is armed to be delivered on, or -1 when no
+	## edge is pending. The press is armed for the step *after* the one the bot's
+	## coroutine observed (see `hold`), because that coroutine resumes in the idle
+	## phase between steps and the frame it reads is sometimes the step then running
+	## and sometimes the one about to run. Stamping the previous design's own frame
+	## made the edge expire unread whenever the stamp and the player's
+	## `_physics_process` poll landed a step apart, so one seed silently fired a
+	## different number of attacks launch to launch. Targeting the next step pins
+	## delivery to a single unambiguous step regardless of where in the frame the
+	## resume happened.
 	var _just: Dictionary = {}
-	var _just_served: Dictionary = {}
 	var _aim: Vector2 = Vector2.RIGHT
 
 	func is_action_pressed(action: StringName) -> bool:
@@ -26,17 +40,21 @@ class BotInput:
 
 	func is_action_just_pressed(action: StringName) -> bool:
 		var key := String(action)
-		var frame := Engine.get_physics_frames()
-		if int(_just.get(key, -1)) != frame:
+		# The bot arms a press for the step *after* the one it observed, because its
+		# coroutine resumes in the idle phase between steps and the frame it reads is
+		# sometimes the step then running and sometimes the one about to run. Targeting
+		# the next step makes the delivery land on a single, unambiguous step no matter
+		# where in the frame the resume happened, instead of the press expiring unread
+		# when the stamp and the player's `_physics_process` poll landed a step apart —
+		# the drop that made one seed fire a different number of attacks launch to launch.
+		if int(_just.get(key, -1)) != Engine.get_physics_frames():
 			return false
-		# One press is one press. The engine's own `just_pressed` is true for
-		# the whole physics tick, and a panel polled by `_process` can catch
-		# that tick two, three times between two ticks — a human holding E in
-		# a shop buys one potion per click, and the bot's tap must buy one
-		# potion per tap. The edge is therefore served once per tick.
-		if int(_just_served.get(key, -1)) == frame:
-			return false
-		_just_served[key] = frame
+		# One press is one press. The engine's own `just_pressed` is true for the
+		# whole physics tick, and a panel polled by `_process` can catch that tick
+		# two, three times between two ticks — a human holding E in a shop buys one
+		# potion per click, and the bot's tap must buy one potion per tap. The edge
+		# is therefore disarmed the instant it is handed out.
+		_just[key] = -1
 		return true
 
 	func get_vector(nx: StringName, px: StringName, ny: StringName, py: StringName) -> Vector2:
@@ -62,7 +80,7 @@ class BotInput:
 	func hold(action: StringName, on: bool) -> void:
 		var key := String(action)
 		if on and not bool(_pressed.get(key, false)):
-			_just[key] = Engine.get_physics_frames()
+			_just[key] = Engine.get_physics_frames() + 1
 		_pressed[key] = on
 
 	func release_all() -> void:
@@ -187,6 +205,12 @@ var _result := "FAIL"
 var _notes: Array[String] = []
 var _running := false
 var _start_ms := 0
+# The `HitStop` autoload, detached for a run and re-attached on finish. See
+# `_neutralize_hit_stop`.
+var _hit_stop_node: Node = null
+# The engine's physics-steps-per-frame ceiling, saved before a run pins it to 1
+# and restored on finish. See `_pin_physics_stepping`.
+var _prev_max_physics_steps := 0
 var _avoid_dir := Vector2.ZERO
 var _avoid_frames := 0
 var _avoid_sign := 1.0
@@ -302,6 +326,8 @@ func start_from_cmdline() -> void:
 	run_seed = int(Telemetry.seed_value)
 	seed_source = String(Telemetry.seed_source)
 	_silence_audio_rng()
+	_neutralize_hit_stop()
+	_pin_physics_stepping()
 	_profile = PROFILES.get(profile, PROFILES["normal"])
 	_world = get_parent().get_node_or_null("World")
 	_running = true
@@ -313,7 +339,19 @@ func start_from_cmdline() -> void:
 
 
 func _run() -> void:
-	await _wait(0.6)
+	# Start the scenario on a fixed absolute physics frame, not a fixed wait from
+	# `_ready`. The bot node is added when the world scene instantiates, and that
+	# instantiate completes on a frame that shifts by one or two between launches
+	# (the deferred scene-change handoff and the world's own `_ready` chain do not
+	# always take the same number of steps). A `_wait(0.6)` from `_ready` therefore
+	# began the fight on frame 43 in one launch and 44 in the next, and that single
+	# frame offset moved every later input edge against the enemy AI's fixed-delta
+	# clock — the same seed then resolved the first simultaneous exchange the other
+	# way and forked the whole run (48 attacks vs 68, a slime that lived vs died).
+	# The global RNG is provably identical at scenario start across launches, so the
+	# only thing that varied was this start frame. Parking to a fixed frame removes
+	# the last wall-clock coupling: the fight now begins on the same step every time.
+	_park_to_frame(RUN_START_FRAME)
 	match scenario:
 		"BOT-001":
 			await _scenario_talk()
@@ -344,9 +382,30 @@ func _run() -> void:
 
 
 func _finish() -> void:
+	# Hand the engine's physics ceiling back before anything else: an in-process
+	# bot test keeps running the suite after this scenario, and a leaked pin of 1
+	# would slow every later group without changing its result.
+	if _prev_max_physics_steps > 0:
+		Engine.set("max_physics_steps_per_frame", _prev_max_physics_steps)
+		_prev_max_physics_steps = 0
+	# Re-attach hit-stop and make sure the scale is whole before handing the tree
+	# back, so neither a detached autoload nor a leftover slow-motion scale leaks
+	# into the next in-process scenario or the shutdown.
+	if _hit_stop_node != null and is_instance_valid(_hit_stop_node):
+		get_tree().root.add_child(_hit_stop_node)
+	_hit_stop_node = null
+	Engine.time_scale = 1.0
 	InputSource.clear_override()
 	_disconnect_combat_sensors()
 	bot_input.release_all()
+	# Un-park the audio pools for the same reason the physics ceiling and hit-stop
+	# are handed back above: a standalone run quits a moment later and never notices,
+	# but a bot that ever runs inside a live process must not leave the manager
+	# parked, or the next scene to ask for music gets silence and a pool that was
+	# emptied out from under it.
+	var audio := get_tree().root.get_node_or_null("AudioManager")
+	if audio != null and audio.has_method("unpark_for_bot"):
+		audio.call("unpark_for_bot")
 	var ok := _result == "PASS"
 	Telemetry.event(&"bot_finish",
 		{"scenario": scenario, "result": _result, "notes": _notes, "seed": run_seed})
@@ -388,7 +447,7 @@ func _scenario_talk() -> void:
 	_result = "PASS" if state == QuestManager.STATE_ACTIVE else "FAIL"
 
 
-## Parks the audio pool for the duration of a bot run.
+## Parks the audio layer for the duration of a bot run.
 ##
 ## `AudioManager.play_sfx` rolls a random pitch for every sound effect off the same
 ## global RNG the simulation rolls crits, enemy wander and loot on. Which sounds are
@@ -397,22 +456,80 @@ func _scenario_talk() -> void:
 ## a run makes is not fixed by the seed — and every gameplay roll after it lands on
 ## a different position in the stream. Two runs on one seed then diverge in the
 ## world, not in the log, and the recorded seed stops being enough to re-create the
-## run. A bot checks state, never sound, so the pools are emptied for the run:
-## `play_sfx` returns before it reaches its roll, the global RNG belongs to the
-## world alone, and the shipped game is untouched because this only ever runs under
-## `--bot=`.
+## run. And `play_sfx` loads the `.wav` through `_stream` before it ever looks at
+## the pool, so even a pitch-less call cold-loads a file on first use: on the very
+## first process that file is read off a cold disk, that read stalls a physics
+## frame, the engine runs catch-up steps, and the render-delta status clock
+## desynchronises from the fixed-delta world — so the first run of a seed is not the
+## same run as the warm ones. A bot checks state, never sound, so the whole playback
+## layer is parked for the run: `park_for_bot` stops and releases every live voice
+## (the zone's music bed is already playing before the bot starts, and releasing it
+## is also what keeps the process exit free of leaked audio objects), raises the
+## parked flag so no entry point loads a stream or rolls a pitch, and empties the
+## pools. The shipped game is untouched because this only ever runs under `--bot=`.
 func _silence_audio_rng() -> void:
 	var audio := get_tree().root.get_node_or_null("AudioManager")
-	if audio == null:
+	if audio == null or not audio.has_method("park_for_bot"):
 		return
-	var pools: Variant = audio.get("_pools")
-	if not (pools is Dictionary):
-		return
-	var live: Dictionary = pools
-	if live.is_empty():
-		return
-	live.clear()
+	audio.call("park_for_bot")
 	_notes.append("audio_pool_parked")
+
+
+## Take the process-wide hit-stop out of the tree for the run.
+##
+## Hit-stop is the one place where the render loop reaches into the fixed-delta
+## simulation: every landed melee hit sets `Engine.time_scale = 0.12`, and the
+## stop is counted down in `_process` off the render delta. Because `time_scale`
+## scales the physics tick too, the number of physics steps that run at reduced
+## speed inside a stop window is a function of how many rendered frames fit in
+## that window — i.e. of wall-clock, not of the seed. A cold disk read on the
+## first hit stretches one window, the player's attack cooldown advances by a
+## different amount, and the same seed lands a different number of attacks and a
+## different kill tally: the first launch after an idle gap stops matching the
+## warm ones, which is exactly what a recorded seed is meant to prevent.
+##
+## A bot reads state, never the slow-motion flourish, so the autoload is removed
+## for the run. `Player._hit_stop_autoload` resolves it with
+## `root.get_node_or_null("HitStop")` and no-ops when it is absent, so removing
+## the node switches hit-stop off cleanly with no script errors and without
+## touching the player or the autoload. `_finish` puts it back for an in-process
+## test that keeps running after the scenario.
+func _neutralize_hit_stop() -> void:
+	var hit_stop := get_tree().root.get_node_or_null("HitStop")
+	if hit_stop == null:
+		return
+	_hit_stop_node = hit_stop
+	get_tree().root.remove_child(hit_stop)
+	Engine.time_scale = 1.0
+
+
+## Pin the engine to one physics step per main-loop iteration for the run.
+##
+## The bot drives the world by holding an action for a couple of `physics_frame`
+## awaits, and the player reads that action with `is_action_just_pressed`, which
+## is true for only the first physics step after a press. The engine's default
+## ceiling of eight physics steps per frame breaks the one-press-one-step link the
+## moment a frame stalls: a cold disk read (a texture or `.tres` first touched on
+## the first hit, before the OS page cache is warm) blocks the main thread, and on
+## the next iteration the engine runs a catch-up burst of several fixed-delta steps
+## inside that one iteration. The held press is consumed as "just pressed" on the
+## first step of the burst and is no longer fresh on the rest, and the bot's
+## `physics_frame` awaits are rescheduled once per iteration rather than once per
+## step, so the same tap lands on a different physics step and the attack cadence
+## shifts. Whether a burst happens at all depends on wall-clock stalls, so the run
+## is no longer a function of the seed: the same launch replays as 29 attacks or 35
+## depending on nothing the seed records, which defeats the whole point of pinning
+## one.
+##
+## One step per frame restores the link: every iteration advances exactly one
+## fixed-delta step, so a held press is fresh for exactly the steps the bot intends
+## and each `physics_frame` await catches exactly one step. A stall now only costs
+## wall-clock, never simulation state, and the run replays identically cold or warm.
+## The shipped game is untouched — this runs only under `--bot=`, and `_finish`
+## restores the saved ceiling.
+func _pin_physics_stepping() -> void:
+	_prev_max_physics_steps = int(Engine.get("max_physics_steps_per_frame"))
+	Engine.set("max_physics_steps_per_frame", 1)
 
 
 func _scenario_kill() -> void:
@@ -2890,4 +3007,12 @@ func _tap(action: StringName) -> void:
 func _wait(seconds: float) -> void:
 	var frames := maxi(1, int(seconds * 60.0))
 	for i in range(frames):
+		await get_tree().physics_frame
+
+
+## Spin until the world has stepped to `frame`, so a scenario begins on a fixed
+## absolute simulation step. A no-op (returns immediately) if the world is already
+## past it, which keeps the wait from ever pushing a run backwards.
+func _park_to_frame(frame: int) -> void:
+	while Engine.get_physics_frames() < frame:
 		await get_tree().physics_frame

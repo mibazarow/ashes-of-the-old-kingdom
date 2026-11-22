@@ -95,6 +95,14 @@ var _ui_blocking_initialised := false
 ## boss instance id -> phase last seen, for the phase-change roar.
 var _boss_phases: Dictionary = {}
 var _events_connected := false
+## Set by `park_for_bot()` and cleared by `unpark_for_bot()`. While it is up the
+## whole playback layer is inert: `play_sfx`/`play_music`/`play_ambience` return
+## before doing anything, and `_stream` refuses to load. A parked manager is the
+## audio layer removed at runtime without removing the node — which is exactly
+## what a debug bot needs, because a single cold disk read of a `.wav` on the
+## first hit of a run stalls a physics frame, and that one stall is enough to
+## make the run diverge from its own seed (see `park_for_bot`).
+var _parked := false
 
 
 func _ready() -> void:
@@ -153,12 +161,97 @@ func _exit_tree() -> void:
 	_stamps.clear()
 
 
+# --- bot parking --------------------------------------------------------------
+
+## Silence the whole playback layer for the duration of a debug-bot run, and do
+## it the way `_exit_tree` would, so nothing is orphaned.
+##
+## Two reasons the bot parks audio, and the previous `_pools.clear()` only served
+## the first and caused a leak:
+##
+## * Determinism. `play_sfx` rolls a random pitch off the same global RNG the
+##   simulation rolls crits, wander and loot on, so a live pool makes the number
+##   of rolls a run consumes depend on wall-clock audio progress, not the seed.
+##   And `play_sfx` loads the `.wav` through `_stream` before it ever looks at the
+##   pool, so even a pitch-less call cold-loads a file on first use; on the very
+##   first process that file is read off a cold disk, that read stalls a physics
+##   frame, the engine runs catch-up steps, and the render-delta status clock
+##   (which cannot be moved onto the physics tick from here) desynchronises from
+##   the fixed-delta world — the run then diverges from its own recorded seed.
+##   `_parked` makes every entry point return before it loads or rolls.
+## * Shutdown cleanliness. The zone starts its music and ambience bed during world
+##   build, before the bot runs. Those voices are live and hold their streams. The
+##   old code dropped the pool dictionary without stopping them, so `_exit_tree`
+##   iterated an empty dict, never released the server-side playbacks, and the
+##   process exited with leaked `AudioStreamPlaybackWAV`/`AudioStreamWAV`
+##   instances and `music_forest.wav` "still in use". Stopping each voice and
+##   dropping its stream here is what lets the exit come out clean.
+##
+## The voices are stopped, dropped from the tree and released at the end of the
+## frame (`queue_free`, not `free`), so a test that captured a player before
+## parking can still read its `stream`/`playing` this frame and assert both are
+## cleared. `unpark_for_bot()` rebuilds the pools for a caller that needs the
+## manager working again — the test suite being the only one.
+func park_for_bot() -> void:
+	_parked = true
+	for bus in _pools.keys():
+		for entry in (_pools[bus] as Array):
+			var player := entry as AudioStreamPlayer
+			if player == null or not is_instance_valid(player):
+				continue
+			# Stop unconditionally, not only when `playing` reads true: under the
+			# headless (dummy) driver a started voice keeps its server-side playback
+			# alive while `playing` already reads false, and that playback is exactly
+			# what the exit leak check would otherwise report as still in use.
+			player.stop()
+			player.stream = null
+			# Take the voice out of the tree now and release it at the end of the
+			# frame. Leaving it as a stopped child would (a) orphan it at exit and
+			# (b) squat on its name, so `unpark_for_bot` would rebuild under an
+			# auto-mangled name and anything that finds a voice by name would miss
+			# it. `queue_free` (not `free`) so a caller that captured the node before
+			# parking can still read its `stream`/`playing` this frame.
+			remove_child(player)
+			player.queue_free()
+	# The ambience bed lives outside the pools but holds a loaded looping stream, so
+	# it is the other half of the same leak and must be released the same way.
+	if _ambience_player != null and is_instance_valid(_ambience_player):
+		_ambience_player.stop()
+		_ambience_player.stream = null
+		remove_child(_ambience_player)
+		_ambience_player.queue_free()
+	_pools.clear()
+	_music_players.clear()
+	_music_current = null
+	_music_other = null
+	_music_name = ""
+	_music_fades.clear()
+	_ambience_player = null
+	_ambience_name = ""
+
+
+## Undo `park_for_bot()`: rebuild the pools and the ambience voice and let the
+## playback layer load and play again. Only the test suite needs this, because it
+## parks the shared autoload and then keeps exercising it. Volumes live on the
+## buses (not the players), so they survive the park untouched and need no restore.
+func unpark_for_bot() -> void:
+	_parked = false
+	for bus in BUS_NAMES:
+		_build_pool(bus)
+	_build_ambience_player()
+
+
 # --- playback ----------------------------------------------------------------
 
 
 ## Plays `res://assets/audio/<name>.wav`. Returns false for an unknown name
 ## (no error, no exception: audio must never break a gameplay path).
 func play_sfx(name: String, bus: String = "SFX", pitch_variation: float = DEFAULT_PITCH_VARIATION) -> bool:
+	# Parked for a bot run: return before `_stream` (which would cold-load the
+	# `.wav` on first use) and before the pitch roll (which would draw from the
+	# global RNG the simulation shares). Both are sources of run divergence.
+	if _parked:
+		return false
 	var stream := _stream(name)
 	if stream == null:
 		return false
@@ -183,6 +276,8 @@ func play_sfx(name: String, bus: String = "SFX", pitch_variation: float = DEFAUL
 ## track (the old one is ramped down and stopped), so travel can never stack two
 ## tracks. A `fade` of 0 cuts instantly instead of ramping.
 func play_music(name: String, fade: float = 0.6) -> bool:
+	if _parked:
+		return false
 	var stream := _stream(name)
 	if stream == null or _music_current == null or _music_other == null:
 		return false
@@ -244,6 +339,8 @@ func music_name() -> String:
 ## low fixed level, under the music. One bed at a time: a second call replaces
 ## the first. Returns false for an unknown name.
 func play_ambience(name: String) -> bool:
+	if _parked:
+		return false
 	if _ambience_player == null:
 		return false
 	var stream := _stream(name)
@@ -593,6 +690,13 @@ func _pick_player(pool: Array) -> AudioStreamPlayer:
 
 func _stream(name: String) -> AudioStream:
 	if name == "":
+		return null
+	# Parked: never reach the loader. A first-use `ResourceLoader.load` of a `.wav`
+	# is a cold disk read on the process's first run, and a single such read landing
+	# inside a physics frame makes the engine run catch-up steps, which desynchronises
+	# the render-delta status clock from the fixed-delta simulation and shifts the
+	# global RNG stream — so the run stops being a pure function of its seed.
+	if _parked:
 		return null
 	if _streams.has(name):
 		return _streams[name] as AudioStream
