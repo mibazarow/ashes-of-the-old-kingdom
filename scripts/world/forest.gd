@@ -230,6 +230,17 @@ const PICKUP_FLASK_TILE := Vector2i(20, 30)
 ## there, the spawn falls back to the anchor and the zone test notices.
 const RUINS_GATE_TILE := Vector2i(MAP_W - 3, 13)
 
+## The pilgrim (spec §12): the grey, near-silent stranger who stands on the road
+## east of the village and hands out the first fragment of the king's story. He is
+## a story figure, not a hazard, so — unlike the villagers — he belongs OUTSIDE the
+## village safe zone the enemies are turned back from, and far enough from the
+## arrival tile that arriving never opens his prompt under the player's feet. The
+## anchor is snapped by `_find_pilgrim_tile`, so a tree cluster from the fixed seed
+## can never take him, and the avoid set keeps him off every enemy, prop and NPC.
+const PILGRIM_ANCHOR := Vector2i(24, 4)
+const PILGRIM_SCAN_RADIUS := 2
+const PILGRIM_CLEAR_FROM_ENTRY := 6
+
 
 func zone_id() -> String:
 	return "forest"
@@ -549,6 +560,13 @@ func _spawn_actors() -> void:
 
 	_spawn_rubble()
 	_spawn_ruins_gate()
+	# The pilgrim goes last among the interactables, after the gate, for the same
+	# reason every villager joined after the one before: the debug bot walks the
+	# FIRST node of the `interactable` group, so Edrik has to stay first or the quest
+	# bots would open the pilgrim's fragment instead of the hunt. Placing him last
+	# also means the avoid set he is snapped against already knows every enemy, prop
+	# and NPC, so he cannot be parked on any of them.
+	_spawn_pilgrim()
 
 
 ## The gate to `ruins`, at the eastern end of the road.
@@ -569,6 +587,79 @@ func _spawn_ruins_gate() -> void:
 	gate.position = _tile_center(tile.x, tile.y)
 	add_child(gate)
 	_ruins_gate_node = gate
+
+
+## Places the pilgrim on the road east of the village. Built in code like the
+## villagers (a `Sprite2D` child added before `add_child` so the base `Npc`'s
+## `@onready` sprite resolves on the first frame); the grey tint is applied by
+## `Pilgrim._ready` itself, so nothing here paints over it. He carries no quest and
+## no schedule — a stranger who drifts between zones holds no post in this one — and
+## he is deliberately not a landmark: the map keeps its ten markers, and a figure
+## who is in every zone is not a fixed point of interest in any of them.
+func _spawn_pilgrim() -> void:
+	var tile := _find_pilgrim_tile(PILGRIM_ANCHOR, PILGRIM_SCAN_RADIUS, _occupied_pilgrim_tiles())
+	var pilgrim := Pilgrim.new()
+	pilgrim.name = "PilgrimForest"
+	pilgrim.zone_id = "forest"
+	pilgrim.sprite_texture = load("res://assets/sprites/npc.png")
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load("res://assets/sprites/npc.png")
+	pilgrim.add_child(spr)
+	pilgrim.position = _tile_center(tile.x, tile.y)
+	add_child(pilgrim)
+
+
+## Every tile in this zone that something already stands on and the pilgrim must not
+## share: all enemies, all interactables (Edrik, the villagers, the chests, the
+## gate), the finds, and the rubble — read back from the live world rather than
+## hardcoded, so moving any anchor moves the pilgrim's clearance with it. The trap is
+## not in any of those groups, so it is added by reference alongside the rubble.
+func _occupied_pilgrim_tiles() -> Dictionary:
+	var occupied := {}
+	for group: StringName in [&"enemy", &"interactable", &"pickup"]:
+		for node in get_tree().get_nodes_in_group(group):
+			if not is_instance_valid(node) or node.get_parent() != self:
+				continue
+			var body := node as Node2D
+			if body == null:
+				continue
+			occupied[_tile_of_node(body)] = true
+	for prop: Node2D in [_trap_node, _rubble_node]:
+		if prop != null and is_instance_valid(prop):
+			occupied[_tile_of_node(prop)] = true
+	return occupied
+
+
+## The pilgrim's tile: walkable ground, outside the village safe zone and its
+## one-tile buffer (the same margin enemies are turned back at — a grey stranger is
+## not something to post in the one place this world promises is safe), at least
+## `PILGRIM_CLEAR_FROM_ENTRY` tiles from the arrival tile, and clear of every tile in
+## `avoid`. The declared anchor first, then the outward rings, so the named spot on
+## the road wins over a tile a ring away. Deterministic like every other spawn here:
+## the order depends only on the fixed anchor and the fixed grid. Falls back to the
+## anchor when nothing in range passes, which the pilgrim test notices.
+func _find_pilgrim_tile(anchor: Vector2i, radius: int, avoid: Dictionary) -> Vector2i:
+	if _is_pilgrim_tile(anchor, avoid):
+		return anchor
+	for ring in range(1, radius + 1):
+		for dy in range(-ring, ring + 1):
+			for dx in range(-ring, ring + 1):
+				if absi(dx) != ring and absi(dy) != ring:
+					continue
+				var t := Vector2i(anchor.x + dx, anchor.y + dy)
+				if _is_pilgrim_tile(t, avoid):
+					return t
+	return anchor
+
+
+func _is_pilgrim_tile(tile: Vector2i, avoid: Dictionary) -> bool:
+	var ch := cell_at(tile)
+	if ch != "." and ch != ",":
+		return false
+	if SAFE_ZONE_RECT.grow(1).has_point(tile) or avoid.has(tile):
+		return false
+	return maxi(absi(tile.x - PLAYER_SPAWN_TILE.x), absi(tile.y - PLAYER_SPAWN_TILE.y)) >= PILGRIM_CLEAR_FROM_ENTRY
 
 
 ## Builds one `Villager` in code (the herbwife's type) and places it on `tile`,

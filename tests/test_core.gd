@@ -373,12 +373,15 @@ func _run() -> void:
 	print("== king and endings ==")
 	await _test_king_and_endings()
 
+	print("== pilgrim ==")
+	await _test_pilgrim()
+
 	# Leave no settings residue for the next run, a bot or the editor.
 	_reset_input_to_known_state()
 	_check(not FileAccess.file_exists(String(InputBindings.PATH)),
 		"suite left no controls file behind")
 
-	_check(completed.size() == 64, "every test group ran to completion (got %d/64)" % completed.size())
+	_check(completed.size() == 65, "every test group ran to completion (got %d/65)" % completed.size())
 
 	print("")
 	print("checks: %d  failures: %d" % [checks, failures])
@@ -12286,4 +12289,317 @@ func _test_king_and_endings() -> void:
 					voice.stop()
 				voice.stream = null
 		await create_timer(0.6).timeout
-	completed["king_and_endings"] = true
+		completed["king_and_endings"] = true
+
+
+## Spec §12: the ninth NPC — Пепельный Паломник, the grey, near-silent stranger who
+## turns up in every zone and is the only cross-zone story thread. He gives no quest
+## and no reward; each zone hands back one more fragment of the king's ritual, and
+## the fragments are gated on the previous one so the truth assembles in story order
+## and ends on `pilgrim_truth_known`. Three halves: the data table and the runner's
+## flag chain (no scene, deterministic), a live placement pass through all four real
+## worlds, and the three interaction states (locked / available / already-heard) on
+## the two ends of the chain. GameState and QuestManager are reset at both ends; the
+## scene half travels forest -> ruins -> dungeon -> fortress and leaves the run in
+## the forest with no flags set, so nothing leaks into the checks that follow.
+func _test_pilgrim() -> void:
+	gs.reset()
+	qm.reset()
+
+	# --- 1. the four conversations exist and belong to the pilgrim -------------
+	for zone: String in ["forest", "ruins", "dungeon", "fortress"]:
+		var did := "pilgrim_%s" % zone
+		_check(DialogueDB.has_dialogue(did), "%s is defined" % did)
+		var d: Dictionary = DialogueDB.get_dialogue(did)
+		_check(String(d.get("speaker_id", "")) == "pilgrim", "%s names the pilgrim speaker" % did)
+		_check(String(d.get("speaker", "")) == "Пепельный Паломник", "%s shows the pilgrim's name" % did)
+	_check(DialogueDB.for_speaker("pilgrim").size() == 4,
+		"the pilgrim owns exactly four conversations (got %d)" % DialogueDB.for_speaker("pilgrim").size())
+
+	# --- 2. the flag chain, driven through the runner --------------------------
+	# The forest fragment has no prerequisite and sets its flag on the LAST line,
+	# which is where a node's effects fire (on entry), so the flag must be unset on
+	# the opening and second lines and set only once the runner steps onto n3.
+	gs.reset()
+	qm.reset()
+	var rf := DialogueRunner.new(gs, qm)
+	_check(rf.start("pilgrim_forest"), "the forest fragment is available with no prerequisite")
+	_check(not gs.get_flag("pilgrim_met_forest", false), "the forest flag is unset on the opening line")
+	_check(rf.advance() == "n2", "the forest fragment advances to the second line")
+	_check(not gs.get_flag("pilgrim_met_forest", false), "the forest flag is unset on the second line")
+	_check(rf.advance() == "n3", "the forest fragment advances to the last line")
+	_check(gs.get_flag("pilgrim_met_forest", false) == true,
+		"the forest fragment's last line set pilgrim_met_forest")
+	_check(rf.advance() == "" and rf.is_finished(), "the forest fragment ends after the last line")
+
+	# Each later fragment is locked until the one before it is heard, then sets its
+	# own flag, then refuses itself once heard (the `not_flag` half of its condition).
+	gs.reset()
+	qm.reset()
+	_check(not DialogueRunner.new(gs, qm).start("pilgrim_ruins"),
+		"the ruins fragment is locked before the forest fragment is heard")
+	gs.set_flag("pilgrim_met_forest", true)
+	var rr := DialogueRunner.new(gs, qm)
+	_check(rr.start("pilgrim_ruins"), "the ruins fragment opens once the forest fragment is heard")
+	rr.advance()
+	rr.advance()
+	_check(gs.get_flag("pilgrim_met_ruins", false) == true,
+		"the ruins fragment's last line set pilgrim_met_ruins")
+	_check(not DialogueRunner.new(gs, qm).start("pilgrim_ruins"),
+		"the ruins fragment refuses once it has already been heard")
+
+	gs.reset()
+	qm.reset()
+	_check(not DialogueRunner.new(gs, qm).start("pilgrim_dungeon"),
+		"the dungeon fragment is locked before the ruins fragment is heard")
+	gs.set_flag("pilgrim_met_ruins", true)
+	var rd := DialogueRunner.new(gs, qm)
+	_check(rd.start("pilgrim_dungeon"), "the dungeon fragment opens once the ruins fragment is heard")
+	rd.advance()
+	rd.advance()
+	_check(gs.get_flag("pilgrim_met_dungeon", false) == true,
+		"the dungeon fragment's last line set pilgrim_met_dungeon")
+
+	# The fortress fragment is the payoff: its last line sets BOTH its own flag and
+	# the truth flag the ending reads.
+	gs.reset()
+	qm.reset()
+	_check(not DialogueRunner.new(gs, qm).start("pilgrim_fortress"),
+		"the fortress fragment is locked before the dungeon fragment is heard")
+	_check(not gs.get_flag("pilgrim_truth_known", false), "the truth flag is unset before the fortress fragment")
+	gs.set_flag("pilgrim_met_dungeon", true)
+	var rfo := DialogueRunner.new(gs, qm)
+	_check(rfo.start("pilgrim_fortress"), "the fortress fragment opens once the dungeon fragment is heard")
+	rfo.advance()
+	rfo.advance()
+	_check(gs.get_flag("pilgrim_met_fortress", false) == true,
+		"the fortress fragment's last line set pilgrim_met_fortress")
+	_check(gs.get_flag("pilgrim_truth_known", false) == true,
+		"the fortress fragment's last line set pilgrim_truth_known")
+
+	# The whole chain heard in story order lights every met flag and the truth flag.
+	gs.reset()
+	qm.reset()
+	for zone: String in ["forest", "ruins", "dungeon", "fortress"]:
+		var r := DialogueRunner.new(gs, qm)
+		_check(r.start("pilgrim_%s" % zone), "the %s fragment is reachable in story order" % zone)
+		r.advance()
+		r.advance()
+		r.advance()
+	_check(gs.get_flag("pilgrim_met_forest", false) and gs.get_flag("pilgrim_met_ruins", false)
+			and gs.get_flag("pilgrim_met_dungeon", false) and gs.get_flag("pilgrim_met_fortress", false),
+		"hearing all four in order sets every met flag")
+	_check(gs.get_flag("pilgrim_truth_known", false), "the full chain sets pilgrim_truth_known")
+
+	# --- the pilgrim's flags survive a save round-trip (in-memory, no slot) -----
+	var payload := JSON.stringify(gs.to_dict())
+	var fresh: Node = load("res://scripts/core/game_state.gd").new()
+	root.add_child(fresh)
+	fresh.call("from_dict", JSON.parse_string(payload))
+	_check(bool(fresh.call("get_flag", "pilgrim_truth_known", false)),
+		"pilgrim_truth_known survives a save round-trip")
+	_check(bool(fresh.call("get_flag", "pilgrim_met_dungeon", false)),
+		"pilgrim_met_dungeon survives a save round-trip")
+	fresh.queue_free()
+
+	# --- 3. the pilgrim stands in all four real worlds -------------------------
+	gs.reset()
+	qm.reset()
+	var packed: PackedScene = load("res://scenes/main/main.tscn")
+	var scene := packed.instantiate()
+	root.add_child(scene)
+	await process_frame
+	await process_frame
+	var manager := scene.get_node_or_null("ZoneManager")
+	var hud := scene.get_node_or_null("HUD")
+	_check(manager != null, "the pilgrim group has a zone manager to travel with")
+	if manager == null:
+		scene.queue_free()
+		await process_frame
+		gs.reset()
+		qm.reset()
+		completed["pilgrim"] = true
+		return
+
+	# Silence lines reach the player through the dialogue panel; capture them so the
+	# locked and already-heard branches can be told apart from the runner opening.
+	var spoken: Array[String] = []
+	var on_line := func(lines: Array) -> void:
+		if not lines.is_empty():
+			spoken.append(String((lines[0] as Dictionary).get("text", "")))
+	bus.dialogue_requested.connect(on_line)
+
+	# forest (built as the starting World)
+	var forest := scene.get_node_or_null("World")
+	var pf := _find_interactable_named("interactable", "PilgrimForest")
+	_check(forest != null and String(forest.call("zone_id")) == "forest",
+		"the pilgrim group starts in the forest")
+	_check(pf != null and pf.is_in_group("interactable"), "the forest places the pilgrim as an interactable")
+	# Checked by script path, not `is Pilgrim`: referencing the `Pilgrim` class name
+	# here would make this suite depend on pilgrim.gd, which is compiled before the
+	# autoloads exist and so fails to resolve `GameState`. The path pins the same fact
+	# without the compile-time dependency.
+	_check(pf != null and String(pf.get_script().resource_path) == "res://scripts/npcs/pilgrim.gd",
+		"the forest pilgrim is a Pilgrim")
+	_check(pf != null and String(pf.get("zone_id")) == "forest", "the forest pilgrim is tagged forest")
+	_check(pf != null and String(pf.get("speaker_id")) == "pilgrim", "the forest pilgrim speaks as pilgrim")
+	_check(pf != null and String(pf.get("display_name")) == "Пепельный Паломник",
+		"the forest pilgrim is named Пепельный Паломник")
+	_check(pf != null and _pilgrim_bubble_hidden(pf), "the pilgrim carries no quest marker over his head")
+	var forest_interactables := get_nodes_in_group("interactable")
+	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Edrik",
+		"the pilgrim did not displace Edrik as the first interactable")
+	if pf != null and forest != null:
+		var pft := _tile_of_node(pf as Node2D)
+		var problems := _pilgrim_placement_problems(forest, pf, Vector2i(4, 9))
+		_check(problems.is_empty(), "the forest pilgrim is placed cleanly (%s)" % ", ".join(problems))
+		_check(not bool(forest.call("is_in_safe_zone", pft)),
+			"the forest pilgrim stands OUTSIDE the village safe zone (%s)" % str(pft))
+
+	# ruins
+	_check(bool(manager.call("travel", "ruins")), "the pilgrim group travelled into the ruins")
+	for i in range(2):
+		await process_frame
+	var ruins := scene.get_node_or_null("World")
+	var pr := _find_interactable_named("interactable", "PilgrimRuins")
+	_check(ruins != null and String(ruins.call("zone_id")) == "ruins", "the group stands in the ruins")
+	_check(pr != null and pr.is_in_group("interactable"), "the ruins place the pilgrim as an interactable")
+	_check(pr != null and String(pr.get("zone_id")) == "ruins", "the ruins pilgrim is tagged ruins")
+	if pr != null and ruins != null:
+		var rproblems := _pilgrim_placement_problems(ruins, pr, Vector2i(3, 8))
+		_check(rproblems.is_empty(), "the ruins pilgrim is placed cleanly (%s)" % ", ".join(rproblems))
+
+	# dungeon
+	_check(bool(manager.call("travel", "dungeon")), "the pilgrim group travelled into the undercroft")
+	for i in range(2):
+		await process_frame
+	var undercroft := scene.get_node_or_null("World")
+	var pd := _find_interactable_named("interactable", "PilgrimDungeon")
+	_check(undercroft != null and String(undercroft.call("zone_id")) == "dungeon",
+		"the group stands in the undercroft")
+	_check(pd != null and pd.is_in_group("interactable"), "the undercroft places the pilgrim as an interactable")
+	_check(pd != null and String(pd.get("zone_id")) == "dungeon", "the undercroft pilgrim is tagged dungeon")
+	if pd != null and undercroft != null:
+		var dproblems := _pilgrim_placement_problems(undercroft, pd, Vector2i(3, 12))
+		_check(dproblems.is_empty(), "the undercroft pilgrim is placed cleanly (%s)" % ", ".join(dproblems))
+
+	# fortress
+	_check(bool(manager.call("travel", "fortress")), "the pilgrim group travelled into the fortress")
+	for i in range(2):
+		await process_frame
+	var fortress := scene.get_node_or_null("World")
+	var pft_node := _find_interactable_named("interactable", "PilgrimFortress")
+	_check(fortress != null and String(fortress.call("zone_id")) == "fortress",
+		"the group stands in the fortress")
+	_check(pft_node != null and pft_node.is_in_group("interactable"),
+		"the fortress places the pilgrim as an interactable")
+	_check(pft_node != null and String(pft_node.get("zone_id")) == "fortress",
+		"the fortress pilgrim is tagged fortress")
+	if pft_node != null and fortress != null:
+		var fproblems := _pilgrim_placement_problems(fortress, pft_node, Vector2i(4, 14))
+		_check(fproblems.is_empty(), "the fortress pilgrim is placed cleanly (%s)" % ", ".join(fproblems))
+		_check(not Rect2i(42, 11, 5, 8).has_point(_tile_of_node(pft_node as Node2D)),
+			"the fortress pilgrim stands outside the ring kept for the final boss")
+
+	# --- 4. the three interaction states on both ends of the chain -------------
+	# The forest end: available from the start, then silent once heard.
+	gs.reset()
+	qm.reset()
+	if pf != null:
+		_check(String(pf.call("prompt_text")) == "Заговорить",
+			"the forest pilgrim invites speech before his fragment is heard")
+		spoken.clear()
+		pf.call("interact", forest.get_node_or_null("Player"))
+		_check(spoken.is_empty(), "an available forest fragment opens a conversation, not a silence line")
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+		gs.set_flag("pilgrim_met_forest", true)
+		_check(String(pf.call("prompt_text")) == "Молчит",
+			"the forest pilgrim falls silent once his fragment is heard")
+		spoken.clear()
+		pf.call("interact", forest.get_node_or_null("Player"))
+		_check(spoken.size() == 1 and spoken[0] == "Он уже сказал всё, что помнит.",
+			"a heard forest fragment answers with the already-said line (%s)" % ", ".join(spoken))
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+
+	# The fortress end: locked until the dungeon fragment, then available, then silent.
+	gs.reset()
+	qm.reset()
+	if pft_node != null:
+		_check(String(pft_node.call("prompt_text")) == "Молчит",
+			"the fortress pilgrim is silent until the dungeon fragment is heard")
+		spoken.clear()
+		pft_node.call("interact", fortress.get_node_or_null("Player"))
+		_check(spoken.size() == 1 and spoken[0] == "Он молчит.",
+			"a locked fortress fragment answers with the silence line (%s)" % ", ".join(spoken))
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+		gs.set_flag("pilgrim_met_dungeon", true)
+		_check(String(pft_node.call("prompt_text")) == "Заговорить",
+			"the fortress pilgrim invites speech once the dungeon fragment is heard")
+		spoken.clear()
+		pft_node.call("interact", fortress.get_node_or_null("Player"))
+		_check(spoken.is_empty(), "an available fortress fragment opens a conversation, not a silence line")
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+
+	bus.dialogue_requested.disconnect(on_line)
+
+	# --- leave no state behind -------------------------------------------------
+	_check(bool(manager.call("travel", "forest")), "the pilgrim group travels back to the forest")
+	for i in range(2):
+		await process_frame
+	gs.ui_blocking = false
+	scene.queue_free()
+	await process_frame
+	gs.reset()
+	qm.reset()
+	_check(String(gs.zone) == "forest", "the pilgrim group leaves the run in the forest")
+	_check(not gs.get_flag("pilgrim_truth_known", false), "the pilgrim group leaves no truth flag set")
+	completed["pilgrim"] = true
+
+
+## True when the pilgrim shows no quest marker: the base `Npc` builds a single Label
+## child (the "!" bubble) and lights it for whatever quest it defaults to, which on a
+## character who gives nothing would be a lie. `Pilgrim._refresh_bubble` hides it; a
+## pilgrim with no Label child at all is equally fine.
+func _pilgrim_bubble_hidden(pilgrim: Node) -> bool:
+	for child in pilgrim.get_children():
+		if child is Label:
+			return not child.visible
+	return true
+
+
+## Every way the pilgrim could be badly placed in `world`: not on walkable ground,
+## closer than six tiles (Chebyshev) to `entry` so arriving opens his prompt under the
+## player's feet, unreachable from `entry`, or sharing a tile with another interactable
+## (Edrik, a villager, a chest, a zone exit) or an enemy. Empty means clean.
+func _pilgrim_placement_problems(world: Node, pilgrim: Node, entry: Vector2i) -> Array[String]:
+	var problems: Array[String] = []
+	if pilgrim == null:
+		problems.append("missing")
+		return problems
+	var tile := _tile_of_node(pilgrim as Node2D)
+	var ch := String(world.call("cell_at", tile))
+	if ch != "." and ch != ",":
+		problems.append("not walkable ('%s' at %s)" % [ch, str(tile)])
+	if maxi(absi(tile.x - entry.x), absi(tile.y - entry.y)) < 6:
+		problems.append("only %d tiles from entry" % maxi(absi(tile.x - entry.x), absi(tile.y - entry.y)))
+	if not _bfs_reachable(world, entry, {}).has(tile):
+		problems.append("unreachable from entry (%s)" % str(tile))
+	for node in get_nodes_in_group("interactable"):
+		if node == pilgrim or not is_instance_valid(node) or node.get_parent() != world:
+			continue
+		if _tile_of_node(node as Node2D) == tile:
+			problems.append("shares tile with interactable %s" % String(node.name))
+	for node in get_nodes_in_group("enemy"):
+		if not is_instance_valid(node) or node.get_parent() != world:
+			continue
+		if _tile_of_node(node as Node2D) == tile:
+			problems.append("shares tile with enemy %s" % String(node.name))
+	return problems

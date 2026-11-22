@@ -207,6 +207,18 @@ const ENEMY_CLEAR_FROM_ENTRY := 6
 const DUNGEON_GATE_TILE := Vector2i(37, 22)
 const DUNGEON_GATE_SCAN_RADIUS := 0
 
+## The pilgrim (spec §12), the same grey stranger the forest road holds, now in the
+## entry passage. He stands on the NEAR side of the locked door — the half of the
+## zone the player already owns — because the fragment he carries is the reason to
+## solve the puzzle, not a reward for solving it, and a story figure the player can
+## only reach after the key would be a fragment held hostage. Eight tiles east and
+## south of the entry, on the worn floor of the passage, clear of the door, the
+## lever, the tablet and the gate. Snapped by `_find_prop_tile` against the reserved
+## set every prop and post already claimed, so he cannot land on any of them.
+const PILGRIM_ANCHOR := Vector2i(9, 8)
+const PILGRIM_SCAN_RADIUS := 2
+const PILGRIM_CLEAR_FROM_ENTRY := 6
+
 ## Points of interest kept as live node references, as in `Forest`. The key drops
 ## out of the list by itself once it is picked up: the pickup frees itself, and the
 ## loop below skips a node that is no longer there.
@@ -366,6 +378,12 @@ func _spawn_actors() -> void:
 	# walks a skeleton onto the stair shows up as a collision this function can see
 	# instead of two props sharing one tile in silence.
 	_spawn_dungeon_gate(spawn_tile, reserved)
+	# The pilgrim is placed after every prop, post and stair so he inherits the whole
+	# reserved set they claimed and cannot be parked on the door, the lever, the key,
+	# the tablet, a guard or either gate. His tile is the entry passage, snapped by
+	# `_find_prop_tile` against that set with the six-tile clearance the zone asks of
+	# a prop that is not a hostile.
+	_spawn_pilgrim(spawn_tile, reserved)
 
 
 ## The slab across the doorway. Built in code the way `ZoneExit`, the merchant and
@@ -498,12 +516,35 @@ func _spawn_captain(entry: Vector2i, reserved: Dictionary) -> void:
 func _spawn_dungeon_gate(entry: Vector2i, reserved: Dictionary) -> void:
 	var tile := _find_prop_tile(
 		DUNGEON_GATE_TILE, DUNGEON_GATE_SCAN_RADIUS, entry, reserved, 0)
+	reserved[tile] = true
 	var gate := ZoneExit.new()
 	gate.name = "DungeonGate"
 	gate.target_zone = "dungeon"
 	gate.prompt = "Спуститься в подземелье"
 	gate.position = _tile_center(tile.x, tile.y)
 	add_child(gate)
+
+
+## The grey stranger in the entry passage. Built in code like the villagers (a
+## `Sprite2D` child added before `add_child` so the base `Npc`'s `@onready` sprite
+## resolves on the first frame); the grey tint is applied by `Pilgrim._ready`
+## itself. He carries no quest and no schedule and is deliberately not a landmark —
+## the map keeps its six markers, and a figure who is in every zone is not a fixed
+## point of interest in this one.
+func _spawn_pilgrim(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		PILGRIM_ANCHOR, PILGRIM_SCAN_RADIUS, entry, reserved, PILGRIM_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	var pilgrim := Pilgrim.new()
+	pilgrim.name = "PilgrimRuins"
+	pilgrim.zone_id = "ruins"
+	pilgrim.sprite_texture = load("res://assets/sprites/npc.png")
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load("res://assets/sprites/npc.png")
+	pilgrim.add_child(spr)
+	pilgrim.position = _tile_center(tile.x, tile.y)
+	add_child(pilgrim)
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules

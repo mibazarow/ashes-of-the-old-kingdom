@@ -201,6 +201,16 @@ const NELA_ANCHOR := Vector2i(16, 6)
 const NELA_SCAN_RADIUS := 0
 const NELA_CLEAR_FROM_ENTRY := 8
 
+## The pilgrim (spec §12), the same grey stranger the zones above hold, now at the
+## crossing where the middle corridor meets the west one — the first place down here
+## that is wide enough to stand in without blocking a two-tile road, and nine tiles
+## from the arrival stair so arriving never opens his prompt. He is snapped by
+## `_find_prop_tile` against the reserved set the plates, the posts, the bell and the
+## watchwoman already claimed, so he cannot land on a trap, a stair, a guard or Нела.
+const PILGRIM_ANCHOR := Vector2i(12, 12)
+const PILGRIM_SCAN_RADIUS := 2
+const PILGRIM_CLEAR_FROM_ENTRY := 6
+
 ## How wide each post scans for a free tile, and how far every one of them has to
 ## stay from the tile the player arrives on. Six tiles is 96 px against the 96 px
 ## sight line of a plain enemy: at that Chebyshev distance a post can see the
@@ -360,6 +370,12 @@ func _spawn_actors() -> void:
 	# function can see instead of two props sharing one tile in silence. Same
 	# position in the flow as the ruins' descent, for the same reason.
 	_spawn_fortress_gate(spawn_tile, reserved)
+	# The pilgrim is placed after every plate, post, stair and the watchwoman so he
+	# inherits the whole reserved set they claimed and cannot be parked on a trap, a
+	# stair, a guard or Нела. His tile is the west/middle crossing, snapped by
+	# `_find_prop_tile` against that set with the six-tile clearance the zone asks of
+	# a prop that is not a hostile.
+	_spawn_pilgrim(spawn_tile, reserved)
 
 
 ## The door up to the fortress, at the far end of the longest walk the undercroft
@@ -373,6 +389,7 @@ func _spawn_actors() -> void:
 func _spawn_fortress_gate(entry: Vector2i, reserved: Dictionary) -> void:
 	var tile := _find_prop_tile(
 		FORTRESS_GATE_TILE, FORTRESS_GATE_SCAN_RADIUS, entry, reserved, 0)
+	reserved[tile] = true
 	var gate := ZoneExit.new()
 	gate.name = "FortressGate"
 	gate.target_zone = "fortress"
@@ -477,6 +494,28 @@ func _spawn_nela(entry: Vector2i, reserved: Dictionary) -> void:
 	nela.position = _tile_center(tile.x, tile.y)
 	add_child(nela)
 	spr.modulate = Color(0.70, 0.74, 0.82)
+
+
+## The grey stranger at the crossing. Built in code like the forest's villagers (a
+## `Sprite2D` child added before `add_child` so the base `Npc`'s `@onready` sprite
+## resolves on the first frame); the grey tint is applied by `Pilgrim._ready`
+## itself. He carries no quest and no schedule and is deliberately not a landmark —
+## the map keeps its markers for the way out, the two plates and the boss, and a
+## figure who is in every zone is not a fixed point of interest in this one.
+func _spawn_pilgrim(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		PILGRIM_ANCHOR, PILGRIM_SCAN_RADIUS, entry, reserved, PILGRIM_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	var pilgrim := Pilgrim.new()
+	pilgrim.name = "PilgrimDungeon"
+	pilgrim.zone_id = "dungeon"
+	pilgrim.sprite_texture = load(NPC_SPRITE)
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load(NPC_SPRITE)
+	pilgrim.add_child(spr)
+	pilgrim.position = _tile_center(tile.x, tile.y)
+	add_child(pilgrim)
 
 
 ## The outward row-major scan of `ZoneBase._find_walkable_near` with two rules

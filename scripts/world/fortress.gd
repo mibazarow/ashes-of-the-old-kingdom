@@ -216,6 +216,17 @@ const OREN_ANCHOR := Vector2i(21, 10)
 const OREN_SCAN_RADIUS := 0
 const OREN_CLEAR_FROM_ENTRY := 8
 
+## The pilgrim (spec §12), the same grey stranger the zones before hold, now in the
+## archive — the last room before the throne hall, where the fragment he carries
+## about the king and the crown lands just before the player walks into the room the
+## king never left. He stands off the spine in the archive floor, clear of the shelf
+## runs and the fallen racks, twenty-five tiles from the arrival and well outside the
+## ring kept for the final boss. Snapped by `_find_prop_tile` against the reserved
+## set the arena, the entry, the stair and every post already claimed.
+const PILGRIM_ANCHOR := Vector2i(29, 17)
+const PILGRIM_SCAN_RADIUS := 2
+const PILGRIM_CLEAR_FROM_ENTRY := 6
+
 ## The final boss and his throne, both placed by hand at the far end of the spine
 ## inside the ring the zone kept for exactly this. The King takes the centre of
 ## `BOSS_ARENA`; the throne stands two tiles east of him against the sanctum's back
@@ -369,6 +380,13 @@ func _spawn_actors() -> void:
 	# that reserved set with the eight-tile clearance the zone asks of a prop that
 	# is not a hostile.
 	_spawn_oren(spawn_tile, reserved)
+	# The pilgrim is placed after every post and the officer so he inherits the whole
+	# reserved set they claimed — including the arena the boss needs — and cannot be
+	# parked on the stair, the entry, a post or inside the ring. His tile is the
+	# archive, snapped by `_find_prop_tile` against that set with the six-tile
+	# clearance the zone asks of a prop that is not a hostile. The final boss is
+	# placed by hand inside the reserved ring afterwards, so the two never meet.
+	_spawn_pilgrim(spawn_tile, reserved)
 	# The ring the reservation above held empty is filled last, by hand, with the one
 	# enemy it was held for and the throne his death unlocks. Placed after every post
 	# so the arena is the only ground they can take, and never via `_find_prop_tile`
@@ -433,6 +451,28 @@ func _spawn_oren(entry: Vector2i, reserved: Dictionary) -> void:
 	oren.position = _tile_center(tile.x, tile.y)
 	add_child(oren)
 	spr.modulate = Color(0.85, 0.72, 0.40)
+
+
+## The grey stranger in the archive. Built in code like the forest's villagers (a
+## `Sprite2D` child added before `add_child` so the base `Npc`'s `@onready` sprite
+## resolves on the first frame); the grey tint is applied by `Pilgrim._ready`
+## itself. He carries no quest and no schedule and is deliberately not a landmark —
+## the map keeps its markers for the way back and the four named rooms, and a figure
+## who is in every zone is not a fixed point of interest in this one.
+func _spawn_pilgrim(entry: Vector2i, reserved: Dictionary) -> void:
+	var tile := _find_prop_tile(
+		PILGRIM_ANCHOR, PILGRIM_SCAN_RADIUS, entry, reserved, PILGRIM_CLEAR_FROM_ENTRY)
+	reserved[tile] = true
+	var pilgrim := Pilgrim.new()
+	pilgrim.name = "PilgrimFortress"
+	pilgrim.zone_id = "fortress"
+	pilgrim.sprite_texture = load(NPC_SPRITE)
+	var spr := Sprite2D.new()
+	spr.name = "Sprite2D"
+	spr.texture = load(NPC_SPRITE)
+	pilgrim.add_child(spr)
+	pilgrim.position = _tile_center(tile.x, tile.y)
+	add_child(pilgrim)
 
 
 ## Two guards, three bowmen, a boar and two lights. Each tile is marked reserved as

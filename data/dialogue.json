@@ -60,6 +60,93 @@
 					"next": ""
 				}
 			}
+		},
+		"pilgrim_forest": {
+			"speaker_id": "pilgrim",
+			"speaker": "Пепельный Паломник",
+			"start": "n1",
+			"condition": {"not_flag": "pilgrim_met_forest"},
+			"nodes": {
+				"n1": {
+					"text": "…Не бойся. Я тоже из пепла.",
+					"next": "n2"
+				},
+				"n2": {
+					"text": "Пепел помнит. Всё, что горело, помнит того, кто зажёг.",
+					"next": "n3"
+				},
+				"n3": {
+					"text": "Здесь дышал король. Пепел запомнил его.",
+					"effects": [{"flag": "pilgrim_met_forest", "value": true}],
+					"next": ""
+				}
+			}
+		},
+		"pilgrim_ruins": {
+			"speaker_id": "pilgrim",
+			"speaker": "Пепельный Паломник",
+			"start": "n1",
+			"condition": {"flag": "pilgrim_met_forest", "not_flag": "pilgrim_met_ruins"},
+			"nodes": {
+				"n1": {
+					"text": "…Ты слышал пепел. Теперь слушай камень.",
+					"next": "n2"
+				},
+				"n2": {
+					"text": "Замок держит чужих. Чтобы не вошли.",
+					"next": "n3"
+				},
+				"n3": {
+					"text": "Печать — не замок. Печать — обещание, данное своему.",
+					"effects": [{"flag": "pilgrim_met_ruins", "value": true}],
+					"next": ""
+				}
+			}
+		},
+		"pilgrim_dungeon": {
+			"speaker_id": "pilgrim",
+			"speaker": "Пепельный Паломник",
+			"start": "n1",
+			"condition": {"flag": "pilgrim_met_ruins", "not_flag": "pilgrim_met_dungeon"},
+			"nodes": {
+				"n1": {
+					"text": "…Колокол. Слышишь?",
+					"next": "n2"
+				},
+				"n2": {
+					"text": "Он звал мёртвых. Не для боя.",
+					"next": "n3"
+				},
+				"n3": {
+					"text": "Мёртвые сторожат печать. Колокол помнит их имена.",
+					"effects": [{"flag": "pilgrim_met_dungeon", "value": true}],
+					"next": ""
+				}
+			}
+		},
+		"pilgrim_fortress": {
+			"speaker_id": "pilgrim",
+			"speaker": "Пепельный Паломник",
+			"start": "n1",
+			"condition": {"flag": "pilgrim_met_dungeon", "not_flag": "pilgrim_met_fortress"},
+			"nodes": {
+				"n1": {
+					"text": "…Мы дошли до начала.",
+					"next": "n2"
+				},
+				"n2": {
+					"text": "Король — и есть печать. Не заперт. Держит.",
+					"next": "n3"
+				},
+				"n3": {
+					"text": "Корона — не власть. Корона — выбор. Наденешь — останешься держать.",
+					"effects": [
+						{"flag": "pilgrim_met_fortress", "value": true},
+						{"flag": "pilgrim_truth_known", "value": true}
+					],
+					"next": ""
+				}
+			}
 		}
 	}
 }
