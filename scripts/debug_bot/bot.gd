@@ -1644,8 +1644,11 @@ func _arena_prep(deadline: int) -> void:
 	# the potion. The bot writes no gold and no item; it presses the key.
 	var price := trade.buy_price("health_potion")
 	var taps := 0
-	await _tap(&"interact")
-	await _wait(0.4)
+	# The first press may draw Yorek's greeting rather than his till; the helper
+	# advances that greeting to its flag-setting last node and presses again, so
+	# the buy loop below always finds a real panel (or a clean no-open), never a
+	# conversation under the keyboard.
+	await _open_merchant_shop(hud)
 	while bool(hud.call("is_shop_open")) and taps < 4:
 		if GameState.gold < price:
 			break
@@ -2626,13 +2629,15 @@ func _scenario_economy() -> void:
 	var fangs_exact := fangs_sold == 0 or (GameState.count_item("wolf_fang") == 0 \
 			and fang_gold_moved == fangs_sold * fang_price)
 	if GameState.gold >= 25:
-		await _tap(&"interact")
-		await _wait(0.4)
-		if bool(hud.call("is_shop_open")):
+		if await _open_merchant_shop(hud):
 			await _tap(&"interact")
 			await _wait(0.3)
 			await _tap(&"pause")
 			await _wait(0.3)
+		elif GameState.ui_blocking:
+			# Belt and braces: never carry an open greeting into the east walk,
+			# where ui_blocking would hold the hero still and lose the chest leg.
+			await _dismiss_dialogue()
 	_notes.append("prep_done gold=%d potions=%d level=%d" % [
 		GameState.gold, GameState.count_item("health_potion"), GameState.level])
 
@@ -2680,9 +2685,7 @@ func _scenario_economy() -> void:
 		_notes.append("merchant_unreachable hp=%d taken=%s dealt=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type), _fmt_counts(_m_dmg_by_type)])
 		return
-	await _tap(&"interact")
-	await _wait(0.4)
-	var shop_open := bool(hud.call("is_shop_open"))
+	var shop_open := await _open_merchant_shop(hud)
 	# The till has to be proven open before a single coin is measured against it.
 	# One key press at the end of a long walk is not proof: the merchant shares
 	# the village square with three other villagers, and an interact that lands
@@ -2693,9 +2696,7 @@ func _scenario_economy() -> void:
 	while not shop_open and reopen < 3:
 		reopen += 1
 		await _travel_to(merchant.global_position, 16.0, 35.0)
-		await _tap(&"interact")
-		await _wait(0.4)
-		shop_open = bool(hud.call("is_shop_open"))
+		shop_open = await _open_merchant_shop(hud)
 	var shop := ShopManager.new(GameState)
 	# Row 0 of the buy list is the merchant's first stock entry — the health
 	# potion — and the cursor starts there every time the panel opens.
@@ -4139,6 +4140,26 @@ func _dismiss_dialogue() -> void:
 			return
 		await _tap(&"interact")
 		await _wait(0.15)
+
+
+## Opens Yorek's till through the real interact key, tolerating his first-meeting
+## greeting. The very first interact runs `yorek_intro` instead of opening the
+## shop, so when a conversation rather than a panel answers the press the bot
+## advances it to its last node — which is what sets the `met_yorek` flag the
+## greeting is gated on — and presses interact once more. Advancing (not Esc) is
+## deliberate: Esc closes the greeting without setting the flag, so the next press
+## would greet again forever and the till would never open. Bounded so a press
+## that lands on the wrong villager can never leave the bot standing in a modal.
+func _open_merchant_shop(hud: CanvasLayer) -> bool:
+	for _attempt in range(3):
+		await _tap(&"interact")
+		await _wait(0.4)
+		if bool(hud.call("is_shop_open")):
+			return true
+		if GameState.ui_blocking:
+			await _dismiss_dialogue()
+			await _wait(0.2)
+	return bool(hud.call("is_shop_open"))
 
 
 func _tap(action: StringName) -> void:

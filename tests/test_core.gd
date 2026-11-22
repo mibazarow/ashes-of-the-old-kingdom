@@ -6149,10 +6149,43 @@ func _test_shop() -> void:
 		var gold_pre: int = gs.gold
 		var inv_size_pre: int = gs.inventory.size()
 		var potion_pre: int = gs.count_item("health_potion")
+		# Pre-heard greeting: with `met_yorek` already set the runner refuses on its
+		# `not_flag` condition, so even the very first interact of a meeting opens the
+		# till straight away — the panel is never hidden behind a line already heard.
+		gs.set_flag("met_yorek", true)
 		merchant.call("interact", player)
 		await process_frame
-		_check(bool(hud.call("is_shop_open")), "Merchant.interact opens the shop through the real path")
-		_check(gs.ui_blocking, "Merchant.interact sets ui_blocking")
+		_check(bool(hud.call("is_shop_open")), "with met_yorek pre-set the first interact opens the shop directly")
+		_check(hud.call("dialogue_runner") == null, "a pre-set flag offers no greeting")
+		_check(gs.ui_blocking, "the directly-opened shop blocks player input")
+		hud.call("close_shop")
+		await process_frame
+		# Re-arm the greeting by clearing the flag, then walk the real first-meeting
+		# path: greet, finish it (which sets the flag), then open the till.
+		gs.set_flag("met_yorek", false)
+		_check(not bool(gs.get_flag("met_yorek", false)), "met_yorek is unset before the first meeting")
+		merchant.call("interact", player)
+		await process_frame
+		_check(not bool(hud.call("is_shop_open")), "the first interact opens a greeting, not the shop")
+		_check(hud.call("dialogue_runner") != null, "the first interact handed a dialogue runner to the HUD")
+		_check(gs.ui_blocking, "the greeting blocks player input")
+		_check(not bool(gs.get_flag("met_yorek", false)), "the opening greeting line has not set met_yorek yet")
+		_check(gs.gold == gold_pre, "the greeting spent no gold (got %d)" % gs.gold)
+		_check(gs.inventory.size() == inv_size_pre, "the greeting left the inventory unchanged")
+		# Walk the greeting to its last node (that is what sets met_yorek), then close
+		# it the way the player's final E would.
+		var yr: DialogueRunner = hud.call("dialogue_runner")
+		yr.advance()
+		yr.choose(0)
+		hud.call("close_dialogue")
+		await process_frame
+		_check(bool(gs.get_flag("met_yorek", false)), "finishing the greeting set met_yorek")
+		_check(not gs.ui_blocking, "closing the greeting handed input back")
+		# Second meeting: the till opens straight away, no repeated greeting.
+		merchant.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_shop_open")), "the second interact opens the shop through the real path")
+		_check(hud.call("dialogue_runner") == null, "the second interact opened no greeting")
 		_check(gs.gold == gold_pre, "opening the shop via interact spent no gold (got %d)" % gs.gold)
 		_check(gs.inventory.size() == inv_size_pre, "opening the shop via interact left the inventory unchanged")
 		_check(gs.count_item("health_potion") == potion_pre,
@@ -6161,6 +6194,14 @@ func _test_shop() -> void:
 		await process_frame
 		_check(not bool(hud.call("is_shop_open")), "close_shop closes the interact-opened shop")
 		_check(not gs.ui_blocking, "ui_blocking cleared after closing the interact-opened shop")
+		# Third meeting: still the till, never the greeting again.
+		merchant.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_shop_open")), "a third interact opens the shop directly (no greeting)")
+		_check(hud.call("dialogue_runner") == null, "the third interact opened no dialogue")
+		hud.call("close_shop")
+		await process_frame
+		_check(not gs.ui_blocking, "ui_blocking cleared after the third interact's shop")
 
 	# open the shop through the HUD and check the modal gate
 	gs.gold = 100
@@ -6455,17 +6496,47 @@ func _test_craft() -> void:
 				and smith_2d.global_position.distance_to(edrik.global_position) > 44.0,
 			"the forge sits outside the interact radius of anyone standing at Edrik")
 
-	# the real in-game path: E at the forge opens the bench and crafts nothing
+	# the real in-game path: the first E at the forge greets, the next opens the
+	# bench, and neither crafts anything or eats a material
 	if smith != null:
 		gs.gold = 100
 		gs.add_item("wolf_fang", 4)
 		var gold_pre: int = gs.gold
 		var fangs_pre: int = gs.count_item("wolf_fang")
 		var inv_pre: int = gs.inventory.size()
+		# Pre-heard greeting: with `met_bran` set the runner refuses and the bench
+		# opens straight away, so the forge is never hidden behind a line heard.
+		gs.set_flag("met_bran", true)
 		smith.call("interact", player)
 		await process_frame
-		_check(bool(hud.call("is_craft_open")), "Smith.interact opens the bench through the real path")
-		_check(gs.ui_blocking, "Smith.interact sets ui_blocking")
+		_check(bool(hud.call("is_craft_open")), "with met_bran pre-set the first interact opens the bench directly")
+		_check(hud.call("dialogue_runner") == null, "a pre-set flag offers no greeting")
+		_check(gs.ui_blocking, "the directly-opened bench blocks player input")
+		hud.call("close_craft")
+		await process_frame
+		# Re-arm the greeting, then walk the real first-meeting path.
+		gs.set_flag("met_bran", false)
+		_check(not bool(gs.get_flag("met_bran", false)), "met_bran is unset before the first meeting")
+		smith.call("interact", player)
+		await process_frame
+		_check(not bool(hud.call("is_craft_open")), "the first interact opens a greeting, not the bench")
+		_check(hud.call("dialogue_runner") != null, "the first interact handed a dialogue runner to the HUD")
+		_check(gs.ui_blocking, "the greeting blocks player input")
+		_check(not bool(gs.get_flag("met_bran", false)), "the opening greeting line has not set met_bran yet")
+		_check(gs.gold == gold_pre, "the greeting spent no gold (got %d)" % gs.gold)
+		_check(gs.count_item("wolf_fang") == fangs_pre, "the greeting ate no material")
+		var br: DialogueRunner = hud.call("dialogue_runner")
+		br.advance()
+		br.choose(0)
+		hud.call("close_dialogue")
+		await process_frame
+		_check(bool(gs.get_flag("met_bran", false)), "finishing the greeting set met_bran")
+		_check(not gs.ui_blocking, "closing the greeting handed input back")
+		# Second meeting: the bench opens straight away, no repeated greeting.
+		smith.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_craft_open")), "the second interact opens the bench through the real path")
+		_check(hud.call("dialogue_runner") == null, "the second interact opened no greeting")
 		_check(gs.gold == gold_pre, "opening the bench via interact spent no gold (got %d)" % gs.gold)
 		_check(gs.count_item("wolf_fang") == fangs_pre, "opening the bench via interact ate no material")
 		_check(gs.inventory.size() == inv_pre, "opening the bench via interact left the inventory unchanged")
@@ -6474,6 +6545,14 @@ func _test_craft() -> void:
 		await process_frame
 		_check(not bool(hud.call("is_craft_open")), "close_craft closes the interact-opened bench")
 		_check(not gs.ui_blocking, "ui_blocking cleared after closing the interact-opened bench")
+		# Third meeting: still the bench, never the greeting again.
+		smith.call("interact", player)
+		await process_frame
+		_check(bool(hud.call("is_craft_open")), "a third interact opens the bench directly (no greeting)")
+		_check(hud.call("dialogue_runner") == null, "the third interact opened no dialogue")
+		hud.call("close_craft")
+		await process_frame
+		_check(not gs.ui_blocking, "ui_blocking cleared after the third interact's bench")
 
 	# open the bench through the HUD and check the modal gate (the claws from the
 	# interact block above are still there, so the bench has 3/4 of what it wants)
@@ -7335,6 +7414,28 @@ func _test_dialogues() -> void:
 	# before the panel opens, so they own an intro even though they own no quest.
 	_check(DialogueDB.has_dialogue("yorek_intro"), "the merchant has an _intro conversation")
 	_check(DialogueDB.has_dialogue("bran_intro"), "the smith has an _intro conversation")
+	# The two panel NPCs must greet exactly once: each intro is gated on its own
+	# `not_flag` and writes that flag on a line, so the runner refuses the greeting
+	# on every later meeting and the shop/bench opens directly. A `not_flag` with no
+	# effect ever writing it would lock the greeting out forever (the orphan-flag
+	# check below catches the reverse); these pin the gate and its writer together.
+	var yorek_gate: Variant = DialogueDB.get_dialogue("yorek_intro").get("condition", null)
+	_check(yorek_gate is Dictionary and String((yorek_gate as Dictionary).get("not_flag", "")) == "met_yorek",
+			"yorek_intro is gated on not_flag met_yorek so the greeting shows once")
+	var bran_gate: Variant = DialogueDB.get_dialogue("bran_intro").get("condition", null)
+	_check(bran_gate is Dictionary and String((bran_gate as Dictionary).get("not_flag", "")) == "met_bran",
+			"bran_intro is gated on not_flag met_bran so the greeting shows once")
+	_check(_dialogue_sets_flag("yorek_intro", "met_yorek"),
+			"a yorek_intro line writes met_yorek so its gate can clear")
+	_check(_dialogue_sets_flag("bran_intro", "met_bran"),
+			"a bran_intro line writes met_bran so its gate can clear")
+	# Both terminal branches of each greeting set the flag, so whichever option the
+	# player takes the greeting does not repeat: the last node sets it, and the
+	# option that ends the talk without a node carries the same effect.
+	_check(_greeting_sets_flag_on_every_exit("yorek_intro", "met_yorek"),
+			"every yorek_intro exit sets met_yorek, so the greeting never repeats")
+	_check(_greeting_sets_flag_on_every_exit("bran_intro", "met_bran"),
+			"every bran_intro exit sets met_bran, so the greeting never repeats")
 
 	# --- the shape of every entry in the table --------------------------------
 	# Held against the whole file rather than only the new entries: a node with no
@@ -7519,6 +7620,83 @@ func _effect_starts_quest(raw: Variant, quest_id: String) -> bool:
 					and String(effect.get("action", "start")) == "start":
 				return true
 	return false
+
+
+## True when one `effects` value (a single effect object or an array of them) writes
+## `flag_name`. The narrow counterpart to `_effect_starts_quest`, used to prove a
+## greeting's `not_flag` gate has a writer somewhere in the conversation.
+func _effects_write_flag(raw: Variant, flag_name: String) -> bool:
+	var items: Array = []
+	if raw is Array:
+		items = raw as Array
+	elif raw is Dictionary:
+		items = [raw]
+	for item: Variant in items:
+		if item is Dictionary and String((item as Dictionary).get("flag", "")) == flag_name:
+			return true
+	return false
+
+
+## True when any node effect or option effect in `dialogue_id` writes `flag_name`.
+func _dialogue_sets_flag(dialogue_id: String, flag_name: String) -> bool:
+	var entry := DialogueDB.get_dialogue(dialogue_id)
+	if entry.is_empty():
+		return false
+	var nodes: Variant = entry.get("nodes", {})
+	if not (nodes is Dictionary):
+		return false
+	var table := nodes as Dictionary
+	for nid: Variant in table.keys():
+		var block: Variant = table.get(nid, {})
+		if not (block is Dictionary):
+			continue
+		var nb := block as Dictionary
+		if _effects_write_flag(nb.get("effects", null), flag_name):
+			return true
+		var options: Variant = nb.get("options", [])
+		if options is Array:
+			for opt: Variant in (options as Array):
+				if opt is Dictionary \
+						and _effects_write_flag((opt as Dictionary).get("effects", null), flag_name):
+					return true
+	return false
+
+
+## True when EVERY way out of `dialogue_id` writes `flag_name`, so the greeting it
+## gates can never be re-heard: an option that ends the talk on the spot must carry
+## the effect itself, an option that moves on must land on a node that does, and a
+## plain terminal node (no options, empty `next`) must write it too. Held only to
+## the two panel greetings, whose shape is one choice node over a terminal line.
+func _greeting_sets_flag_on_every_exit(dialogue_id: String, flag_name: String) -> bool:
+	var entry := DialogueDB.get_dialogue(dialogue_id)
+	if entry.is_empty():
+		return false
+	var nodes: Variant = entry.get("nodes", {})
+	if not (nodes is Dictionary):
+		return false
+	var table := nodes as Dictionary
+	for nid: Variant in table.keys():
+		var block: Variant = table.get(nid, {})
+		if not (block is Dictionary):
+			return false
+		var nb := block as Dictionary
+		var options: Variant = nb.get("options", [])
+		if options is Array and not (options as Array).is_empty():
+			for opt: Variant in (options as Array):
+				if not (opt is Dictionary):
+					return false
+				var o := opt as Dictionary
+				if _effects_write_flag(o.get("effects", null), flag_name):
+					continue
+				var nxt := String(o.get("next", ""))
+				var target: Variant = table.get(nxt, {})
+				if nxt == "" or not (target is Dictionary) \
+						or not _effects_write_flag((target as Dictionary).get("effects", null), flag_name):
+					return false
+		elif String(nb.get("next", "")) == "":
+			if not _effects_write_flag(nb.get("effects", null), flag_name):
+				return false
+	return true
 
 
 ## Village safe zone + the herbwife's two new quests (roadmap stage D). Data half:

@@ -1,7 +1,8 @@
 class_name Smith
 extends Area2D
 ## Crafting station NPC (spec §14.4). Same shape as `Merchant`: it holds no quest
-## state and no dialogue, interacting opens the craft screen on the HUD.
+## state, the first interaction runs `bran_intro` (which sets `met_bran`), and
+## every interaction after that opens the craft screen on the HUD.
 ##
 ## The smith owns the one `CraftManager` for its station, built over the live
 ## `GameState`, so the recipes, the prices and the unlock flags it shows are the
@@ -60,9 +61,23 @@ func craft_station() -> String:
 
 
 func interact(_player: Node) -> void:
-	# No craft signal exists on the (non-editable) EventBus, so the smith hands its
-	# manager straight to the HUD, found by group, exactly like the merchant hands
-	# over the shop. Opening must not craft anything: the panel only acts on E.
+	# The smith greets the player once before the bench opens, on the same
+	# dialogue-runner-first pattern the quest-giver `Npc` uses. `bran_intro` is
+	# gated on `not_flag: met_bran` in data/dialogue.json and its last line sets
+	# that flag, so the runner refuses on every later meeting and the bench opens
+	# straight away — the panel is never left unreachable behind a greeting.
 	var hud := get_tree().get_first_node_in_group("hud")
+	var runner := DialogueRunner.new(GameState, QuestManager)
+	if runner.start("bran_intro"):
+		if hud != null and hud.has_method("open_dialogue_runner"):
+			hud.open_dialogue_runner(runner)
+			return
+
+	# Fallback: the greeting was already heard (the runner refused on its
+	# condition), or there is no HUD to show it. Either way the craft screen must
+	# still open. No craft signal exists on the (non-editable) EventBus, so the
+	# smith hands its manager straight to the HUD, found by group, exactly like the
+	# merchant hands over the shop. Opening must not craft anything: the panel only
+	# acts on E.
 	if hud != null and hud.has_method("open_craft"):
 		hud.call("open_craft", _craft)

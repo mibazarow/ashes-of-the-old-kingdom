@@ -1,11 +1,13 @@
 class_name Merchant
 extends Area2D
-## Shop NPC. Unlike the quest-giver `Npc` it holds no quest state: interacting
-## opens the buy/sell screen on the HUD. The merchant owns the one `ShopManager`
-## for its stock, so what the player buys is drawn from a single live pool that
-## persists for the merchant's lifetime — buying lowers it, selling never refills
-## it. Built entirely in code (no scene) so it reuses the shared npc sprite with a
-## distinct tint and adds itself to the `interactable` group exactly like Edrik.
+## Shop NPC. Unlike the quest-giver `Npc` it holds no quest state: the first
+## interaction runs `yorek_intro` (which sets `met_yorek`), and every interaction
+## after that opens the buy/sell screen on the HUD. The merchant owns the one
+## `ShopManager` for its stock, so what the player buys is drawn from a single
+## live pool that persists for the merchant's lifetime — buying lowers it,
+## selling never refills it. Built entirely in code (no scene) so it reuses the
+## shared npc sprite with a distinct tint and adds itself to the `interactable`
+## group exactly like Edrik.
 
 @export var display_name: String = "Йорек"
 @export var sprite_texture: Texture2D
@@ -51,9 +53,22 @@ func prompt_text() -> String:
 
 
 func interact(_player: Node) -> void:
-	# No shop signal exists on the (non-editable) EventBus, so the merchant hands
-	# its manager straight to the HUD, which is the only thing that can open a
-	# modal panel. Found by group so neither side hardcodes the other's path.
+	# The merchant greets the player once before the till opens, on the same
+	# dialogue-runner-first pattern the quest-giver `Npc` uses. `yorek_intro` is
+	# gated on `not_flag: met_yorek` in data/dialogue.json and its last line sets
+	# that flag, so the runner refuses on every later meeting and the shop opens
+	# straight away — the panel is never left unreachable behind a greeting.
 	var hud := get_tree().get_first_node_in_group("hud")
+	var runner := DialogueRunner.new(GameState, QuestManager)
+	if runner.start("yorek_intro"):
+		if hud != null and hud.has_method("open_dialogue_runner"):
+			hud.open_dialogue_runner(runner)
+			return
+
+	# Fallback: the greeting was already heard (the runner refused on its
+	# condition), or there is no HUD to show it. Either way the buy/sell screen
+	# must still open. No shop signal exists on the (non-editable) EventBus, so
+	# the merchant hands its manager straight to the HUD, found by group, which is
+	# the only thing that can open a modal panel.
 	if hud != null and hud.has_method("open_shop"):
 		hud.call("open_shop", _shop)

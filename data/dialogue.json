@@ -322,6 +322,7 @@
 			"speaker_id": "yorek",
 			"speaker": "Йорек",
 			"start": "n1",
+			"condition": {"not_flag": "met_yorek"},
 			"nodes": {
 				"n1": {
 					"text": "Смотри, только не трогай. У меня товар кончается, а не начинается.",
@@ -338,12 +339,14 @@
 						{
 							"text": "Я просто посмотрю.",
 							"cosmetic": true,
+							"effects": [{"flag": "met_yorek", "value": true}],
 							"next": ""
 						}
 					]
 				},
 				"n3": {
 					"text": "Тогда смотри молча. Купишь — заговоришь.",
+					"effects": [{"flag": "met_yorek", "value": true}],
 					"next": ""
 				}
 			}
@@ -352,6 +355,7 @@
 			"speaker_id": "bran",
 			"speaker": "Кузнец Бран",
 			"start": "n1",
+			"condition": {"not_flag": "met_bran"},
 			"nodes": {
 				"n1": {
 					"text": "Говори в лицо. Я не слышу, но губы вижу.",
@@ -368,12 +372,14 @@
 						{
 							"text": "Я просто постоял.",
 							"cosmetic": true,
+							"effects": [{"flag": "met_bran", "value": true}],
 							"next": ""
 						}
 					]
 				},
 				"n3": {
 					"text": "Тогда к молоту. Материал свой, руки мои.",
+					"effects": [{"flag": "met_bran", "value": true}],
 					"next": ""
 				}
 			}
