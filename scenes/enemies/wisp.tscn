@@ -19,9 +19,9 @@ script = ExtResource("1_enemy")
 kind = 1
 enemy_type = &"ash_wisp"
 display_name = "Пепельный огонёк"
-max_health = 16
-attack_damage = 5
-xp_reward = 14
+max_health = 22
+attack_damage = 6
+xp_reward = 18
 gold_reward = 7
 loot_item = "mana_potion"
 loot_chance = 0.35
@@ -40,7 +40,7 @@ shape = SubResource("body_shape")
 
 [node name="HealthComponent" type="Node" parent="."]
 script = ExtResource("3_health")
-max_health = 16
+max_health = 22
 
 [node name="AttackHitbox" type="Area2D" parent="."]
 collision_layer = 16

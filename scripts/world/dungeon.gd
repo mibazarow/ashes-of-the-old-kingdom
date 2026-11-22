@@ -165,16 +165,23 @@ const SKELETON_ARCHER_B_ANCHOR := Vector2i(38, 25)
 const WISP_A_ANCHOR := Vector2i(13, 7)
 const WISP_B_ANCHOR := Vector2i(25, 20)
 
-## The two new posts, both down a long corridor and well past the six-tile ring the
-## zone asks of every hostile: the crawlers take the south road at either end of
-## it, where a fast melee enemy has the longest run at a player walking the
-## undercroft end to end, and the bearer takes the north road, where its corpse
-## pool lands in the middle of the widest stretch of floor this zone has. Each is
-## snapped by `_find_prop_tile` against the reserved set the plates and the first
-## wave already claimed, so none of them can sit on a trap, a stair or a post.
+## The undercroft's own two types, all of them down a long corridor and well past
+## the six-tile ring the zone asks of every hostile: the crawlers take the south
+## road at either end of it and once more between, where a fast melee enemy has the
+## longest run at a player walking the undercroft end to end, and the bearers take
+## the north road and the west end of the south one, so a corpse pool falls on the
+## widest stretch of floor in the zone and on the road back out of it. Three
+## crawlers and two bearers rather than two and one: the undercroft was the thinnest
+## zone in the game at eleven live instances, and a single carrier made the hazard
+## that owns this place a one-off instead of a rule the player has to plan around.
+## Each post is snapped by `_find_prop_tile` against the reserved set the plates and
+## the first wave already claimed, so none of them can sit on a trap, a stair or a
+## post.
 const BONE_CRAWLER_A_ANCHOR := Vector2i(7, 25)
 const BONE_CRAWLER_B_ANCHOR := Vector2i(34, 26)
+const BONE_CRAWLER_C_ANCHOR := Vector2i(28, 26)
 const PLAGUE_BEARER_A_ANCHOR := Vector2i(21, 2)
+const PLAGUE_BEARER_B_ANCHOR := Vector2i(16, 26)
 
 ## The Bell Ringer's post (spec §11), deep in the south corridor past both trap
 ## plates and clear of every post, plate, column and the two stairs. It keeps ten
@@ -440,15 +447,17 @@ func _spawn_enemies(entry: Vector2i, reserved: Dictionary) -> void:
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
 
 
-## The two new posts, on the same reserved-tile flow as the first wave and placed
-## right after it, so every tile the plates and the seven originals took is
-## already off limits and every tile these three take is still visible to the
+## The undercroft's own two types, on the same reserved-tile flow as the first wave
+## and placed right after it, so every tile the plates and the seven originals took
+## is already off limits and every tile these five take is still visible to the
 ## collision check the door to the fortress makes when it is placed last.
 func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 	for post: Array in [
 		[BONE_CRAWLER_SCENE, BONE_CRAWLER_A_ANCHOR, "BoneCrawlerA"],
 		[BONE_CRAWLER_SCENE, BONE_CRAWLER_B_ANCHOR, "BoneCrawlerB"],
+		[BONE_CRAWLER_SCENE, BONE_CRAWLER_C_ANCHOR, "BoneCrawlerC"],
 		[PLAGUE_BEARER_SCENE, PLAGUE_BEARER_A_ANCHOR, "PlagueBearerA"],
+		[PLAGUE_BEARER_SCENE, PLAGUE_BEARER_B_ANCHOR, "PlagueBearerB"],
 	]:
 		var tile := _find_prop_tile(
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)

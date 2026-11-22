@@ -18,9 +18,9 @@ script = ExtResource("1_enemy")
 kind = 0
 enemy_type = &"bone_crawler"
 display_name = "Костяной ползун"
-max_health = 16
+max_health = 28
 attack_damage = 8
-xp_reward = 14
+xp_reward = 22
 gold_reward = 6
 loot_item = "bone_shard"
 loot_chance = 0.45
@@ -36,7 +36,7 @@ shape = SubResource("body_shape")
 
 [node name="HealthComponent" type="Node" parent="."]
 script = ExtResource("3_health")
-max_health = 16
+max_health = 28
 
 [node name="AttackHitbox" type="Area2D" parent="."]
 collision_layer = 16

@@ -174,6 +174,12 @@ const ARENA_CRITERION := "dealt damage to >=1 kind from each of melee/ranged/sup
 
 var scenario: String = ""
 var profile: String = "normal"
+## The seed this run is reporting. `Telemetry` is the one that actually puts a seed
+## on the global RNG (it does so before the world exists, which is the only moment
+## early enemy rolls can be caught); the bot reads the number back so the verdict
+## line carries the seed it was reached on, and so `--seed=` can be re-run verbatim.
+var run_seed: int = 0
+var seed_source: String = ""
 var _profile: Dictionary = {}
 var bot_input: BotInput
 var _world: Node = null
@@ -275,19 +281,34 @@ func start_from_cmdline() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.is_empty():
 		args = OS.get_cmdline_args()
+	var requested_seed := 0
+	var has_requested_seed := false
 	for a in args:
 		if a.begins_with("--bot="):
 			scenario = a.substr("--bot=".length())
 		elif a.begins_with("--profile="):
 			profile = a.substr("--profile=".length())
+		elif a.begins_with("--seed="):
+			requested_seed = int(a.trim_prefix("--seed="))
+			has_requested_seed = true
 	if scenario == "":
 		return
+	# `Telemetry` already seeded the global RNG before the world was built, which is
+	# the only point early enemy rolls can be caught. When the operator named a
+	# seed, hand it back down so the process is genuinely running on the number the
+	# log will print, not merely on a number the log happens to agree with.
+	if has_requested_seed:
+		Telemetry.set_run_seed(requested_seed, "cmdline")
+	run_seed = int(Telemetry.seed_value)
+	seed_source = String(Telemetry.seed_source)
+	_silence_audio_rng()
 	_profile = PROFILES.get(profile, PROFILES["normal"])
 	_world = get_parent().get_node_or_null("World")
 	_running = true
 	_start_ms = Time.get_ticks_msec()
 	InputSource.set_override(bot_input)
-	Telemetry.event(&"bot_start", {"scenario": scenario, "profile": profile})
+	Telemetry.event(&"bot_start",
+		{"scenario": scenario, "profile": profile, "seed": run_seed, "seed_source": seed_source})
 	_run()
 
 
@@ -327,15 +348,24 @@ func _finish() -> void:
 	_disconnect_combat_sensors()
 	bot_input.release_all()
 	var ok := _result == "PASS"
-	Telemetry.event(&"bot_finish", {"scenario": scenario, "result": _result, "notes": _notes})
+	Telemetry.event(&"bot_finish",
+		{"scenario": scenario, "result": _result, "notes": _notes, "seed": run_seed})
 	Telemetry.write_summary(_result, {
 		"scenario": scenario,
 		"profile": profile,
+		"seed": run_seed,
+		"seed_source": seed_source,
+		"rerun": "godot --headless --path . -- --bot=%s --profile=%s --seed=%d"
+			% [scenario, profile, run_seed],
 		"notes": "; ".join(_notes),
 		"hp": GameState.hp,
 		"kills": GameState.kills,
 	})
-	print("[bot] %s -> %s (%s)" % [scenario, _result, "; ".join(_notes)])
+	# The seed rides on the verdict line rather than only in the log directory: the
+	# line is what a human pastes into a report, and a PASS with no seed next to it
+	# is a claim nobody can re-check tomorrow.
+	print("[bot] %s -> %s (seed=%d %s; %s)"
+		% [scenario, _result, run_seed, seed_source, "; ".join(_notes)])
 	_running = false
 	await get_tree().create_timer(0.2).timeout
 	get_tree().quit(0 if ok else 1)
@@ -358,6 +388,33 @@ func _scenario_talk() -> void:
 	_result = "PASS" if state == QuestManager.STATE_ACTIVE else "FAIL"
 
 
+## Parks the audio pool for the duration of a bot run.
+##
+## `AudioManager.play_sfx` rolls a random pitch for every sound effect off the same
+## global RNG the simulation rolls crits, enemy wander and loot on. Which sounds are
+## still audible when the next one is requested is a function of wall-clock audio
+## progress, not of the simulation, so with the pool live the number of pitch rolls
+## a run makes is not fixed by the seed — and every gameplay roll after it lands on
+## a different position in the stream. Two runs on one seed then diverge in the
+## world, not in the log, and the recorded seed stops being enough to re-create the
+## run. A bot checks state, never sound, so the pools are emptied for the run:
+## `play_sfx` returns before it reaches its roll, the global RNG belongs to the
+## world alone, and the shipped game is untouched because this only ever runs under
+## `--bot=`.
+func _silence_audio_rng() -> void:
+	var audio := get_tree().root.get_node_or_null("AudioManager")
+	if audio == null:
+		return
+	var pools: Variant = audio.get("_pools")
+	if not (pools is Dictionary):
+		return
+	var live: Dictionary = pools
+	if live.is_empty():
+		return
+	live.clear()
+	_notes.append("audio_pool_parked")
+
+
 func _scenario_kill() -> void:
 	# A collector walks the nearest find before it hunts: the bag gets filled
 	# first and the fight is entered with the potion already banked. Every other
@@ -366,9 +423,16 @@ func _scenario_kill() -> void:
 		var loot := _nearest_pickup()
 		if loot != null:
 			await _move_to(loot.global_position, 10.0, 20.0)
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
+	# The budget is counted in physics frames, not on the wall clock. A wall-clock
+	# deadline makes the number of attacks this scenario lands a function of how
+	# busy the machine was, so two launches on the same seed printed different
+	# `attacks=` and different kill tallies — and a run whose numbers move under a
+	# fixed seed cannot be re-checked, which is the only reason to record one.
+	# Physics steps carry a fixed delta, so a frame budget makes the whole scenario
+	# a pure function of the seed while keeping the same nominal 75 s at 60 Hz.
+	var frame_budget := Engine.get_physics_frames() + int(SCENARIO_TIMEOUT * 60.0)
 	var attacks := 0
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < frame_budget:
 		if GameState.hp < GameState.max_hp * float(_profile["heal_at"]):
 			await _tap(&"quick_slot_1")
 			await _wait(0.2)
@@ -445,7 +509,16 @@ func _scenario_quest_loop() -> void:
 	_notes.append("quest_taken")
 
 	# 2. hunt until the objective is met
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 2.2 * 1000.0)
+	#
+	# The budget is counted in physics frames rather than on the wall clock. A
+	# wall-clock deadline makes the number of hunting iterations this run gets a
+	# function of how loaded the machine was while it ran, so two launches on the
+	# same seed ended with different kill counts and a PASS that could not be
+	# reproduced — which is the whole point of recording a seed. Physics advances a
+	# fixed delta per tick, so a frame budget makes the run a pure function of the
+	# seed: same seed, same fight, same numbers, on any machine. The nominal wall
+	# time at 60 Hz is unchanged.
+	var frame_budget := Engine.get_physics_frames() + int(SCENARIO_TIMEOUT * 2.2 * 60.0)
 	var attacks := 0
 	# The bot's straight-line approach cannot always get around a tree that sits
 	# between it and the nearest wolf, so it can pin itself against the obstacle
@@ -458,7 +531,7 @@ func _scenario_quest_loop() -> void:
 	var cur_id := -1
 	var cur_best := INF
 	var stalled := 0
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < frame_budget:
 		if QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY:
 			break
 		if GameState.hp < GameState.max_hp * float(_profile["heal_at"]):
@@ -541,7 +614,10 @@ func _scenario_quest_loop() -> void:
 
 func _scenario_soak() -> void:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 4242
+	# Derived from the run seed rather than a constant of its own: a soak that mixes
+	# its own private fixed number into a run whose seed is reported elsewhere is a
+	# soak whose wander cannot be reproduced by re-running the seed it printed.
+	rng.seed = run_seed
 	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
 	var heading := Vector2.RIGHT
 	var segments := 0
@@ -1742,9 +1818,27 @@ func _scenario_economy() -> void:
 			await _tap(&"interact")
 			await _wait(0.2)
 		unblock += 1
-	if not await _travel_to(_tile_center(Vector2i(13, 10)), 12.0, 60.0):
-		_notes.append("equip_walk_unreachable hp=%d taken=%s" % [
-			GameState.hp, _fmt_counts(_m_taken_by_type)])
+	# What this leg is for is a step out of the merchant's own reach, so that is
+	# what it proves. Chasing a pixel on the corner instead let the lane orbit
+	# twenty-five pixels short of the tile until the budget ran out, while the
+	# hero had long since been out of range of the till — the walk was reported
+	# unreachable by a test of the wrong thing. The reach is read off the player's
+	# own constant rather than repeated here, so a change to how close the hero
+	# has to stand to talk cannot silently move this threshold.
+	var road_corner := _tile_center(Vector2i(13, 10))
+	var reached_corner := await _travel_to(road_corner, 28.0, 60.0)
+	var till_reach := float(load("res://scripts/player/player.gd")
+		.get_script_constant_map().get("INTERACT_RADIUS", 26.0))
+	var clear_of_till := _player_pos().distance_to(merchant.global_position) > till_reach
+	if not reached_corner and not clear_of_till:
+		# The note still says which of the two ways this leg fails: a hero still
+		# standing in a till never moved, a hero who walked simply ran out of
+		# road. Without the distance and the UI flag the two read the same.
+		_notes.append("equip_walk_unreachable hp=%d ui=%s dist=%.0f till=%.0f taken=%s" % [
+			GameState.hp, str(GameState.ui_blocking),
+			_player_pos().distance_to(road_corner),
+			_player_pos().distance_to(merchant.global_position),
+			_fmt_counts(_m_taken_by_type)])
 		return
 	if not await _equip_via_inventory(hud, "Железный меч"):
 		_notes.append("equip_ui_failed")

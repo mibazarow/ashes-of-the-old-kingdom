@@ -1083,6 +1083,38 @@ func _test_save_fixtures() -> void:
 	completed["save_fixtures"] = true
 
 
+## How many distinct ids an edge list mentions. Used to tell "eleven edges" apart
+## from "eleven edges over ten quests", which is the difference between a chain and
+## a fork with a quest hanging off it twice.
+func _unique_count(ids: Array[String]) -> int:
+	var seen: Dictionary = {}
+	for id: String in ids:
+		seen[id] = true
+	return seen.size()
+
+
+## Puts the world into the state the quest chain implies before `quest_id`, so a
+## group that exercises one quest downstream of the head is testing that quest
+## rather than fighting the gate that keeps it locked. The prerequisites are read
+## out of `data/quests.json` itself and satisfied recursively, so editing the chain
+## moves every group with it instead of stranding one group on an edge nobody
+## updated; `min_level` is met the same way. Nothing here goes through `start()`, so
+## it cannot pay a reward and cannot make a group's economy checks lie.
+func _satisfy_gates(quest_id: String) -> void:
+	var quest: Dictionary = qm.get_quest(quest_id)
+	for requirement: Variant in quest.get("requires", []):
+		var missing := String(requirement)
+		if qm.is_done(missing):
+			continue
+		_satisfy_gates(missing)
+		var stored: Dictionary = qm.states
+		stored[missing] = {"state": qm.STATE_DONE, "progress": qm.target_count(missing)}
+		qm.states = stored
+	var min_level := int(quest.get("min_level", 1))
+	if gs.level < min_level:
+		gs.level = min_level
+
+
 func _test_quest_reward_once() -> void:
 	gs.reset()
 	qm.reset()
@@ -1098,6 +1130,191 @@ func _test_quest_reward_once() -> void:
 	_check(gold_after == gold_before + 60, "reward gold paid once")
 	_check(not qm.turn_in("q01_ash_wolves"), "second turn in refused")
 	_check(gs.gold == gold_after, "no duplicate reward on second turn in")
+	# --- the chain: twelve quests, one path, a gate on everything but the head ---
+	#
+	# The critic's finding was that the twelve quests were twelve separate errands:
+	# every entry carried `next: null` and `requires: null`, so nothing unlocked
+	# anything and the "связанных заданий" line in the plan described a graph that
+	# did not exist. These checks read the table off the disk rather than off the
+	# manager's copy of it, because the claim being made is about the data file the
+	# player's save will be interpreted against.
+	var chain_raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://data/quests.json"))
+	var chain_defs: Dictionary = (chain_raw as Dictionary).get("quests", {}) if chain_raw is Dictionary else {}
+	_check(chain_defs.size() == 12, "the chain covers twelve quests (got %d)" % chain_defs.size())
+
+	var heads: Array[String] = []
+	var tails: Array[String] = []
+	var entered: Array[String] = []
+	for quest_id: String in chain_defs.keys():
+		var entry: Dictionary = chain_defs[quest_id]
+		var requires: Array = entry.get("requires", []) as Array
+		if requires.is_empty():
+			heads.append(quest_id)
+		for requirement: Variant in requires:
+			entered.append(String(requirement))
+		if entry.get("next", null) == null:
+			tails.append(quest_id)
+	_check(heads == ["q01_ash_wolves"],
+		"the chain has exactly one head and it is Edrik's hunt (got %s)" % ", ".join(heads))
+	_check(tails == ["q12_officers_seal"],
+		"the chain has exactly one tail and it is the officer's seal (got %s)" % ", ".join(tails))
+	_check(entered.size() == 11 and entered.size() == _unique_count(entered),
+		"every quest but the head is entered by exactly one edge (%d edges, %d distinct)"
+			% [entered.size(), _unique_count(entered)])
+
+	# `next` is the same edge read from the other end. Two fields describing one
+	# relation is only safe while they are checked against each other, or the
+	# journal would advertise a sequel the gate does not actually open.
+	var disagreeing: Array[String] = []
+	for quest_id: String in chain_defs.keys():
+		var nxt: Variant = (chain_defs[quest_id] as Dictionary).get("next", null)
+		if nxt == null:
+			continue
+		var forward_requires: Array = (chain_defs[String(nxt)] as Dictionary).get("requires", []) as Array
+		if forward_requires.size() != 1 or String(forward_requires[0]) != quest_id:
+			disagreeing.append("%s -> %s" % [quest_id, String(nxt)])
+	_check(disagreeing.is_empty(),
+		"every `next` agrees with the `requires` of the quest it names (%s)"
+			% ", ".join(disagreeing))
+
+	# Walking `next` from the head must reach all twelve: a quest the chain never
+	# arrives at is content no player can ever be offered.
+	var walked: Array[String] = []
+	var cursor: Variant = heads[0] if not heads.is_empty() else null
+	while cursor != null and walked.size() <= chain_defs.size():
+		walked.append(String(cursor))
+		cursor = (chain_defs[String(cursor)] as Dictionary).get("next", null)
+	_check(walked.size() == chain_defs.size(),
+		"the main line reaches every quest exactly once (%d of %d)"
+			% [walked.size(), chain_defs.size()])
+
+	# --- the gate, on a world where nothing has been taken ----------------------
+	gs.reset()
+	qm.reset()
+	_check(qm.STATE_LOCKED == "locked", "the manager names its fifth state 'locked'")
+	var offered_now: Array[String] = []
+	var locked_now: Array[String] = []
+	for quest_id: String in chain_defs.keys():
+		match qm.state_of(quest_id):
+			qm.STATE_AVAILABLE:
+				offered_now.append(quest_id)
+			qm.STATE_LOCKED:
+				locked_now.append(quest_id)
+	_check(offered_now == ["q01_ash_wolves"],
+		"a fresh run offers the head and nothing else (got %s)" % ", ".join(offered_now))
+	_check(locked_now.size() == 11,
+		"the other eleven are locked rather than merely un-taken (got %d)" % locked_now.size())
+	_check(not qm.start("q12_officers_seal"),
+		"the tail of the chain cannot be taken by asking for it by name")
+	_check(String(qm.locked_reason("q02_gather_fangs")).contains("Пепельные волки"),
+		"a locked quest says which quest it is waiting for (got '%s')"
+			% qm.locked_reason("q02_gather_fangs"))
+	# A lock is a reading, not a record: nothing may be written for a quest the
+	# player never took, or a save would start carrying gates of its own.
+	_check((qm.states as Dictionary).is_empty(),
+		"locked quests store nothing — the state is derived, not saved")
+
+	# --- finishing the head opens exactly the next link, and says so ------------
+	var unlock_toasts: Array[String] = []
+	var unlock_listener := func(message: String) -> void: unlock_toasts.append(message)
+	bus.toast.connect(unlock_listener)
+	_check(qm.start("q01_ash_wolves"), "the head still starts on a fresh run")
+	for i in range(qm.target_count("q01_ash_wolves")):
+		bus.enemy_died.emit(StringName("chain-%d" % i), &"ash_wolf", Vector2.ZERO)
+	_check(qm.turn_in("q01_ash_wolves"), "the head turns in")
+	bus.toast.disconnect(unlock_listener)
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_AVAILABLE,
+		"finishing the head unlocked the next link")
+	_check(qm.state_of("q03_clear_boars") == qm.STATE_LOCKED,
+		"and unlocked nothing beyond it — the chain opens one link at a time")
+	var announced := false
+	for message: String in unlock_toasts:
+		if message.contains("Доступно задание") and message.contains("Клыки для настоя"):
+			announced = true
+	_check(announced,
+		"the game announces the quest that just became reachable (%s)" % ", ".join(unlock_toasts))
+	_check(qm.start("q02_gather_fangs"), "the link that just opened can now be taken")
+
+	# A quest the player already holds is never taken back away from him: the gate
+	# governs taking, and a chain that could revoke a quest mid-hunt would be able
+	# to strand a player holding an objective he can no longer turn in.
+	qm.states["q01_ash_wolves"] = {"state": qm.STATE_AVAILABLE, "progress": 0}
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE,
+		"re-opening the prerequisite does not lock a quest already in hand")
+
+	# --- q10: the gate the critic found missing ---------------------------------
+	# Alvena sits in the village and asks for bone_shard, which only starts dropping
+	# two zones down. Ungated she handed a two-zone errand to a level 1 character
+	# with nothing telling him where the material comes from. She now needs the
+	# captain of the guard dead AND a level that means the player has been somewhere.
+	gs.reset()
+	qm.reset()
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_LOCKED, "Alvena is locked on a fresh run")
+	var before_alvena: Array = (chain_defs["q10_armor_fit"] as Dictionary).get("requires", []) as Array
+	_check(before_alvena.size() == 1 and String(before_alvena[0]) == "q07_captain_guard",
+		"Alvena waits on the captain of the guard (got %s)" % ", ".join(before_alvena))
+	var alvena_level := int((chain_defs["q10_armor_fit"] as Dictionary).get("min_level", 1))
+	_check(alvena_level >= 2,
+		"Alvena asks for a level above the one a fresh character carries (got %d)" % alvena_level)
+	# Everything the main line pays before the player reaches her, walking `next`
+	# from the head up to but not including Alvena herself.
+	var chain_to_alvena: Array[String] = []
+	var walker: Variant = heads[0]
+	while walker != null and String(walker) != "q10_armor_fit":
+		chain_to_alvena.append(String(walker))
+		walker = (chain_defs[String(walker)] as Dictionary).get("next", null)
+	_check(chain_to_alvena.back() == "q07_captain_guard" and chain_to_alvena.size() == 8,
+		"Alvena is the ninth link, right behind the captain (got %d: %s)"
+			% [chain_to_alvena.size(), ", ".join(chain_to_alvena)])
+	# The level gate has to be reachable by the time the quest chain reaches her:
+	# the rewards the main line pays up to that point, read off the same table, must
+	# clear the threshold the data asks for. Otherwise the level gate is a wall
+	# rather than a gate and the chain dead-ends in the village.
+	var xp_to_alvena := 0
+	for quest_id: String in chain_to_alvena:
+		var reward: Dictionary = (chain_defs[quest_id] as Dictionary).get("reward", {})
+		xp_to_alvena += int(reward.get("xp", 0))
+	var level_at_alvena := 1
+	var curve: Array = (JSON.parse_string(
+		FileAccess.get_file_as_string("res://data/progression.json")) as Dictionary).get("xp_curve", [])
+	# The curve stores TOTAL xp per level, so the level a given pile of xp buys is
+	# the highest threshold it clears. Only the main line's own rewards are counted:
+	# kill xp would make the number larger and the check weaker.
+	for index: int in range(curve.size()):
+		if xp_to_alvena >= int(curve[index]):
+			level_at_alvena = maxi(level_at_alvena, index + 1)
+	_check(xp_to_alvena > 0 and level_at_alvena >= alvena_level,
+		"the main line alone reaches level %d by Alvena (pays %d xp, level %d)"
+			% [alvena_level, xp_to_alvena, level_at_alvena])
+
+	# The two gates are independent: the chain alone does not open her at level 1,
+	# and the level alone does not open her while the captain is standing.
+	var up_to_captain: Array[String] = []
+	var back: Variant = "q07_captain_guard"
+	while back != null and up_to_captain.size() <= chain_defs.size():
+		var back_id := String(back)
+		if up_to_captain.has(back_id):
+			break
+		up_to_captain.append(back_id)
+		var back_requires: Array = (chain_defs[back_id] as Dictionary).get("requires", []) as Array
+		back = back_requires[0] if not back_requires.is_empty() else null
+	for prerequisite: String in up_to_captain:
+		qm.states[prerequisite] = {"state": qm.STATE_DONE, "progress": qm.target_count(prerequisite)}
+	gs.level = 1
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_LOCKED,
+		"the chain alone does not open Alvena below her level")
+	_check(String(qm.locked_reason("q10_armor_fit")).contains("уровень"),
+		"and says the level is what is missing (got '%s')" % qm.locked_reason("q10_armor_fit"))
+	gs.level = alvena_level
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_AVAILABLE,
+		"the level opens her once the chain has also arrived")
+	qm.states.erase("q07_captain_guard")
+	gs.level = 1
+	_check(qm.state_of("q10_armor_fit") == qm.STATE_LOCKED,
+		"the level alone does not open her while the captain is alive")
+
+	gs.reset()
+	qm.reset()
 	completed["quests"] = true
 
 func _test_ranged_enemy_fires() -> void:
@@ -1593,7 +1810,7 @@ func _test_enemy_variants() -> void:
 		_check(boar.get("projectile_scene") == null, "the melee boar carries no projectile")
 		_check(wisp.get("projectile_scene") != null, "the wisp carries the shared projectile scene")
 		_check(int(boar.get("max_health")) == 46, "the boar pool is 46 hp")
-		_check(int(wisp.get("max_health")) == 16, "the wisp pool is 16 hp")
+		_check(int(wisp.get("max_health")) == 22, "the wisp pool is 22 hp")
 		_check(String(boar.get("loot_item")) == "boar_tusk"
 			and String(wisp.get("loot_item")) == "mana_potion",
 			"both new enemies drop items that already exist in the data")
@@ -2930,12 +3147,18 @@ func _test_bot_soak_survival() -> void:
 
 	_check(talk.contains("_move_to(npc.global_position, 18.0, 30.0)") and talk.contains("STATE_ACTIVE"),
 		"BOT-001 still walks 18 px from Edrik on a 30 s budget and checks the active state")
-	_check(kill.contains("SCENARIO_TIMEOUT * 1000.0") and kill.contains('_profile["heal_at"]')
-		and kill.contains('kill_count("ash_wolf")'),
-		"BOT-008 still runs one timeout on the profile heal rule and asserts an ash_wolf kill")
-	_check(loop.contains("SCENARIO_TIMEOUT * 2.2 * 1000.0") and loop.contains("stalled > 120")
-		and loop.contains("quick_slot_1") and loop.contains("_nearest_quest_enemy"),
+	# The budgets are counted in physics frames rather than milliseconds so that a
+	# scenario's outcome is a function of the seed and not of machine load; the
+	# nominal wall time at 60 Hz is the same 75 s and 165 s these scenarios always
+	# had, so the assertion is about the same budget, expressed in the unit that
+	# makes a re-run reproducible.
+	_check(kill.contains("SCENARIO_TIMEOUT * 60.0") and kill.contains('_profile["heal_at"]')
+			and kill.contains('kill_count("ash_wolf")'),
+		"BOT-008 still runs one 75 s budget on the profile heal rule and asserts an ash_wolf kill")
+	_check(loop.contains("SCENARIO_TIMEOUT * 2.2 * 60.0") and loop.contains("stalled > 120")
+			and loop.contains("quick_slot_1") and loop.contains("_nearest_quest_enemy"),
 		"BOT-002 still runs the 2.2x hunt budget with its stall rule and quest-aware targeting")
+
 	_check(saveload.contains("add_gold(7)") and saveload.contains("add_gold(100)")
 		and saveload.contains("take_damage(25)") and saveload.contains("_clear_save_slot(3)"),
 		"BOT-009 still does +7 gold, save, +100 gold and -25 HP, load, then clears slot 3")
@@ -3148,6 +3371,87 @@ func _test_bot_extended() -> void:
 	var heal := _extract_gdscript_func(source, "_heal_if_hurt")
 	_check(heal.contains("heal_impulse") and heal.contains("_potions_drunk += 1"),
 		"the heal rule counts every potion it drinks, which is what balances the economy ledger")
+
+	# --- the seed: recorded, honoured, and enough to re-run the run -------------
+	# The critic's finding was that the pre-release gate could not be executed at
+	# all: no seed was written down anywhere, so a PASS could not be re-created and
+	# "fixed and re-checked" was not a claim anyone could disprove. These checks
+	# hold the three things that make the claim checkable.
+	#
+	# 1. the number is on disk, in the run's own directory, next to the log it
+	#    describes;
+	# Resolved through the tree rather than by name: under `--script` the autoloads
+	# are runtime children of root, not compile-time identifiers in this file.
+	var telemetry: Node = root.get_node_or_null("Telemetry")
+	_check(telemetry != null, "telemetry is loaded for the seed check")
+	if telemetry != null:
+		var meta_raw: Variant = JSON.parse_string(
+			FileAccess.get_file_as_string(String(telemetry.get("run_dir")).path_join("run_meta.json")))
+		_check(meta_raw is Dictionary, "run_meta.json parses for the seed check")
+		var meta: Dictionary = meta_raw if meta_raw is Dictionary else {}
+		_check(meta.has("seed") and meta.has("seed_source") and meta.has("world_seed"),
+			"run_meta.json names the seed, where it came from and the world seed (got %s)"
+				% ", ".join(meta.keys()))
+		_check(int(meta.get("seed", -1)) == int(telemetry.get("seed_value")),
+			"the recorded seed is the seed the process is running on (%s vs %s)"
+				% [str(meta.get("seed", null)), str(telemetry.get("seed_value"))])
+		_check(String(meta.get("seed_source", "")) == String(telemetry.get("seed_source")),
+			"the recorded seed source matches the live one (got '%s' vs '%s')"
+				% [str(meta.get("seed_source", "")), String(telemetry.get("seed_source"))])
+	# 2. the world seed is read off the zone that generates procedurally, not copied
+	#    into a second constant that would silently disagree after an edit;
+	var forest_script := load("res://scripts/world/forest.gd") as GDScript
+	_check(forest_script != null, "the forest script loads for the world-seed check")
+	if forest_script != null:
+		var authored := int(forest_script.get_script_constant_map().get("MAP_SEED", -1))
+		_check(authored > 0, "the forest declares a procedural map seed (got %d)" % authored)
+		if telemetry != null:
+			_check(int(telemetry.call("world_seed")) == authored,
+				"telemetry reports the forest's own MAP_SEED rather than a copy (%d vs %d)"
+					% [int(telemetry.call("world_seed")), authored])
+	# 3. and the number is the thing the stream is actually produced from, so a
+	#    re-run on it reproduces the rolls rather than merely naming a run.
+	seed(12345)
+	var first_stream: Array[float] = [randf(), randf(), randf()]
+	seed(12345)
+	var replayed: Array[float] = [randf(), randf(), randf()]
+	seed(9091)
+	var other_stream: Array[float] = [randf(), randf(), randf()]
+	_check(first_stream == replayed,
+			"the same seed replays the same global stream (%s vs %s)"
+			% [str(first_stream), str(replayed)])
+	_check(first_stream != other_stream,
+			"a different seed produces a different global stream")
+	# Leave the process on the seed its own log records, or the run's written seed
+	# would stop being the seed it finished on.
+	if telemetry != null:
+		telemetry.call("set_run_seed", int(telemetry.get("seed_value")),
+			String(telemetry.get("seed_source")))
+
+	# The bot has to both accept a seed and admit it in its own verdict line, or the
+	# number lives only in a directory nobody pastes into a report.
+	var bot_seed_block := _extract_gdscript_func(source, "start_from_cmdline")
+	_check(bot_seed_block.contains("--seed="),
+		"the bot reads --seed= from the command line")
+	_check(bot_seed_block.contains("set_run_seed"),
+		"a --seed= the operator named is pushed back down into the process, not just echoed")
+	_check(bot_seed_block.contains("Telemetry.seed_value"),
+		"the bot reports the seed the telemetry actually recorded, not one it invented")
+	var finish_block := _extract_gdscript_func(source, "_finish")
+	_check(finish_block.contains("seed=%d") and finish_block.contains("run_seed"),
+		"the verdict line carries the seed the run was reached on")
+	_check(finish_block.contains("--seed=") and finish_block.contains("rerun"),
+		"the summary hands back the exact command that re-runs this verdict")
+	# A bot that bounds its own loop on the wall clock makes its own outcome a
+	# function of machine load, which no seed can undo. The kill scenario the critic
+	# measured as diverging is now bounded in physics frames.
+	var kill_block := _extract_gdscript_func(source, "_scenario_kill")
+	_check(kill_block.contains("Engine.get_physics_frames() < frame_budget"),
+		"the kill scenario is bounded by physics frames, so its result depends only on the seed")
+	_check(not kill_block.contains("Time.get_ticks_msec() < deadline"),
+		"and no longer by how busy the machine was")
+	_check(_extract_gdscript_func(source, "_silence_audio_rng").contains("_pools"),
+		"a bot run parks the audio pool, whose pitch rolls share the simulation's RNG")
 
 	scene.queue_free()
 	await process_frame
@@ -6791,6 +7095,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- collect: progress follows the live inventory -------------------------
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q02_gather_fangs")
 	_check(qm.start("q02_gather_fangs"), "q02 starts")
 	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 is active after start")
 	_check(qm.progress_of("q02_gather_fangs") == 0, "q02 progress is 0 with an empty bag")
@@ -6814,6 +7119,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- turn-in refused when the bag is short --------------------------------
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q02_gather_fangs")
 	qm.start("q02_gather_fangs")
 	gs.add_item("wolf_fang", 4)
 	_check(qm.state_of("q02_gather_fangs") == qm.STATE_READY, "q02 ready with four fangs again")
@@ -6830,6 +7136,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- a collect quest keeps its progress through a save round-trip ---------
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q02_gather_fangs")
 	qm.start("q02_gather_fangs")
 	gs.add_item("wolf_fang", 2)
 	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 is active (2 of 4) before the save")
@@ -6837,7 +7144,11 @@ func _test_village_safe_zone_and_quests() -> void:
 	_check(bool(save_res.get("ok", false)), "save slot 2 ok for a collect quest")
 	gs.reset()
 	qm.reset()
-	_check(qm.state_of("q02_gather_fangs") == qm.STATE_AVAILABLE, "q02 back to available after reset")
+	# `locked`, not `available`: the reset cleared the stored states, and q02 sits
+	# behind q01 in the chain, so an untaken q02 is gated again. The save carries
+	# q02's own state, and loading it restores a quest the player already holds —
+	# a gate governs taking a quest, never keeping one.
+	_check(qm.state_of("q02_gather_fangs") == qm.STATE_LOCKED, "q02 back to locked after reset")
 	var load_res: Dictionary = sm.load_game(2)
 	_check(bool(load_res.get("ok", false)), "load slot 2 ok for a collect quest")
 	_check(qm.state_of("q02_gather_fangs") == qm.STATE_ACTIVE, "q02 state survived the round-trip")
@@ -6847,6 +7158,7 @@ func _test_village_safe_zone_and_quests() -> void:
 	# --- kill objective counts only its own type ------------------------------
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q03_clear_boars")
 	_check(qm.start("q03_clear_boars"), "q03 starts")
 	bus.enemy_died.emit(&"e_wolf1", &"ash_wolf", Vector2.ZERO)
 	_check(qm.progress_of("q03_clear_boars") == 0, "a wolf kill does not advance the boar quest")
@@ -8346,6 +8658,11 @@ func _test_ruins_quests() -> void:
 		"an untouched tablet prompts 'Прочесть скрижаль'")
 
 	# --- first reading: the hunt starts ----------------------------------------
+	# The tablet is the fourth giver in the chain, so the three forest quests that
+	# stand in front of q04 are finished before the first reading. Without this the
+	# tablet would correctly refuse and the group would be testing the gate rather
+	# than the stone.
+	_satisfy_gates("q04_bone_guard")
 	bus.toast.connect(_count_toast)
 	_toast_count = 0
 	_last_toast = ""
@@ -8356,8 +8673,11 @@ func _test_ruins_quests() -> void:
 		"the tablet answered the first reading with a toast (got %d)" % _toast_count)
 	_check(_last_toast == "Скрижаль: Кости у врат",
 		"the tablet named the task it just took on (got '%s')" % _last_toast)
-	_check(qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE,
-		"the second quest stays on offer while the first one runs")
+	# q05 is behind q04 in the chain, so while the hunt runs it is not merely
+	# un-offered, it is gated: the stone has a second task and says nothing about it
+	# until the first one is paid for.
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_LOCKED,
+		"the second quest stays locked while the first one runs")
 	_check(qm.progress_of("q04_bone_guard") == 0, "a fresh hunt starts at zero")
 
 	# A reading in the middle of the hunt must neither start the second quest nor
@@ -8366,7 +8686,7 @@ func _test_ruins_quests() -> void:
 	_last_toast = ""
 	tablet.call("interact", player)
 	_check(qm.state_of("q04_bone_guard") == qm.STATE_ACTIVE
-			and qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE,
+			and qm.state_of("q05_ruin_key") == qm.STATE_LOCKED,
 		"a reading mid-hunt started nothing new")
 	_check(_toast_count == 1 and _last_toast == "Скрижаль помнит: 0 из 4",
 		"the tablet reported the progress instead (got %d toast, '%s')"
@@ -8468,10 +8788,14 @@ func _test_ruins_quests() -> void:
 		"with nothing ready the prompt falls back to 'Прочесть скрижаль'")
 
 	# --- the forest quests are untouched by any of this -------------------------
-	_check(qm.state_of("q01_ash_wolves") == qm.STATE_AVAILABLE
-			and qm.state_of("q02_gather_fangs") == qm.STATE_AVAILABLE
-			and qm.state_of("q03_clear_boars") == qm.STATE_AVAILABLE,
-		"the two ruins quests left all three forest quests on the shelf")
+	# The chain puts the whole forest line in front of the tablet, so by the second
+	# hand-over those three are behind the player rather than still on the shelf.
+	# What the ruins must not do is reach into them: each keeps the state the chain
+	# gave it, none was advanced by a ruin_skeleton kill, and none was paid for twice.
+	_check(qm.state_of("q01_ash_wolves") == qm.STATE_DONE
+			and qm.state_of("q02_gather_fangs") == qm.STATE_DONE
+			and qm.state_of("q03_clear_boars") == qm.STATE_DONE,
+		"the chain ran all three forest quests before the tablet")
 	var wolf: Dictionary = defs.get("q01_ash_wolves", {})
 	var fangs: Dictionary = defs.get("q02_gather_fangs", {})
 	var boars: Dictionary = defs.get("q03_clear_boars", {})
@@ -8513,7 +8837,10 @@ func _test_ruins_quests() -> void:
 
 	# The forest loop end to end, after the ruins quests exist: the kill counter is
 	# still keyed by enemy type, so the new ruin_skeleton quest cannot steal the
-	# wolf kills and the old reward is still the one that lands.
+	# wolf kills and the old reward is still the one that lands. The manager is
+	# cleared first because the chain had already run q01 through to done to open
+	# the tablet, and the head of the chain has no gate to satisfy.
+	qm.reset()
 	_check(qm.start("q01_ash_wolves"), "Edrik's quest still starts")
 	for i in range(3):
 		bus.enemy_died.emit(StringName("ruins-quest-wolf-%d" % i), &"ash_wolf", Vector2.ZERO)
@@ -8538,10 +8865,11 @@ func _finish_ruins_quest_group(scene: Node) -> void:
 	qm.reset()
 	gs.reset()
 	DamageResolver.reset()
-	_check(qm.state_of("q04_bone_guard") == qm.STATE_AVAILABLE
-			and qm.state_of("q05_ruin_key") == qm.STATE_AVAILABLE
-			and qm.state_of("q01_ash_wolves") == qm.STATE_AVAILABLE,
-		"the group left no quest state behind")
+	# The claim is about stored state, not about what a quest reads as: after a
+	# reset every quest behind the head of the chain reports `locked`, which is a
+	# derived reading and not a record. `states` being empty is the thing that has
+	# to be true for the next group to start clean.
+	_check((qm.states as Dictionary).is_empty(), "the group left no quest state behind")
 	_check(gs.count_item("ruin_key") == 0, "the group left no key behind")
 	_check(get_nodes_in_group("quest_stone").is_empty(), "the group left no tablet in the tree")
 	_check(String(gs.zone) == "forest", "the group leaves the run in the forest")
@@ -9864,9 +10192,9 @@ const ROSTER_NEW_TYPES: Dictionary = {
 	"cultist_caster": {"hp": 24, "dmg": 6},
 	"royal_guard": {"hp": 70, "dmg": 14},
 	"grave_hound": {"hp": 20, "dmg": 7},
-	"bone_crawler": {"hp": 16, "dmg": 8},
-	"plague_bearer": {"hp": 48, "dmg": 8},
-	"ash_knight": {"hp": 95, "dmg": 18},
+	"bone_crawler": {"hp": 28, "dmg": 8},
+	"plague_bearer": {"hp": 84, "dmg": 14},
+	"ash_knight": {"hp": 110, "dmg": 20},
 }
 
 ## Where each of the eighteen is supposed to be found. Kept as data so the roster
@@ -10231,6 +10559,16 @@ func _test_enemy_roster() -> void:
 	await process_frame
 
 	# --- 4. every post in every zone stands on ground the player can walk ------
+	#
+	# The same walk also measures the difficulty curve (spec §10: the deeper the
+	# zone, the harder the ground). The critic found the curve inverted: the
+	# undercroft averaged 25.8 hp against the ruins' 33.5, so the zone between the
+	# ruins and the finale was the easiest place in the second half of the game.
+	# The measure is the average pool of the *regular* posts a zone fields, bosses
+	# excluded — a boss is a set piece, not the ground a player walks, and counting
+	# the King would let a zone buy its rank by adding one 600 hp node. The number
+	# is read off the live scene rather than a literal so that editing a spawn table
+	# moves the assertion with it.
 	var main_packed: PackedScene = load("res://scenes/main/main.tscn")
 	var scene := main_packed.instantiate()
 	root.add_child(scene)
@@ -10239,6 +10577,9 @@ func _test_enemy_roster() -> void:
 	var manager := scene.get_node_or_null("ZoneManager")
 	_check(manager != null, "the roster group has a zone manager to walk the zones")
 	var new_posts := 0
+	var zone_avg: Dictionary = {}
+	var zone_regular_posts: Dictionary = {}
+	var zone_kinds: Dictionary = {}
 	if manager != null:
 		for leg: Array in [["forest", Vector2i(4, 9)], ["ruins", Vector2i(3, 11)],
 				["dungeon", Vector2i(3, 12)], ["fortress", Vector2i(4, 14)]]:
@@ -10257,6 +10598,9 @@ func _test_enemy_roster() -> void:
 			var zone_types: Array[String] = []
 			var zone_posts := 0
 			var posted := 0
+			var regular_pool := 0
+			var regular_posts := 0
+			var regular_kinds: Array[String] = []
 			for node in get_nodes_in_group("enemy"):
 				if not _is_under(node, world):
 					continue
@@ -10283,9 +10627,19 @@ func _test_enemy_roster() -> void:
 					zone_types.append(post_type)
 				if ROSTER_NEW_TYPES.has(post_type):
 					zone_posts += 1
+				if not ROSTER_BOSS_TYPES.has(post_type):
+					regular_pool += int(post.get("max_health"))
+					regular_posts += 1
+					if not regular_kinds.has(post_type):
+						regular_kinds.append(post_type)
 			zone_types.sort()
-			print("  %-9s %2d posts, %d types — %s"
-				% [String(leg[0]), posted, zone_types.size(), ", ".join(zone_types)])
+			zone_avg[String(leg[0])] = (
+				float(regular_pool) / float(regular_posts) if regular_posts > 0 else 0.0)
+			zone_regular_posts[String(leg[0])] = regular_posts
+			zone_kinds[String(leg[0])] = regular_kinds.size()
+			print("  %-9s %2d posts, %d types, avg pool %.2f hp — %s"
+				% [String(leg[0]), posted, zone_types.size(),
+					float(zone_avg[String(leg[0])]), ", ".join(zone_types)])
 			_check(off_ground.is_empty(),
 				"every %s enemy spawns on a walkable tile (%s)"
 					% [String(leg[0]), ", ".join(off_ground)])
@@ -10300,6 +10654,56 @@ func _test_enemy_roster() -> void:
 			new_posts += zone_posts
 	_check(new_posts >= 18,
 		"the four zones together field every new type at least once (got %d posts)" % new_posts)
+
+	# --- 4b. the difficulty curve runs one way ---------------------------------
+	#
+	# Four claims, all of them about the ground rather than the set pieces:
+	#
+	# * the average pool does not go down as the player goes deeper. The critic
+	#   measured 27.1 / 33.5 / 25.8 / 32.3 — the undercroft sat below both its
+	#   neighbours, so the curve inverted exactly once, in the middle;
+	# * the undercroft lands inside the band the design asks of it (34–40 hp),
+	#   which is what "deeper than the ruins" has to mean in numbers before it can
+	#   be checked at all;
+	# * the finale is the hardest ground in the world, not merely harder than the
+	#   room before it — the last hour should not be beatable with the second
+	#   zone's reflexes;
+	# * the finale fields at least as many distinct regular types as the opening
+	#   zone does, and materially more posts than it used to. The undercroft and
+	#   the sanctum were the two thinnest zones in the game at 11 and 10 live
+	#   instances, and the sanctum introduced one type the player had not already
+	#   met: the last content in the world was the least new content in it.
+	var curve: Array[String] = ["forest", "ruins", "dungeon", "fortress"]
+	var inverted: Array[String] = []
+	for i: int in range(curve.size() - 1):
+		var lower := float(zone_avg.get(curve[i], 0.0))
+		var upper := float(zone_avg.get(curve[i + 1], 0.0))
+		if upper < lower:
+			inverted.append("%s %.2f -> %s %.2f" % [curve[i], lower, curve[i + 1], upper])
+	_check(inverted.is_empty(),
+		"the average regular pool never falls as the player goes deeper (%s)"
+			% ", ".join(inverted))
+	var undercroft := float(zone_avg.get("dungeon", 0.0))
+	_check(undercroft > 34.0 and undercroft < 40.0,
+		"the undercroft averages between 34 and 40 hp (got %.2f)" % undercroft)
+	_check(float(zone_avg.get("fortress", 0.0)) > undercroft,
+		"the sanctum is harder ground than the undercroft (%.2f vs %.2f)"
+			% [float(zone_avg.get("fortress", 0.0)), undercroft])
+	_check(float(zone_avg.get("fortress", 0.0)) > float(zone_avg.get("ruins", 0.0)),
+		"the sanctum is harder ground than the ruins (%.2f vs %.2f)"
+			% [float(zone_avg.get("fortress", 0.0)), float(zone_avg.get("ruins", 0.0))])
+	_check(int(zone_regular_posts.get("dungeon", 0)) >= 12,
+		"the undercroft fields at least 12 regular posts (got %d)"
+			% int(zone_regular_posts.get("dungeon", 0)))
+	_check(int(zone_regular_posts.get("fortress", 0)) >= 16,
+		"the sanctum fields at least 16 regular posts (got %d)"
+			% int(zone_regular_posts.get("fortress", 0)))
+	_check(int(zone_kinds.get("fortress", 0)) >= 8,
+		"the sanctum fields at least 8 distinct regular types (got %d)"
+			% int(zone_kinds.get("fortress", 0)))
+	_check(int(zone_kinds.get("fortress", 0)) >= int(zone_kinds.get("forest", 0)),
+		"the finale is no less varied than the opening zone (%d types vs %d)"
+			% [int(zone_kinds.get("fortress", 0)), int(zone_kinds.get("forest", 0))])
 	_check(bool(manager.call("travel", "forest")), "the roster group returns to the forest")
 	await process_frame
 	scene.queue_free()
@@ -11299,6 +11703,7 @@ func _test_new_npc_and_quests() -> void:
 
 	# --- q09 through Seris: collect wolf_fang, pay exactly once ---------------
 	qm.reset()
+	_satisfy_gates("q09_the_mill")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 starts available")
 	seris.call("interact", player)
 	if hud != null and hud.has_method("close_dialogue"):
@@ -11327,7 +11732,11 @@ func _test_new_npc_and_quests() -> void:
 	_check(gs.gold == q9_gold_after, "q09 pays nothing on a second turn-in")
 
 	# --- q10 through Alvena: collect bone_shard, pay exactly once --------------
+	# Alvena is the gated one: the chain puts the captain behind her, and she asks
+	# for a level the player only carries by that point. Both gates are satisfied
+	# here rather than argued with, because the group is testing her payout.
 	qm.reset()
+	_satisfy_gates("q10_armor_fit")
 	alvena.call("interact", player)
 	if hud != null and hud.has_method("close_dialogue"):
 		hud.call("close_dialogue")
@@ -11352,6 +11761,7 @@ func _test_new_npc_and_quests() -> void:
 	# releases; this group runs after it, clears the slot on both sides, and leaves
 	# no residue so the later king group's own round-trip starts from a clean slot.
 	qm.reset()
+	_satisfy_gates("q09_the_mill")
 	qm.start("q09_the_mill")
 	gs.add_item("wolf_fang", 1)
 	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 active (1 of 3) before the save")
@@ -11360,7 +11770,7 @@ func _test_new_npc_and_quests() -> void:
 	_check(bool(save_res.get("ok", false)), "save slot 2 ok for a new quest")
 	gs.reset()
 	qm.reset()
-	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 back to available after reset")
+	_check(qm.state_of("q09_the_mill") == qm.STATE_LOCKED, "q09 back to locked after reset")
 	var load_res: Dictionary = sm.load_game(2)
 	_check(bool(load_res.get("ok", false)), "load slot 2 ok for a new quest")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "q09 state survived the round-trip")
@@ -11410,6 +11820,7 @@ func _test_new_npc_and_quests() -> void:
 			"Nela is not standing on an enemy, a plate or the stair (%s)" % ", ".join(nela_on_prop))
 
 		qm.reset()
+		_satisfy_gates("q11_light_the_way")
 		var nplayer := undercroft.get_node_or_null("Player") as Node2D
 		nela.call("interact", nplayer)
 		if hud != null and hud.has_method("close_dialogue"):
@@ -11478,6 +11889,7 @@ func _test_new_npc_and_quests() -> void:
 			"Oren is not standing on an enemy or the stair (%s)" % ", ".join(oren_on_prop))
 
 		qm.reset()
+		_satisfy_gates("q12_officers_seal")
 		var fplayer := fortress.get_node_or_null("Player") as Node2D
 		oren.call("interact", fplayer)
 		if hud != null and hud.has_method("close_dialogue"):
@@ -12386,6 +12798,7 @@ func _test_king_and_endings() -> void:
 	gs.reset()
 	qm.reset()
 	DamageResolver.reset()
+	_satisfy_gates("q06_the_crown")
 	_check(bool(qm.call("start", "q06_the_crown")), "q06 starts")
 	for i in range(6):
 		bus.enemy_died.emit(StringName("rs%d" % i), &"ruin_skeleton", Vector2.ZERO)
@@ -12398,6 +12811,7 @@ func _test_king_and_endings() -> void:
 
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q07_captain_guard")
 	_check(bool(qm.call("start", "q07_captain_guard")), "q07 starts")
 	bus.enemy_died.emit(&"cap1", &"captain_of_the_guard", Vector2.ZERO)
 	_check(String(qm.call("state_of", "q07_captain_guard")) == "ready", "a boss kill makes q07 ready")
@@ -12406,6 +12820,7 @@ func _test_king_and_endings() -> void:
 
 	gs.reset()
 	qm.reset()
+	_satisfy_gates("q08_the_bell")
 	_check(bool(qm.call("start", "q08_the_bell")), "q08 starts")
 	bus.enemy_died.emit(&"bell1", &"bell_ringer", Vector2.ZERO)
 	_check(String(qm.call("state_of", "q08_the_bell")) == "ready", "a boss kill makes q08 ready")

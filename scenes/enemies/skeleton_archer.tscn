@@ -19,9 +19,9 @@ script = ExtResource("1_enemy")
 kind = 1
 enemy_type = &"ruin_skeleton_archer"
 display_name = "Скелет-лучник"
-max_health = 22
-attack_damage = 8
-xp_reward = 20
+max_health = 26
+attack_damage = 9
+xp_reward = 24
 gold_reward = 10
 loot_item = "bone_shard"
 loot_chance = 0.4
@@ -39,7 +39,7 @@ shape = SubResource("body_shape")
 
 [node name="HealthComponent" type="Node" parent="."]
 script = ExtResource("3_health")
-max_health = 22
+max_health = 26
 
 [node name="AttackHitbox" type="Area2D" parent="."]
 collision_layer = 16

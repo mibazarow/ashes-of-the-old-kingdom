@@ -6,9 +6,21 @@ const STATE_AVAILABLE := "available"
 const STATE_ACTIVE := "active"
 const STATE_READY := "ready"
 const STATE_DONE := "done"
+## A quest the player is not allowed to take yet. The state is DERIVED, never
+## stored: it is what `available` would have been while an entry in `requires` is
+## still unfinished or `min_level` has not been reached. Nothing writes it into
+## `states`, so a save carries no lock and a quest can never be un-locked by
+## editing a save file, and a quest already in progress keeps its stored state no
+## matter what happens to the quests it was gated on.
+const STATE_LOCKED := "locked"
 
 var quests: Dictionary = {}
 var states: Dictionary = {}
+
+## The last measured lock state of every quest id, so the moment a gate lifts can
+## be announced exactly once. Rebuilt wholesale on load, save and reset — those
+## three are the only ways the world can change under us without a signal.
+var _was_locked: Dictionary = {}
 
 
 func _ready() -> void:
@@ -19,6 +31,53 @@ func _ready() -> void:
 	# objectives ignore the signal (their progress is a stored counter), so wiring
 	# this here cannot disturb the existing hunt quest.
 	EventBus.inventory_changed.connect(_recompute_collect_progress)
+	# The two events a gate can hinge on: finishing the quest another quest
+	# `requires`, and reaching the `min_level` one asks for. Both are checked by
+	# `_announce_unlocks`, which compares against the snapshot rather than
+	# listening for an "unlocked" event, because there is no such event — a lock is
+	# a derived state, and a derived state only changes when one of its inputs
+	# does. `_snapshot_locks` runs last so the snapshot is taken against the world
+	# as loaded, not against an empty `states` that would make a loaded game
+	# announce quests the player already had.
+	EventBus.quest_completed.connect(_on_quest_completed)
+	EventBus.player_xp_changed.connect(_on_player_xp_changed)
+	_snapshot_locks()
+
+
+## Records the lock state of every defined quest without announcing anything. The
+## baseline the next `_announce_unlocks` compares against.
+func _snapshot_locks() -> void:
+	_was_locked = {}
+	for quest_id: String in quests.keys():
+		_was_locked[quest_id] = is_locked(quest_id)
+
+
+func _on_quest_completed(_quest_id: StringName) -> void:
+	_announce_unlocks()
+
+
+func _on_player_xp_changed(_current: int, _needed: int, _level: int) -> void:
+	_announce_unlocks()
+
+
+## Announces the quests whose gate lifted since the last measurement. A quest that
+## was never offered to the player and is now offerable is otherwise invisible:
+## the journal only lists taken quests, and the giver who holds it is in a zone the
+## player has no reason to walk back into. The toast is the only hint the game
+## gives that content the player could not reach an hour ago is now reachable, so
+## it names the quest and the place it is handed out.
+func _announce_unlocks() -> void:
+	for quest_id: String in quests.keys():
+		var now_locked := is_locked(quest_id)
+		var was_locked := bool(_was_locked.get(quest_id, false))
+		_was_locked[quest_id] = now_locked
+		if was_locked and not now_locked:
+			var quest: Dictionary = get_quest(quest_id)
+			var title := String(quest.get("title", quest_id))
+			var where := String(quest.get("where", ""))
+			EventBus.toast.emit("Доступно задание: %s%s"
+				% [title, (" — " + where) if where != "" else ""])
+			Telemetry.event(&"quest_unlocked", {"quest_id": quest_id})
 
 
 func _load_definitions() -> void:
@@ -38,10 +97,59 @@ func get_quest(quest_id: String) -> Dictionary:
 
 
 func state_of(quest_id: String) -> String:
-	var s: Variant = states.get(quest_id, {})
+	# `null` rather than `{}` as the miss sentinel: an empty Dictionary passes an
+	# `is Dictionary` test, so defaulting to one would make every untaken quest read
+	# as a stored one and quietly bypass the gate below.
+	var s: Variant = states.get(quest_id, null)
 	if s is Dictionary:
 		return String(s.get("state", STATE_AVAILABLE))
-	return STATE_AVAILABLE
+	return STATE_AVAILABLE if _gates_met(quest_id) else STATE_LOCKED
+
+
+## True when nothing stands between the player and taking this quest: every quest
+## listed in `requires` is finished, and the level is at or above `min_level`.
+## A quest with no definition reports true on purpose — it has no gates to fail,
+## and `start()` is the one that refuses an unknown id, so that refusal stays the
+## single place an undefined quest is turned away.
+func _gates_met(quest_id: String) -> bool:
+	var quest: Dictionary = get_quest(quest_id)
+	if quest.is_empty():
+		return true
+	var requirements: Variant = quest.get("requires", [])
+	if requirements is Array:
+		for requirement: Variant in requirements:
+			if not is_done(String(requirement)):
+				return false
+	return GameState.level >= int(quest.get("min_level", 1))
+
+
+## True while a quest that has not been taken yet is still behind a gate. A quest
+## already in progress, ready or finished is never locked: the gate governs taking,
+## not keeping, so a quest cannot be revoked from a player who has it.
+func is_locked(quest_id: String) -> bool:
+	return state_of(quest_id) == STATE_LOCKED
+
+
+## Why the player cannot take this quest yet, in the player's own words, or an
+## empty string when nothing is missing. The givers do not ask this — they simply
+## stop offering a locked quest, because their offer loops match on the four
+## offerable states and `locked` is not one of them — but a direct `start()` does,
+## and so does anything that wants to explain a refusal instead of staying silent.
+func locked_reason(quest_id: String) -> String:
+	var quest: Dictionary = get_quest(quest_id)
+	if quest.is_empty():
+		return ""
+	var requirements: Variant = quest.get("requires", [])
+	if requirements is Array:
+		for requirement: Variant in requirements:
+			var missing := String(requirement)
+			if not is_done(missing):
+				var missing_title := String(get_quest(missing).get("title", missing))
+				return "Сначала нужно выполнить: %s" % missing_title
+	var min_level := int(quest.get("min_level", 1))
+	if GameState.level < min_level:
+		return "Нужен уровень %d" % min_level
+	return ""
 
 
 func progress_of(quest_id: String) -> int:
@@ -96,6 +204,17 @@ func is_done(quest_id: String) -> bool:
 
 func start(quest_id: String) -> bool:
 	if get_quest(quest_id).is_empty():
+		return false
+	if state_of(quest_id) == STATE_LOCKED:
+		# The givers never reach this branch — they skip a locked quest on their
+		# way past it — so the only caller that lands here is one that asked for
+		# this quest by name. It gets told why in the same words the journal would
+		# use, rather than a silent false.
+		var reason := locked_reason(quest_id)
+		if reason != "":
+			EventBus.toast.emit(reason)
+			Telemetry.event(&"quest_start_refused",
+				{"quest_id": quest_id, "reason": reason})
 		return false
 	if state_of(quest_id) != STATE_AVAILABLE:
 		return false
@@ -194,9 +313,15 @@ func to_dict() -> Dictionary:
 	return states.duplicate(true)
 
 
+## Restores stored states only. Locks are not saved and are not restored: they are
+## recomputed from the restored `states` plus the level, which is why a save cannot
+## hold a quest open that the gates have since closed, and why the snapshot is
+## retaken here instead of announcing every quest a loaded game already unlocked.
 func from_dict(d: Dictionary) -> void:
 	states = d.duplicate(true)
+	_snapshot_locks()
 
 
 func reset() -> void:
 	states = {}
+	_snapshot_locks()

@@ -18,9 +18,9 @@ script = ExtResource("1_enemy")
 kind = 0
 enemy_type = &"plague_bearer"
 display_name = "Чумной носитель"
-max_health = 48
-attack_damage = 8
-xp_reward = 26
+max_health = 84
+attack_damage = 14
+xp_reward = 46
 gold_reward = 11
 loot_item = "bone_shard"
 loot_chance = 0.5
@@ -36,7 +36,7 @@ shape = SubResource("body_shape")
 
 [node name="HealthComponent" type="Node" parent="."]
 script = ExtResource("3_health")
-max_health = 48
+max_health = 84
 
 [node name="AttackHitbox" type="Area2D" parent="."]
 collision_layer = 16

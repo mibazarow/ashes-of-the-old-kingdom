@@ -18,9 +18,9 @@ script = ExtResource("1_enemy")
 kind = 0
 enemy_type = &"ash_knight"
 display_name = "Пепельный рыцарь"
-max_health = 95
-attack_damage = 18
-xp_reward = 55
+max_health = 110
+attack_damage = 20
+xp_reward = 68
 gold_reward = 30
 loot_item = "health_potion"
 loot_chance = 0.5
@@ -37,7 +37,7 @@ shape = SubResource("body_shape")
 
 [node name="HealthComponent" type="Node" parent="."]
 script = ExtResource("3_health")
-max_health = 95
+max_health = 110
 
 [node name="AttackHitbox" type="Area2D" parent="."]
 collision_layer = 16
