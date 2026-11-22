@@ -120,6 +120,58 @@ const SOAK_DISENGAGE_RANGE := 60.0
 const SOAK_RETREAT_TIME := 0.6
 const SOAK_RETREAT_BUDGET := 25.0
 
+## BOT-003 — which enemy kinds stand in for the three roles the spec's arena
+## (§19.5: «ближний, дальний и поддерживающий враг») asks for. The list is a
+## constant and not a guess made at runtime because the forest genuinely does not
+## have a support enemy: `aura_heal_per_second` is set on exactly one scene in
+## the game, `cultist_caster.tscn`, and that scene is placed in one place, the
+## ruins hall behind the sealed door. So the arena names the roles by the trait
+## that defines them and goes and finds each one, instead of quietly passing on
+## two roles and a wolf.
+##
+## `cultist_caster` is listed under support and deliberately not under ranged
+## even though its scene is `kind = 1`: the aura is the trait under test, and a
+## caster counted as the ranged entry would let the arena pass without ever
+## meeting a healer.
+const ARENA_MELEE_KINDS: Array[String] = ["ash_wolf", "ash_boar", "spider", "slime", "tick",
+	"lumberjack", "root_beast", "ruin_skeleton", "shieldbearer", "royal_guard",
+	"grave_hound"]
+const ARENA_RANGED_KINDS: Array[String] = ["ash_archer", "ash_wisp", "ruin_skeleton_archer"]
+const ARENA_SUPPORT_KINDS: Array[String] = ["cultist_caster"]
+## The arena spans two zones now, so it gets its own window instead of borrowing
+## the 75 s single-map budget: the forest's archer and the gate are forty tiles
+## east of the spawn, and the healer is a key, a lever and a hall further still.
+const ARENA_TIMEOUT := 330.0
+## How far the arena will detour for a role it has not yet traded blows with, and
+## how close anything has to be before the arena stops marching and swings. The
+## leash is short on purpose: a role the bot cannot walk to in a few seconds is a
+## role the leg it is on will bring it to anyway.
+const ARENA_HUNT_LEASH := 200.0
+const ARENA_ENGAGE := 26.0
+## Longest the arena walks without re-checking its own health. `_travel_to` is the
+## walker; the arena only needs a chance to heal and to break off between legs.
+const ARENA_CHUNK := 6.0
+## Drink earlier than the profile says here. The arena crosses into ground with
+## no safe zone in it — the forest village is the only place in the game nothing
+## follows you into — so once the bot is past the ruins door a heal window it
+## sleeps through is not recovered by breaking off. 0.6 buys one more potion than
+## the profile's 0.5 and that is the whole margin between a hall and a corpse.
+const ARENA_HEAL_AT := 0.65
+## How long one break-off may last, and how soon another one is allowed after it
+## ends. Both halves are load-bearing. Without the budget a hero who is hurt and
+## out of medicine has nothing left to do but stand on the rally point and take
+## arrows from the far end of the map until the scenario clock runs out — which is
+## exactly how one run ended, at 23 HP, having done nothing at all for the last
+## three minutes of its life. Without the cooldown the same low HP re-triggers the
+## break on the very next frame and the run stalls in a different way instead.
+const ARENA_BREAK_BUDGET := 12.0
+const ARENA_BREAK_COOLDOWN := 20.0
+## The PASS rule, written once here so the guide, the notes and the test suite all
+## quote the same sentence the scenario actually enforces.
+## An empty role list: a leg that is only about getting somewhere.
+const NO_ROLES: Array[String] = []
+const ARENA_CRITERION := "dealt damage to >=1 kind from each of melee/ranged/support, survived, no control lock >=1500ms, >=1 target switch, >=1 kill"
+
 var scenario: String = ""
 var profile: String = "normal"
 var _profile: Dictionary = {}
@@ -155,6 +207,62 @@ var _m_trap_damage := 0
 ## `Vector2i` tile to `true` and lives for the whole run, like a player's
 ## memory of a bad corner.
 var _bumped: Dictionary = {}
+
+## BOT-003 bookkeeping. The arena used to be one loop over one map, so its
+## counters could live in local variables; it now crosses a zone line, and a
+## counter that has to survive a travel cannot live inside the loop that travels.
+## The control lock is measured from `_physics_process` while `_a_watch` is up, so
+## the bound covers the whole run — including the walks, where a root spell lands
+## just as happily as it does in the melee.
+var _a_melee := 0
+## Melee swings the walker made while an arena leg was running. `_travel_to`
+## clears whatever is inside the lane, and those hits are the bot's own as much
+## as the ones the arena issues itself; the arena reports the two apart.
+var _a_walker_melee := 0
+var _a_casts := 0
+var _a_heals := 0
+var _a_switches := 0
+var _a_last_target := -1
+var _a_spell := ""
+var _a_spell_cost := 0
+var _a_broken := false
+var _a_break_started := 0
+var _a_break_cooldown_until := 0
+var _a_watch := false
+## Drink threshold the walker obeys on the current leg, or -1.0 for the profile's
+## own. A march across a whole zone is not a duel: the profile threshold is tuned
+## for a fight the bot can walk away from, while a lane entered at 35 HP into a
+## shooter's clearing is a lane the bot never reaches the far end of.
+var _travel_heal_at := -1.0
+var _a_control_since := -1
+var _a_max_control_ms := 0
+
+
+func _physics_process(_delta: float) -> void:
+	if _a_watch:
+		_track_control_lock()
+
+
+## One sample of the stun-lock clock: how long the player has been under a
+## control status without a free frame in between. Read off his own
+## StatusComponent's public `effects`, the same dictionary the movement multiplier
+## is computed from, so a root counts exactly as much as a stun does.
+func _track_control_lock() -> void:
+	var now := Time.get_ticks_msec()
+	if _player_is_controlled():
+		if _a_control_since < 0:
+			_a_control_since = now
+		_a_max_control_ms = maxi(_a_max_control_ms, now - _a_control_since)
+	else:
+		_a_control_since = -1
+
+
+## Start/stop the arena's control-lock watch. The bot's physics process is off for
+## every other scenario, and this is the only place that turns it on.
+func _set_control_watch(on: bool) -> void:
+	_a_watch = on
+	_a_control_since = -1
+	set_physics_process(on)
 
 
 func _ready() -> void:
@@ -630,114 +738,658 @@ func _scenario_take_damage() -> void:
 
 # --- extended scenarios (spec §19.5) -------------------------------------------
 
-## BOT-003 — combat arena. The bot fights the live forest with all three of its
-## combat modes: melee swings, ranged casts through the `ability` action, and
-## support healing through the real quick slot. Every number in the notes comes
-## from the EventBus sensors, so the per-type damage and kill counts are the
-## same events the combat telemetry records. The control-lock bound is the
-## spec's 1.5 s: the player may be stunned, rooted or shocked, but never for
-## longer, measured on his own StatusComponent's public `effects`.
+## BOT-003 — combat arena. The spec asks for «столкнуться с группой из ближнего,
+## дальнего и поддерживающего врага» and for proof that the hero can dodge and
+## change target rather than be stun-locked. The old version of this scenario
+## could not have shown any of it: it fought whatever was nearest in the forest,
+## and the forest has no support enemy at all — the only healing aura in the game
+## belongs to `cultist_caster`, which lives in the ruins hall behind a locked
+## door. A scenario that passes without meeting a healer is not testing the
+## healer, so the arena now goes and meets all three roles:
+##
+##   1. the forest\'s own melee, which the march east walks past on the way out;
+##   2. the forest\'s own ranged, `ArcherA`, on the clearing the same road ends at;
+##   3. the forest gate two posts past him, the ruins key, the wall lever that
+##      spends it, and the cultist caster behind the door it raises.
+##
+## Every leg is walked with the real movement actions and every door is opened
+## with the real interact key: the bot writes no zone, no flag and no position,
+## and travel only happens because `ZoneExit.interact` is what the player\'s E key
+## calls. The proof is the damage sensor: `EventBus.damage_dealt` has to record
+## the arena\'s own hits on at least one kind from each role, which cannot be
+## faked by standing next to something or by being shot at.
+##
+## The control-lock bound is the spec\'s 1.5 s and is sampled every physics frame
+## of the whole run, not only while the bot is swinging.
 func _scenario_arena() -> void:
 	_connect_combat_sensors()
-	var melee := 0
-	var casts := 0
-	var heals := 0
-	var switches := 0
-	var last_target := -1
-	var control_since := -1
-	var max_control_ms := 0
-	var disengaged := false
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
-	while Time.get_ticks_msec() < deadline:
-		if GameState.hp <= 0:
-			break
-		if await _heal_if_hurt():
-			heals += 1
-		# The village is the one fact about this arena everyone knows: nothing
-		# follows you into it. Out of medicine and bleeding, a hero falls back
-		# behind the fence, breathes the impulse until the pool is spent, and
-		# only then walks back into the field. The arena keeps measuring; the
-		# bot just stops dying in it.
-		if disengaged:
-			# 70 % and back into the field. Waiting for the pack to clear the
-			# fence line instead would pin the bot under the archer who can
-			# shoot over it — the fence keeps out teeth, not arrows.
-			if GameState.hp >= int(GameState.max_hp * 0.70):
-				disengaged = false
-			elif _player_pos().distance_to(_player_spawn()) > 20.0:
-				await _move_step(_player_spawn())
-				continue
-			else:
-				await _wait(0.2)
-				continue
-		elif GameState.hp <= int(GameState.max_hp * 0.40):
-			disengaged = true
-			continue
-		elif _crowded():
-			# Three muzzles in a ring is not a duel any more, whatever the
-			# hero's HP says. The pack fight is where the arena actually
-			# kills bots — a lumberjack crit and a boar goring land inside
-			# one heal window — so the bot leaves the ring the moment the
-			# ring closes, and only walks back when it is a duel again.
-			disengaged = true
-			continue
-		var now := Time.get_ticks_msec()
-		if _player_is_controlled():
-			if control_since < 0:
-				control_since = now
-			max_control_ms = maxi(max_control_ms, now - control_since)
-		else:
-			control_since = -1
-		var enemy := _arena_target()
-		if enemy == null:
-			await _wait(0.2)
-			continue
-		var arena_eid := enemy.get_instance_id()
-		var dist := _player_pos().distance_to(enemy.global_position)
-		if dist > 150.0:
-			await _move_step(enemy.global_position)
-			continue
-		if dist > float(_profile["engage_range"]) + 6.0:
-			# Ranged mode: the cast only counts when it actually paid mana, so a
-			# cast still on cooldown is not padded into the number.
-			var mana_before := GameState.mana
-			bot_input.set_aim(enemy.global_position)
-			await _tap(&"ability")
-			if GameState.mana < mana_before:
-				casts += 1
-			# The cast awaited, and a bolt from the cast before it may have
-			# finished this enemy in the meantime. Re-resolve before touching
-			# the body again — a freed read aborts the whole scenario.
-			enemy = instance_from_id(arena_eid) as Node2D
-			if enemy != null and is_instance_valid(enemy):
-				await _move_step(enemy.global_position)
-			continue
-		var eid := arena_eid
-		if last_target != -1 and eid != last_target:
-			switches += 1
-		last_target = eid
-		bot_input.set_aim(enemy.global_position)
-		await _tap(&"attack")
-		melee += 1
-		await _wait(0.2)
-		var rd := float(_pf("reaction_delay", 0.0))
-		if rd > 0.0:
-			await _wait(rd)
+	_set_control_watch(true)
+	_a_melee = 0
+	_a_walker_melee = 0
+	_a_casts = 0
+	_a_heals = 0
+	_a_switches = 0
+	_a_last_target = -1
+	_a_broken = false
+	_a_pick_spell()
+	var deadline := Time.get_ticks_msec() + int(ARENA_TIMEOUT * 1000.0)
+	var forest_rally := _player_spawn()
+
+	# Leg 0 — supply. This is a two-zone march now, and the ruins hold no finds at
+	# all, so the bot sets out the way a hero sets out: with the potion lying nine
+	# tiles behind him already in the bag, and the next ones paid for in wolves'
+	# teeth at the merchant two tiles from the spawn. The run that died in the
+	# west passage of the ruins had one heal in it and nothing left to spend.
+	await _arena_prep(deadline)
+
+	# Leg 1 — the forest\'s own two kinds, on the one road that runs east. The wolf
+	# posts sit along it and the archer\'s clearing is at its end, so a single march
+	# meets the melee and the ranged without a detour, and leaves the bot standing
+	# where the gate is.
+	# Leg 1a — the forest's melee, on the spawn's own quarter, where a hurt bot
+	# can still walk home. This is also where the arena earns its own swings and
+	# its own target switches instead of leaving both to the walker.
+	await _arena_pin_kind(ARENA_MELEE_KINDS, 30.0, deadline, forest_rally)
+	# The melee leg fights the wolves whether or not the order was ever taken, so
+	# it is the second chance to close it. A hero who has already killed three of
+	# them walks back to the village head, takes his gold and his two potions, and
+	# only then goes east — the alternative is a march into a second zone paid for
+	# with nothing but the starting potion, which is how several of these runs
+	# ended up dying in the hall behind the door.
+	var village_head := _find_node("interactable")
+	if village_head != null and QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY \
+			and _player_pos().distance_to(village_head.global_position) < 420.0:
+		await _travel_to(village_head.global_position, 18.0, 45.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+		await _dismiss_dialogue()
+		_notes.append("quest_closed_after_melee")
+
+	# Leg 1b — march east. The leg is walked with no role to chase on purpose: a
+	# hunt leash on a march turns a 45-tile road into a tour of every bush between
+	# here and the sea, and the run that did that ended up south of the map
+	# trading blows with a wisp instead of standing at the gate.
+	var archer := _named("ArcherA")
+	if archer != null:
+		await _arena_fight_toward(NO_ROLES, archer.global_position, 34.0,
+				deadline, forest_rally)
+	# The archer kites by design (he backs off to keep bowshot), so the arena stays
+	# on him until the sensor has its own hit down on the archer\'s kind rather than
+	# until the bot happens to stop next to him.
+	# The budget is the widest of the three forest legs on purpose. A shooter is
+	# the only kind here that answers without coming to the bot, and the one term
+	# this scenario has ever lost at is the ranged one: a run that spends its
+	# budget trading chips with something it never once hit comes back claiming a
+	# role it did not earn, so the leg is given the time to actually land one.
+	await _arena_pin_kind(ARENA_RANGED_KINDS, 45.0, deadline, forest_rally)
+
+	# Leg 1c — the chest on the same clearing, and the sword out of it. A level
+	# one hero carrying a five damage fist walks into a two-zone war and comes
+	# back dead, which is what several of the first runs of this scenario did:
+	# every kill was paid for in HP at half the speed it needed to be, and there
+	# is no healing anywhere past the door.
+	await _arena_arm(deadline, forest_rally)
+
+	# Leg 2 — through the gate. The bot asks the exit to travel exactly the way the
+	# interact key does and then waits for the zone to actually answer `ruins`.
+	var in_ruins := await _arena_enter_ruins(deadline)
+
+	# Leg 3 — the healer behind the door: the key on the floor, the lever that
+	# spends it, then the cultist the door was keeping out of reach.
+	var hall_rally := _player_spawn()
+	if in_ruins:
+		hall_rally = _named("ForestGate").global_position \
+				if _named("ForestGate") != null else _player_pos()
+		if await _arena_open_ruins_door(deadline, hall_rally):
+			# The door is the beginning of the hall, not an invitation into it.
+			# Opening it wakes every post inside at once, so the arena opens it,
+			# walks back out to the landing and gives the hall a few seconds to
+			# lose what it heard, then goes in to meet the guards one at a time
+			# instead of all of them at once. A hero fights on ground he chose.
+			await _travel_to(hall_rally, 26.0, 25.0)
+			await _wait(4.0)
+			await _arena_pin_kind(ARENA_SUPPORT_KINDS, 130.0, deadline, hall_rally)
+	_set_control_watch(false)
 	bot_input.release_all()
+
 	var kills_total := 0
 	for killed_type: String in _m_kills_by_type:
 		kills_total += int(_m_kills_by_type[killed_type])
-	_notes.append("melee=%d" % melee)
-	_notes.append("casts=%d" % casts)
+	var melee := _a_melee + _a_walker_melee
+	var casts := _a_casts
+	var heals := _a_heals
+	var switches := _a_switches
+	var max_control_ms := _a_max_control_ms
+	var melee_engaged := _arena_kind_engaged(ARENA_MELEE_KINDS)
+	var ranged_engaged := _arena_kind_engaged(ARENA_RANGED_KINDS)
+	var support_engaged := _arena_kind_engaged(ARENA_SUPPORT_KINDS)
+	_notes.append("melee=%d (own=%d walker=%d)" % [melee, _a_melee, _a_walker_melee])
+	_notes.append("casts=%d (spell=%s cost=%d mana=%d)" % [
+		casts, _a_spell, _a_spell_cost, GameState.mana])
 	_notes.append("heals=%d" % heals)
 	_notes.append("switches=%d" % switches)
+	_notes.append("zone=%s" % String(GameState.zone))
 	_notes.append("dmg_by_type=%s" % _fmt_counts(_m_dmg_by_type))
 	_notes.append("kills_by_type=%s" % _fmt_counts(_m_kills_by_type))
+	_notes.append("roles melee=%s ranged=%s support=%s" % [
+		str(melee_engaged), str(ranged_engaged), str(support_engaged)])
 	_notes.append("max_control_ms=%d" % max_control_ms)
+	var three_roles := melee_engaged and ranged_engaged and support_engaged
 	var fought := melee > 0 and casts > 0
 	var progressed := kills_total > 0 and switches >= 1
 	var in_control := max_control_ms < 1500
-	_result = "PASS" if GameState.hp > 0 and fought and progressed and in_control else "FAIL"
+	var verdict := {
+		"alive": GameState.hp > 0, "melee_role": melee_engaged,
+		"ranged_role": ranged_engaged, "support_role": support_engaged,
+		"melee_swings": melee > 0, "ranged_casts": casts > 0,
+		"kills": kills_total > 0, "switches": switches >= 1,
+		"no_stunlock": in_control,
+	}
+	var failed_terms: Array[String] = []
+	for term: String in verdict:
+		if not bool(verdict[term]):
+			failed_terms.append(term)
+	if failed_terms.is_empty():
+		_notes.append("terms=all_pass")
+	else:
+		_notes.append("failed=%s" % ",".join(failed_terms))
+	_result = "PASS" if failed_terms.is_empty() else "FAIL"
+
+
+## Choose the arena's ranged mode once, out of the spells the hero actually
+## knows, and remember what it costs. The cost used to be read off whatever was
+## selected at the moment of the fight, and for most of a run that is nothing at
+## all: an unknown spell costs nothing, "nothing" is not affordable by the gate
+## below it, and the arena then walked every archer off the map without throwing a
+## single bolt — two of five runs failed their own ranged-mode term with the mana
+## pool still full.
+func _a_pick_spell() -> void:
+	_a_spell = ""
+	_a_spell_cost = 0
+	for skill_id in GameState.known_skills:
+		var skill := SkillDB.get_skill(skill_id)
+		if skill.is_empty() or String(skill.get("shape", "")) == "self":
+			continue
+		var cost := int(skill.get("mana", 0))
+		if cost <= 0:
+			continue
+		if GameState.select_skill(skill_id):
+			_a_spell = skill_id
+			_a_spell_cost = cost
+			return
+
+
+## Open the eastern chest and put on what it holds, through the same inventory
+## panel a player uses. The chest is three tiles from the archer the leg before
+## this one just fought, so it costs a few steps and nothing in the way of a
+## detour, and the sword inside it more than doubles what a swing buys. The arena
+## used to walk into the ruins with the same five damage it left the spawn with;
+## the war ate it.
+func _arena_arm(deadline: int, rally: Vector2) -> void:
+	var chest := _named("Chest")
+	var hud := _hud()
+	if chest == null or hud == null:
+		_notes.append("arm_no_chest")
+		return
+	await _arena_fight_toward(NO_ROLES, chest.global_position, 18.0, deadline, rally)
+	await _wait_for_alive(10.0)
+	await _wait(0.2)
+	var attack_before := GameState.total_attack()
+	await _tap(&"interact")
+	await _wait(0.4)
+	if GameState.count_item("iron_sword") == 0:
+		_notes.append("arm_chest_empty hp=%d" % GameState.hp)
+		return
+	# Standing on the chest while tapping inventory keys invites its prompt back
+	# under the panel, so the equip happens one pace off it — the same reason the
+	# economy scenario steps off the merchant's mat before it opens the bag.
+	await _travel_to(_player_pos() + Vector2(0.0, 44.0), 12.0, 15.0)
+	if not await _equip_via_inventory(hud, "Железный меч"):
+		_notes.append("arm_equip_failed hp=%d" % GameState.hp)
+		return
+	_notes.append("armed attack=%d->%d hp=%d" % [
+		attack_before, GameState.total_attack(), GameState.hp])
+
+
+## Walk the arena's supply run before it walks into a hall. The forest's own
+## finds near the spawn go into the bag first — the potion at (13,10) is nine
+## tiles of free healing — then the wolves at the edge of the clearing pay for
+## the rest: their fangs are what Yorek buys, and the walk to him is two tiles.
+## Everything here is the human route: walk, swing, sell through the merchant's
+## own trade entry, buy off the open panel with the same key.
+func _arena_prep(deadline: int) -> void:
+	var spawn := _player_spawn()
+	# Step one is the village's own first job. Edrik pays 60 gold, 50 xp and two
+	# health potions for the three wolves at the spawn edge — the same three the
+	# arena is about to swing at regardless — and a level in this game refills
+	# both pools outright. The quest is therefore not a detour the bot takes on
+	# the way to the fight; it is the only reason a level-one hero can afford a
+	# second zone at all. Runs that skipped it went into the ruins carrying one
+	# starting potion and a five damage fist, and died in the doorway.
+	var edrik := _find_node("interactable")
+	if edrik != null:
+		await _travel_to(edrik.global_position, 18.0, 40.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+		await _dismiss_dialogue()
+	# The finds worth a walk: the potion nine tiles east of the spawn, and
+	# nothing that belongs to a boss's yard.
+	var guard := 0
+	while guard < 2 and Time.get_ticks_msec() < deadline:
+		guard += 1
+		var loot := _nearest_pickup()
+		if loot == null or loot.global_position.distance_to(spawn) > 240.0 \
+				or _near_boss(loot.global_position, 90.0):
+			break
+		await _travel_to(loot.global_position, 10.0, 30.0)
+	# The hunt is the quest objective first and a purse second: it stops when the
+	# job is ready to turn in and a few kills more are on the board, and it never
+	# chases prey out of the spawn's own quarter, because a prep that wanders off
+	# is a march that starts from the wrong end of the map.
+	var kills_at_start := _kill_total()
+	var hunt_until := mini(Time.get_ticks_msec() + 70000, deadline)
+	while Time.get_ticks_msec() < hunt_until:
+		var ready := QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY
+		var kills := _kill_total() - kills_at_start
+		if kills >= (4 if ready else 7):
+			break
+		# The wolves the job counts, not whatever is closest: a spider beaten in
+		# place of a wolf spends the same HP and leaves the order outstanding,
+		# and an outstanding order is a run that walks into the ruins with one
+		# potion in the bag.
+		var prey := _nearest_quest_enemy(QUEST_ID)
+		if prey == null:
+			prey = _nearest_enemy()
+		if prey == null or prey.is_in_group("boss") or _near_boss(prey.global_position, 110.0):
+			break
+		# Two different appetites, two different rings. While the order is still
+		# open the wolf is followed wherever it patrols, because the reward behind
+		# it is two potions, sixty gold and a level, and no ring drawn around the
+		# spawn is worth walking away from that. Once the order is closed the hunt
+		# is only topping a purse up, and a purse is not worth leaving the quarter
+		# the east march is meant to start from.
+		if ready and prey.global_position.distance_to(spawn) > 340.0:
+			break
+		if not ready and _player_pos().distance_to(spawn) > 520.0:
+			break
+		await _heal_if_hurt(ARENA_HEAL_AT)
+		var prey_d := _player_pos().distance_to(prey.global_position)
+		bot_input.set_aim(prey.global_position)
+		if prey_d > 20.0:
+			await _move_step(prey.global_position)
+		else:
+			await _tap(&"attack")
+			await _wait(0.1)
+	bot_input.release_all()
+	# Turn it in. The turn-in is the payment: gold, xp and the two potions the
+	# reward table carries all land on the same key press that closes the job.
+	var quest_before := QuestManager.state_of(QUEST_ID)
+	if edrik != null and quest_before == QuestManager.STATE_READY:
+		await _travel_to(edrik.global_position, 18.0, 45.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+		await _dismiss_dialogue()
+	var merchant := _named("Yorek")
+	var hud := _hud()
+	if merchant == null or hud == null:
+		_notes.append("prep_no_merchant")
+		return
+	await _travel_to(merchant.global_position, 22.0, 40.0)
+	var trade := ShopManager.new(GameState)
+	var fangs := GameState.count_item("wolf_fang")
+	if fangs > 0:
+		trade.sell("wolf_fang", fangs)
+	# The purchase is the panel's own: open it and every tap on the open frame
+	# buys the row the cursor sits on, which is the merchant's first stock entry —
+	# the potion. The bot writes no gold and no item; it presses the key.
+	var price := trade.buy_price("health_potion")
+	var taps := 0
+	await _tap(&"interact")
+	await _wait(0.4)
+	while bool(hud.call("is_shop_open")) and taps < 4:
+		if GameState.gold < price:
+			break
+		await _tap(&"interact")
+		await _wait(0.3)
+		taps += 1
+	await _tap(&"pause")
+	await _wait(0.3)
+	_notes.append("prep quest=%s->%s potions=%d gold=%d level=%d hp=%d fangs_sold=%d" % [
+		str(quest_before), str(QuestManager.state_of(QUEST_ID)),
+		GameState.count_item("health_potion"), GameState.gold, GameState.level,
+		GameState.hp, fangs])
+
+
+## Whether the arena has landed at least one of its own hits on any enemy wearing
+## one of these roles. Read off the damage sensor, so "engaged" means the arena
+## hit it — not that it walked past, and not that it got hit back.
+func _arena_kind_engaged(kinds: Array[String]) -> bool:
+	for kind in kinds:
+		if int(_m_dmg_by_type.get(String(kind), 0)) > 0:
+			return true
+	return false
+
+
+## The arena\'s march: walk a long leg in bounded chunks so the survival rules keep
+## running between them, and stop to fight anything within the hunt leash that
+## wears a role this leg still has to prove. `_travel_to` is the walker — A*,
+## bump memory, fights inside the lane — and the arena adds the heal, the
+## break-off and the bookkeeping.
+func _arena_fight_toward(hunt: Array[String], dest: Vector2, arrive: float,
+		deadline: int, rally: Vector2) -> void:
+	await _wait_for_alive(10.0)
+	while Time.get_ticks_msec() < deadline:
+		if GameState.hp <= 0:
+			bot_input.release_all()
+			return
+		if await _heal_if_hurt(ARENA_HEAL_AT):
+			_a_heals += 1
+		if await _arena_break_step(rally):
+			continue
+		var foe := _arena_pick_target(hunt)
+		if foe == null:
+			if _player_pos().distance_to(dest) <= arrive:
+				break
+			var left := float(deadline - Time.get_ticks_msec()) / 1000.0
+			var chunk := minf(ARENA_CHUNK, left)
+			if chunk <= 1.0:
+				break
+			await _travel_to(dest, arrive, chunk)
+			continue
+		await _arena_strike(foe)
+	bot_input.release_all()
+
+
+## Stand on one role until the sensor has a hit of the arena\'s own down on it.
+## The ranged enemy kites and the caster hides behind the guards of its own hall,
+## so this re-finds the nearest live bearer of the role every round instead of
+## following one node, and gives up on the budget rather than the role.
+func _arena_pin_kind(kinds: Array[String], budget: float, deadline: int,
+		rally: Vector2, min_exchanges := 3) -> void:
+	await _wait_for_alive(10.0)
+	var until := Time.get_ticks_msec() + int(budget * 1000.0)
+	until = mini(until, deadline)
+	var saw := 0
+	var exchanges := 0
+	var best_d := INF
+	var since_gain := 0
+	while Time.get_ticks_msec() < until:
+		if GameState.hp <= 0:
+			break
+		# The leg is not finished just because somebody has already bled for this
+		# role. The walker clears the lane on the way east and has been known to
+		# kill the archer before the ranged leg ever started, which left the arena
+		# with its bolt unfired and its own ranged-mode term unmet — so every pin
+		# owes a few exchanges of its own before it may stand down.
+		if _arena_kind_engaged(kinds) and exchanges >= min_exchanges:
+			break
+		if await _heal_if_hurt(ARENA_HEAL_AT):
+			_a_heals += 1
+		if await _arena_break_step(rally):
+			continue
+		var foe := _arena_role_target(kinds)
+		if foe == null:
+			await _wait(0.3)
+			continue
+		saw += 1
+		var foe_d := _player_pos().distance_to(foe.global_position)
+		if foe_d < best_d - 4.0:
+			best_d = foe_d
+			since_gain = 0
+		else:
+			since_gain += 1
+		if foe_d > ARENA_HUNT_LEASH:
+			await _travel_to(foe.global_position, 60.0, ARENA_CHUNK)
+			continue
+		# A caster that will not be closed is usually not refusing to be closed —
+		# the bot is on the wrong side of something it has already agreed is a
+		# wall. One run pinned the cultist through 1657 exchanges at a stand-off of
+		# 54 px and died there with six potions in the bag: the walk kept sliding
+		# along the same hall wall, which counts as motion, so no stuck timer ever
+		# fired. Forty exchanges without four pixels of gain is therefore read as
+		# a route problem rather than a fight, the learned walls are dropped, and
+		# the way is rebuilt from the tile underfoot.
+		if since_gain >= 40 and foe_d > ARENA_ENGAGE + 6.0:
+			since_gain = 0
+			_bumped.clear()
+			await _travel_to(foe.global_position, ARENA_ENGAGE, ARENA_CHUNK)
+			continue
+		exchanges += 1
+		await _arena_strike(foe)
+	bot_input.release_all()
+	# What the leg actually saw. A pin that failed with `saw=0` never found the
+	# role at all, one with `best` stuck high never closed on it, and one with
+	# `exchanges` but no damage is a fight the enemy refused to stand for — three
+	# different defects that a bare FAIL cannot tell apart.
+	_notes.append("pin[%s] saw=%d exchanges=%d best=%d engaged=%s hp=%d" % [
+		",".join(kinds) if kinds.size() < 4 else "melee", saw, exchanges,
+		0 if is_inf(best_d) else int(best_d),
+		str(_arena_kind_engaged(kinds)), GameState.hp])
+
+
+## The nearest live enemy wearing one of these roles, bosses except. The hall
+## boss is never a role stand-in: the arena has no business trading blows with
+## the Captain while it is still proving it can handle a bowman.
+func _arena_role_target(kinds: Array[String]) -> Node2D:
+	var here := _player_pos()
+	var best: Node2D = null
+	var best_d := INF
+	for node in get_tree().get_nodes_in_group("enemy"):
+		var e := node as Node2D
+		if e == null or not is_instance_valid(e) or e.is_in_group("boss"):
+			continue
+		if not kinds.has(String(e.get("enemy_type"))):
+			continue
+		var d := e.global_position.distance_to(here)
+		if d < best_d:
+			best_d = d
+			best = e
+	return best
+
+
+## Target choice for a march: an enemy wearing a role the leg still has to prove
+## wins over the nearest body, so the walk does not spend itself on wolves the
+## arena has already blooded. Anything else is only worth stopping for once it is
+## close enough to be in the way.
+func _arena_pick_target(hunt: Array[String]) -> Node2D:
+	var here := _player_pos()
+	var best: Node2D = null
+	var best_score := INF
+	for node in get_tree().get_nodes_in_group("enemy"):
+		var e := node as Node2D
+		if e == null or not is_instance_valid(e) or e.is_in_group("boss"):
+			continue
+		var etype := String(e.get("enemy_type"))
+		if etype == "lumberjack":
+			continue
+		var d := e.global_position.distance_to(here)
+		var unproven := hunt.has(etype) and int(_m_dmg_by_type.get(etype, 0)) == 0
+		if unproven:
+			if d > ARENA_HUNT_LEASH:
+				continue
+		elif d > ARENA_ENGAGE:
+			continue
+		var score := d if unproven else 100000.0 + d
+		if score < best_score:
+			best_score = score
+			best = e
+	return best
+
+
+## One exchange with one enemy: cast while it is still at bowshot, walk the gap
+## when the cast is spent, swing once it is in arm\'s reach. A cast only counts
+## when it actually paid mana, so a recast blocked by a cooldown is not padded
+## into the number, and a target freed by the bolt of the cast before it is
+## re-resolved before the arena touches it again.
+func _arena_strike(foe: Node2D) -> void:
+	var eid := foe.get_instance_id()
+	if _a_last_target != -1 and eid != _a_last_target:
+		_a_switches += 1
+	_a_last_target = eid
+	var dist := _player_pos().distance_to(foe.global_position)
+	var engage := float(_pf("engage_range", 16.0))
+	if dist > engage + 6.0:
+		# Anything outside arm's reach that the pool can pay for gets the bolt, and
+		# nothing else. There was a band between the swing reach and the old cast
+		# range where the arena neither shot nor arrived, and one run spent its
+		# whole ranged budget in it: 911 exchanges of walking up to an archer who
+		# walked back off, at the end of which the mana pool was still full.
+		if _a_spell != "" and GameState.mana >= _a_spell_cost:
+			var mana_before := GameState.mana
+			bot_input.set_aim(foe.global_position)
+			await _tap(&"ability")
+			if GameState.mana < mana_before:
+				_a_casts += 1
+			await _wait(0.15)
+		var still := instance_from_id(eid) as Node2D
+		if still != null and is_instance_valid(still):
+			await _move_step(still.global_position)
+		return
+	bot_input.set_aim(foe.global_position)
+	await _tap(&"attack")
+	_a_melee += 1
+	await _wait(0.2)
+	var rd := float(_pf("reaction_delay", 0.0))
+	if rd > 0.0:
+		await _wait(rd)
+
+
+## The arena\'s survival rule, shared by every leg of both zones: out of medicine
+## and bleeding, or three muzzles in a ring, the hero leaves the field for the
+## rally point of the zone he is standing in and only comes back at 70 %. Returns
+## true while the break is running, so the caller skips its own attack step.
+func _arena_break_step(rally: Vector2) -> bool:
+	if not _a_broken:
+		if Time.get_ticks_msec() < _a_break_cooldown_until:
+			return false
+		if GameState.hp > int(GameState.max_hp * 0.40) and not _crowded():
+			return false
+		_a_broken = true
+		_a_break_started = Time.get_ticks_msec()
+	if GameState.hp >= int(GameState.max_hp * 0.70):
+		_end_arena_break("recovered")
+		return false
+	if Time.get_ticks_msec() - _a_break_started > int(ARENA_BREAK_BUDGET * 1000.0):
+		# No medicine and no recovery in sight, and a leg still to walk. Standing
+		# still while an archer spends the whole map on the hero is the slower of
+		# the two deaths, so the break is given up and the lane walked again.
+		_end_arena_break("abandoned")
+		return false
+	if _player_pos().distance_to(rally) > 20.0:
+		await _move_step(rally)
+	else:
+		await _wait(0.2)
+	return true
+
+
+## Close a break-off and say why, then hold the same rule off for a moment so the
+## leg gets a real run at the lane instead of breaking off again next frame.
+## Wait out a death. The hero picks himself up a few seconds after he falls, back
+## on the zone's own spawn point, and one fall is not the end of the arena — but
+## the legs used to carry straight on over a corpse, so the chest check read
+## `hp=0`, the interact went nowhere, and the run then marched a dead man across
+## the rest of the map and reported an empty chest.
+func _wait_for_alive(seconds: float) -> void:
+	if GameState.hp > 0:
+		return
+	var until := Time.get_ticks_msec() + int(seconds * 1000.0)
+	while GameState.hp <= 0 and Time.get_ticks_msec() < until:
+		await _wait(0.25)
+	_a_broken = false
+	_notes.append("respawned hp=%d at=%s" % [GameState.hp, str(_tile_of(_player_pos()))])
+
+
+func _end_arena_break(reason: String) -> void:
+	_a_broken = false
+	_a_break_cooldown_until = Time.get_ticks_msec() + int(ARENA_BREAK_COOLDOWN * 1000.0)
+	_notes.append("break_%s hp=%d" % [reason, GameState.hp])
+
+
+## Walk to the forest gate and ask it for the ruins. Travel is the player\'s own
+## `interact` on the `ZoneExit` — the bot writes no zone — and the leg is only
+## over once `GameState.zone` actually answers `ruins`, because a gate the bot
+## walked past without pressing E is a leg that never happened.
+func _arena_enter_ruins(deadline: int) -> bool:
+	var gate := _named("RuinsGate")
+	if gate == null:
+		_notes.append("ruins_gate_missing")
+		return false
+	await _arena_fight_toward(NO_ROLES, gate.global_position, 16.0, deadline,
+		_player_spawn())
+	for attempt in 4:
+		if String(GameState.zone) == "ruins":
+			return true
+		# The press itself is three physics frames and is always allowed, even
+		# after the leg's own clock has run out. One run spent its last seconds on
+		# a break-off two tiles from the gate, came back at full health, and the
+		# deadline check refused it the one key press that would have finished the
+		# scenario — a bot out of time still knocks before it leaves.
+		if Time.get_ticks_msec() >= deadline and attempt > 0:
+			break
+		# Stand on the gate's own tile rather than near it: the exit sits on a
+		# tile the zone already called walkable, and the interact reaches 26 px,
+		# so arriving "close" is the one way to miss it from the wrong side of a
+		# tree line.
+		await _travel_to(_tile_center(_tile_of(gate.global_position)), 6.0, 22.0)
+		await _tap(&"interact")
+		await _wait(0.8)
+		if String(GameState.zone) == "ruins":
+			# The old world and everything in it is gone now, including the tile
+			# memory built up walking to the gate. A bump learned against a tree in
+			# the forest must not become a wall in the ruins.
+			_bumped.clear()
+			_notes.append("entered_ruins at=%d" % Engine.get_physics_frames())
+			return true
+	_notes.append("ruins_gate_stuck zone=%s gate_dist=%d gate_tile=%s me=%s hp=%d" % [
+		String(GameState.zone),
+		int(_player_pos().distance_to(gate.global_position)),
+		str(_tile_of(gate.global_position)),
+		str(_tile_of(_player_pos())), GameState.hp])
+	return false
+
+
+## The ruins puzzle, driven through nothing but walking and the interact key: pick
+## the key up off the floor by standing on it, spend it at the wall lever, and let
+## the lever raise the flag the door answers to. Each step is confirmed by the
+## world\'s own answer — the item in the bag, the flag on the state — because a
+## lever that was merely walked up to opens nothing.
+func _arena_open_ruins_door(deadline: int, rally: Vector2) -> bool:
+	if bool(GameState.get_flag("ruin_door_open", false)):
+		return true
+	var lever := _named("RuinMechanism")
+	if lever == null:
+		_notes.append("ruins_lever_missing")
+		return false
+	var key := _named("RuinKey")
+	if key != null and GameState.count_item("ruin_key") == 0:
+		await _arena_fight_toward(NO_ROLES, key.global_position, 8.0, deadline, rally)
+		await _wait(0.3)
+	if GameState.count_item("ruin_key") == 0:
+		_notes.append("ruins_key_missing")
+		return false
+	# The lever and the door are one tile apart and the player\'s interact picks the
+	# nearest interactable in reach, so the approach is from the side the door is
+	# not on. Coming in from the east would hand the tap to a locked door.
+	var lever_tile := _tile_of(lever.global_position)
+	var stand := _tile_center(lever_tile + Vector2i(-1, 0))
+	for attempt in 4:
+		if bool(GameState.get_flag("ruin_door_open", false)):
+			_notes.append("ruin_door_open")
+			return true
+		if Time.get_ticks_msec() >= deadline:
+			break
+		if _walkable(lever_tile + Vector2i(-1, 0)):
+			await _travel_to(stand, 8.0, 20.0)
+		else:
+			await _travel_to(lever.global_position, 10.0, 20.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+	_notes.append("ruin_door_stuck flag=%s key=%s" % [
+		str(bool(GameState.get_flag("ruin_door_open", false))),
+		str(GameState.count_item("ruin_key"))])
+	return false
+
+
 
 
 ## BOT-004 — magic. Every skill in `GameState.known_skills` is selected through
@@ -831,6 +1483,24 @@ func _scenario_economy() -> void:
 		_notes.append("economy_actors_missing")
 		return
 	_connect_combat_sensors()
+	# Every leg of this scenario is a crossing of the map rather than a duel, and
+	# the crossings are where the runs died: at the profile's own threshold the
+	# bot walks into a wisp's clearing on 35 HP, and a wisp blinks.
+	_travel_heal_at = 0.7
+
+	# The village's own first job is taken before anything else, and not as one
+	# more lesson on the shelf: three wolves at the spawn edge, which this prep is
+	# about to kill regardless, pay 60 gold, 50 xp and two health potions, and a
+	# level in this game refills both pools outright. Runs that set out east on
+	# the strength of the one starting potion arrived at the chest as a corpse,
+	# and an economy scenario that dies on the road reports nothing about the
+	# economy.
+	var edrik := _find_node("interactable")
+	if edrik != null:
+		await _travel_to(edrik.global_position, 18.0, 40.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+		await _dismiss_dialogue()
 
 	# Prep is part of the economy lesson, not a cheat around it. First the
 	# close finds are swept — a find across the map belongs to whatever
@@ -855,14 +1525,23 @@ func _scenario_economy() -> void:
 	var hunt_target := 4 if not bool(_pf("pickup_bias", false)) else 6
 	var hunt_deadline := Time.get_ticks_msec() + 75000
 	var kills_at_start := _kill_total()
-	while Time.get_ticks_msec() < hunt_deadline \
-			and _kill_total() - kills_at_start < hunt_target:
+	while Time.get_ticks_msec() < hunt_deadline:
+		# The job decides when the hunt is over, not a kill count picked in the
+		# abstract: three wolves are what the village asked for, and the purse
+		# wants a couple more on top of them.
+		var quest_ready := QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY
+		if _kill_total() - kills_at_start >= (hunt_target if quest_ready else hunt_target + 2):
+			break
 		if _player_pos().distance_to(_player_spawn()) > 240.0:
 			break
 		var prey := _nearest_enemy()
-		if prey == null or prey.is_in_group("boss") \
-				or _near_boss(prey.global_position, 110.0) \
-				or prey.global_position.distance_to(_player_pos()) > 260.0:
+		if prey == null or prey.is_in_group("boss") or _near_boss(prey.global_position, 110.0):
+			break
+		# The leash is measured from the spawn, not from the bot's own nose. From
+		# the nose it ended the hunt before it began — the nearest wolf sat just
+		# past the reach, the job never reached its turn-in state, and the run
+		# went east on one potion and a five damage fist anyway.
+		if prey.global_position.distance_to(_player_spawn()) > 340.0:
 			break
 		await _heal_if_hurt()
 		var prey_d := _player_pos().distance_to(prey.global_position)
@@ -874,14 +1553,36 @@ func _scenario_economy() -> void:
 			await _wait(0.1)
 	bot_input.release_all()
 	_notes.append("prep_hunts=%d" % (_kill_total() - kills_at_start))
+	# The turn-in is what pays for the trip east, and it lands on a key press at
+	# the same NPC who handed the job out. Counted before the purse is weighed so
+	# the reward gold is part of the run's own money, never a write of the bot's.
+	var quest_before := QuestManager.state_of(QUEST_ID)
+	if edrik != null and quest_before == QuestManager.STATE_READY:
+		await _travel_to(edrik.global_position, 18.0, 45.0)
+		await _tap(&"interact")
+		await _wait(0.5)
+		await _dismiss_dialogue()
+	_notes.append("prep_quest=%s->%s" % [str(quest_before), str(QuestManager.state_of(QUEST_ID))])
 	if not await _travel_to(merchant.global_position, 22.0, 120.0):
 		_notes.append("prep_merchant_unreachable hp=%d taken=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type)])
 		return
 	var prep_trade := ShopManager.new(GameState)
 	var fangs := GameState.count_item("wolf_fang")
+	var fang_price := prep_trade.sell_price("wolf_fang")
+	var fangs_sold := 0
+	var fang_gold_moved := 0
 	if fangs > 0:
-		prep_trade.sell("wolf_fang", fangs)
+		var gold_pre_fangs := GameState.gold
+		var fang_sale: Dictionary = prep_trade.sell("wolf_fang", fangs)
+		if bool(fang_sale.get("ok", false)):
+			fangs_sold = fangs
+			fang_gold_moved = GameState.gold - gold_pre_fangs
+	# The first exact-delta trade of the run, weighed at its own counter with no
+	# walk in between: the whole fang stack leaves the bag and the merchant pays
+	# his own published rate for every one of them.
+	var fangs_exact := fangs_sold == 0 or (GameState.count_item("wolf_fang") == 0 \
+			and fang_gold_moved == fangs_sold * fang_price)
 	if GameState.gold >= 25:
 		await _tap(&"interact")
 		await _wait(0.4)
@@ -901,13 +1602,35 @@ func _scenario_economy() -> void:
 	var gold_before := GameState.gold
 	var min_gold := GameState.gold
 
+	# The chest sits in the far east corner, and one straight pull across the
+	# whole map is the lane these runs keep losing: the grid draws a line through
+	# the open heath beyond the archer's clearing, and the walk then spends its
+	# entire budget sliding along a fence line it cannot see, arriving at nothing
+	# with almost no damage taken. The road the arena marches east is already
+	# proven run after run — spawn to the archer's clearing, and only then the
+	# corner — so the crossing is taken in the same two hops. A missed waypoint is
+	# not a failed run, it is only a missed shortcut.
+	var road_end := _named("ArcherA")
+	if road_end != null:
+		await _travel_to(road_end.global_position, 44.0, 120.0)
 	if not await _travel_to(chest.global_position, 18.0, 200.0):
 		_notes.append("chest_unreachable hp=%d taken=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type)])
 		return
+	# The chest is weighed on the frame it opens. The sword it holds has to
+	# arrive exactly once, and the coin it holds has to be in the purse. The
+	# coin bound is `>=` and not `==` because a swing still finishing on the way
+	# in can pay a kill inside the same few frames, and that coin is the hero's
+	# by right; the item delta, which nothing else in the world can move, is the
+	# exact half of this check.
+	var sword_before := GameState.count_item(String(chest.get("item_id")))
+	var gold_at_chest := GameState.gold
+	var chest_gold := int(chest.get("gold"))
 	await _tap(&"interact")
 	await _wait(0.3)
 	var sword_ok := GameState.count_item("iron_sword") == 1
+	var chest_exact := GameState.count_item("iron_sword") - sword_before == 1 \
+			and GameState.gold - gold_at_chest >= chest_gold
 	var gold_from_chest := GameState.gold - gold_before
 	min_gold = mini(min_gold, GameState.gold)
 
@@ -918,6 +1641,20 @@ func _scenario_economy() -> void:
 	await _tap(&"interact")
 	await _wait(0.4)
 	var shop_open := bool(hud.call("is_shop_open"))
+	# The till has to be proven open before a single coin is measured against it.
+	# One key press at the end of a long walk is not proof: the merchant shares
+	# the village square with three other villagers, and an interact that lands
+	# on the wrong one opens a dialogue rather than a shop. The run then "bought"
+	# a potion from a closed panel, reported the ledger as broken, and walked off
+	# with a conversation still under the keyboard.
+	var reopen := 0
+	while not shop_open and reopen < 3:
+		reopen += 1
+		await _travel_to(merchant.global_position, 16.0, 35.0)
+		await _tap(&"interact")
+		await _wait(0.4)
+		shop_open = bool(hud.call("is_shop_open"))
+	var shop := ShopManager.new(GameState)
 	# Row 0 of the buy list is the merchant's first stock entry — the health
 	# potion — and the cursor starts there every time the panel opens.
 	# The road's fangs in the bag are the day's wages: they go to the merchant
@@ -926,14 +1663,18 @@ func _scenario_economy() -> void:
 	var road_fangs := GameState.count_item("wolf_fang")
 	if road_fangs > 0:
 		ShopManager.new(GameState).sell("wolf_fang", road_fangs)
+	var potion_price := shop.buy_price("health_potion")
 	var gold_pre_buy := GameState.gold
 	var potion_pre_buy := GameState.count_item("health_potion")
 	await _tap(&"interact")
 	await _wait(0.3)
 	var post_buy_gold := GameState.gold
 	var post_buy_potions := GameState.count_item("health_potion")
+	# Exact in both columns, and the price is read from the data rather than
+	# retyped here: one potion into the bag, the merchant's own buy price out of
+	# the purse, nothing else moved.
 	var bought := post_buy_potions == potion_pre_buy + 1 \
-		and post_buy_gold == gold_pre_buy - 25
+		and post_buy_gold == gold_pre_buy - potion_price
 	if not bought:
 		_notes.append("buy_dbg open=%s pre=%d/%d post=%d/%d" % [
 			str(shop_open), gold_pre_buy, potion_pre_buy,
@@ -946,18 +1687,37 @@ func _scenario_economy() -> void:
 	# The sell leg through the shop's own public trade entry (see the note
 	# above): same manager class, same rules, minus a key the bot has no way
 	# to press through the input override.
-	var shop := ShopManager.new(GameState)
+	var sell_price := shop.sell_price("health_potion")
+	var potions_pre_sell := GameState.count_item("health_potion")
+	var gold_pre_sell := GameState.gold
 	var sold: Dictionary = shop.sell("health_potion", 1)
 	var sold_ok := bool(sold.get("ok", false)) \
 		and GameState.count_item("health_potion") == potion_pre_buy
-	# The no-loss ledger closes here, at the counter, and it is balanced
-	# against the sips the heal rule took on the road — a potion drunk under
-	# wolf teeth is a wound, not a theft, and the trade ledger only charges
-	# the trade. Every potion is accounted for: sold one, bought one, drunk
-	# what the sensor counted.
+	var sell_exact := bool(sold.get("ok", false)) \
+			and GameState.count_item("health_potion") == potions_pre_sell - 1 \
+			and GameState.gold == gold_pre_sell + sell_price
+
+	# The ledger is weighed at each counter, not against a bag total.
+	#
+	# The rule this replaces added the counted sips back to the closing count
+	# and compared the sum with the count taken before the walk out to the
+	# chest. It was wrong in a way worth writing down: the road between those
+	# two readings is allowed to hand the hero potions. The herb and the coin
+	# pouch lie on it, and a lumberjack carries a flask he leaves on the ground
+	# three times out of ten. A find the world gave away is not a duplication by
+	# the merchant, so the total drifted by exactly the loot nobody traded and a
+	# healthy economy failed the scenario.
+	#
+	# What is actually under test is that no trade mints or eats something, and
+	# a trade answers only for the delta across its own counter. Each leg below
+	# is read on the frame it happens, with nothing but the trade between the
+	# two readings, and each demands its exact delta: a whole fang stack for the
+	# published rate, one sword out of one chest, one potion in for the buy
+	# price, one potion out for the sell rate, and the sword still in the bag
+	# once it is worn. The sips stay in the notes as what they are — the hero's
+	# own spending, not the merchant's bookkeeping.
 	var potions_after_trades := GameState.count_item("health_potion")
 	var sips_under_way := _potions_drunk - drunk_before
-	var ledger_balanced := potions_after_trades + sips_under_way == potion_before
 	min_gold = mini(min_gold, GameState.gold)
 
 	# Equip through the inventory panel: open it, walk the cursor to the sword
@@ -967,6 +1727,21 @@ func _scenario_economy() -> void:
 	# deliberate: standing in a merchant's interact radius while tapping keys
 	# invites his shop back under the panel, and the lesson being measured
 	# here is the equip, not the door.
+	# No panel may ride along under the keyboard into a walk. A leg asked to move
+	# a hero who is still standing in a till spends its entire budget standing
+	# still and comes back reporting a corner of the map nobody has ever failed
+	# to reach. Esc is tried first because it is the key that shuts the shop;
+	# only if something is still blocking does the bot fall back to advancing a
+	# conversation, which is the one thing that must never be pressed at an open
+	# till, since there it costs money.
+	var unblock := 0
+	while GameState.ui_blocking and unblock < 6:
+		await _tap(&"pause")
+		await _wait(0.2)
+		if GameState.ui_blocking:
+			await _tap(&"interact")
+			await _wait(0.2)
+		unblock += 1
 	if not await _travel_to(_tile_center(Vector2i(13, 10)), 12.0, 60.0):
 		_notes.append("equip_walk_unreachable hp=%d taken=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type)])
@@ -999,9 +1774,36 @@ func _scenario_economy() -> void:
 	_notes.append("potions=%d->%d gold=%d min_gold=%d" % [
 		potion_before, GameState.count_item("health_potion"), GameState.gold, min_gold])
 	var attack_ok := attack_after == attack_before + 6 and worn == "weapon"
-	var no_loss := ledger_balanced
-	_result = "PASS" if sword_ok and shop_open and bought and shop_closed and sold_ok \
-		and attack_ok and no_loss and min_gold >= 0 and GameState.hp > 0 else "FAIL"
+	# Wearing the sword must not consume it. The same reading is what makes an
+	# item unsellable while it is worn, so one look at the bag closes both rules.
+	var equip_intact := GameState.count_item("iron_sword") == 1 and worn == "weapon"
+	# Every term of the ledger is one transaction weighed at its own counter. A
+	# term goes red only when a trade moved the wrong amount of item or of coin,
+	# never because the road happened to hand out loot the merchant never touched.
+	var ledger_balanced := fangs_exact and chest_exact and bought and sell_exact \
+			and equip_intact
+	_notes.append("ledger fangs=%s chest=%s buy=%s sell=%s equip=%s bag=%d sips=%d price=%d/%d" % [
+		str(fangs_exact), str(chest_exact), str(bought), str(sell_exact),
+		str(equip_intact), potions_after_trades, sips_under_way, potion_price, sell_price])
+	# The verdict names its own terms. A FAIL used to print a row of trues and
+	# leave whoever reads the tail to work out which of them the last line
+	# disagreed with — which is how the ledger defect sat here unread for a run.
+	var verdict := {
+		"sword": sword_ok, "shop_open": shop_open, "bought": bought,
+		"closed": shop_closed, "sold": sold_ok, "attack": attack_ok,
+		"fangs": fangs_exact, "chest": chest_exact, "sell": sell_exact,
+		"equip": equip_intact, "ledger": ledger_balanced,
+		"gold_nonneg": min_gold >= 0, "alive": GameState.hp > 0,
+	}
+	var failed_terms: Array[String] = []
+	for term: String in verdict:
+		if not bool(verdict[term]):
+			failed_terms.append(term)
+	if failed_terms.is_empty():
+		_notes.append("terms=all_pass")
+	else:
+		_notes.append("failed=%s" % ",".join(failed_terms))
+	_result = "PASS" if failed_terms.is_empty() else "FAIL"
 
 
 ## BOT-006 — quest chain. The full arc on one quest: take it from Edrik, hunt
@@ -1311,8 +2113,8 @@ func _has_potion() -> bool:
 ## Heal through the real quick slot when the profile threshold is crossed and a
 ## potion exists to spend. Reports whether it tapped, so a scenario can count
 ## its support actions without guessing.
-func _heal_if_hurt() -> bool:
-	var heal_at := float(_profile.get("heal_at", 0.5))
+func _heal_if_hurt(threshold: float = -1.0) -> bool:
+	var heal_at := threshold if threshold > 0.0 else float(_profile.get("heal_at", 0.5))
 	if GameState.hp >= int(GameState.max_hp * heal_at):
 		return false
 	if _has_potion():
@@ -1574,6 +2376,12 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 		# second read that ignores it distinguishes "the world has no route"
 		# from "the bot already bruised a corner on the way".
 		path = _find_path(origin, dest, true)
+		# And when it is the second read that finds the route, the memory was
+		# wrong rather than merely cautious. Carrying it down the rest of the run
+		# is the bot forgetting the map it is walking on, so it is dropped here
+		# instead of being worked around on every later leg.
+		if not path.is_empty():
+			_bumped.clear()
 	var leg := 0
 	var stuck := 0
 	var no_gain := 0
@@ -1590,7 +2398,7 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 		if pos.distance_to(target) <= arrive:
 			bot_input.release_all()
 			return true
-		await _heal_if_hurt()
+		await _heal_if_hurt(_travel_heal_at)
 		# Out of medicine and bleeding out: a human breaks off for a moment,
 		# even mid-errand. The burst is short by design — the lane is resumed
 		# before the whole map notices the bot is walking.
@@ -1614,6 +2422,10 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 			if edist <= 22.0:
 				bot_input.set_aim(enemy.global_position)
 				await _tap(&"attack")
+				# The walker's own swing, counted so an arena leg that clears a
+				# lane on the way to a role can still say honestly how many
+				# times the bot hit something in melee.
+				_a_walker_melee += 1
 				await _wait(0.1)
 				continue
 			# A shooter at bowshot ahead on the lane keeps shooting for the
@@ -1665,6 +2477,8 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 			var repath := _find_path(_tile_of(pos), _tile_of(target))
 			if repath.is_empty():
 				repath = _find_path(_tile_of(pos), _tile_of(target), true)
+				if not repath.is_empty():
+					_bumped.clear()
 			if repath.is_empty():
 				straight_only = true
 			else:
@@ -1689,39 +2503,6 @@ func _travel_to(target: Vector2, arrive: float, timeout: float) -> bool:
 		await _move_step(waypoint)
 	bot_input.release_all()
 	return false
-
-
-## The arena's pick: the nearest enemy that is worth duelling. A lumberjack
-## crits for 55 — a third of a level-one hero's neck in one swing — and the
-## spec asks the arena for melee, ranged and support against the forest, not
-## for a bare-handed duel with an axe. The axe is left to bolts until the
-## pack around the hero thins; teeth are always in season.
-func _arena_target() -> Node2D:
-	var here := _player_pos()
-	var best: Node2D = null
-	var best_d := INF
-	for node in get_tree().get_nodes_in_group("enemy"):
-		var e := node as Node2D
-		if e == null or not is_instance_valid(e):
-			continue
-		if e.is_in_group("boss"):
-			continue
-		var d := e.global_position.distance_to(here)
-		if d < best_d and String(e.get("enemy_type")) != "lumberjack":
-			best_d = d
-			best = e
-	if best != null:
-		return best
-	var fallback_d := 100.0
-	for node in get_tree().get_nodes_in_group("enemy"):
-		var e := node as Node2D
-		if e == null or not is_instance_valid(e) or e.is_in_group("boss"):
-			continue
-		var d := e.global_position.distance_to(here)
-		if d < fallback_d:
-			fallback_d = d
-			best = e
-	return best
 
 
 ## How many live enemies sit within `radius` of the player. The arena reads

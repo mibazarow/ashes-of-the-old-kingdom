@@ -1835,6 +1835,75 @@ func _test_map_panel() -> void:
 	for i in range(6):
 		await physics_frame
 
+	# --- defect A regression: the input edge latch ------------------------------
+	# The HUD used to read the engine's one-frame `just_pressed` directly in
+	# `_process`. That edge is set when the input flushes and cleared at the start of
+	# the next iteration, so it is only seen if the HUD's `_process` runs in the very
+	# iteration the press flushed. Under load several physics steps pack into one idle
+	# frame and the HUD's poll can fall a frame late — by then the edge is gone and
+	# the key is lost. The HUD now latches the press in `_input`, which runs for every
+	# event regardless of frame timing, and `_process` consumes the latch.
+	#
+	# To reproduce the lost edge deterministically (no CPU load needed), the HUD's
+	# `_process` is switched off while the press flushes — exactly the "the HUD did not
+	# poll in the flush iteration" condition — then switched back on. With the old
+	# engine-edge read the press is already gone and the map never opens; with the
+	# latch `_input` has held it and the map opens.
+	_check(not bool(hud.call("is_map_open")), "the map is closed before the latch regression")
+	hud.set_process(false)
+	var lr_down := InputEventKey.new()
+	lr_down.physical_keycode = KEY_M
+	lr_down.keycode = KEY_M
+	lr_down.pressed = true
+	Input.parse_input_event(lr_down)
+	var lr_up := InputEventKey.new()
+	lr_up.physical_keycode = KEY_M
+	lr_up.keycode = KEY_M
+	lr_up.pressed = false
+	Input.parse_input_event(lr_up)
+	# Let both events flush and the engine's one-frame edge expire while `_process` is
+	# off; the latch is the only thing that can still carry the press to the HUD.
+	for _w in range(4):
+		await physics_frame
+	hud.set_process(true)
+	for _w in range(3):
+		await process_frame
+	_check(bool(hud.call("is_map_open")),
+		"a press whose edge expired before the HUD polled still opens the map (latch)")
+	# The latch is edge-based, not a counter: two press+release pairs delivered in one
+	# window (again with `_process` off so they land together) must collapse to a
+	# single close, not a close-then-reopen. A counting latch would toggle twice and
+	# leave the map open; the boolean latch records one edge and closes it once.
+	hud.set_process(false)
+	var lt_a_down := InputEventKey.new()
+	lt_a_down.physical_keycode = KEY_M
+	lt_a_down.keycode = KEY_M
+	lt_a_down.pressed = true
+	Input.parse_input_event(lt_a_down)
+	var lt_a_up := InputEventKey.new()
+	lt_a_up.physical_keycode = KEY_M
+	lt_a_up.keycode = KEY_M
+	lt_a_up.pressed = false
+	Input.parse_input_event(lt_a_up)
+	var lt_b_down := InputEventKey.new()
+	lt_b_down.physical_keycode = KEY_M
+	lt_b_down.keycode = KEY_M
+	lt_b_down.pressed = true
+	Input.parse_input_event(lt_b_down)
+	var lt_b_up := InputEventKey.new()
+	lt_b_up.physical_keycode = KEY_M
+	lt_b_up.keycode = KEY_M
+	lt_b_up.pressed = false
+	Input.parse_input_event(lt_b_up)
+	for _w in range(4):
+		await physics_frame
+	hud.set_process(true)
+	for _w in range(3):
+		await process_frame
+	_check(not bool(hud.call("is_map_open")),
+		"two presses delivered together close the map once, not twice (edge latch)")
+	_check(not gs.ui_blocking, "the latch regression left no ui_blocking behind")
+
 	scene.queue_free()
 	await process_frame
 	completed["map"] = true
@@ -1986,9 +2055,16 @@ func _find_pickups() -> Array[Node]:
 func _tile_of_node(node: Node2D) -> Vector2i:
 	if node == null:
 		return Vector2i(-9999, -9999)
+	return _tile_of_pos(node.global_position)
+
+
+## Tile a raw world position falls on, on the same 16 px grid `_tile_of_node` uses.
+## Split out so a check can measure an authored point (an enemy's `spawn_position`)
+## rather than only wherever a live node happens to be standing this frame.
+func _tile_of_pos(pos: Vector2) -> Vector2i:
 	return Vector2i(
-		floori(node.global_position.x / 16.0),
-		floori(node.global_position.y / 16.0)
+		floori(pos.x / 16.0),
+		floori(pos.y / 16.0)
 	)
 
 
@@ -2979,12 +3055,43 @@ func _test_bot_extended() -> void:
 			"BOT-003 bounds the control lock at 1.5 s and demands a switch and a kill")
 	_check(arena.contains("_m_kills_by_type") and arena.contains("_m_dmg_by_type"),
 			"BOT-003 reports per-type kills and damage from the EventBus sensors")
+	# The arena used to end after one screen of forest and print a verdict nobody
+	# had earned: it never once touched a shooter or a healer, because nothing in
+	# the forest heals and the archer it did meet was walked past on the way to a
+	# timeout. It is now pinned to the three roles it must come back with, to the
+	# legs that reach them, and to a report that names the term it tripped on.
+	_check(arena.contains("ARENA_MELEE_KINDS") and arena.contains("ARENA_RANGED_KINDS")
+			and arena.contains("ARENA_SUPPORT_KINDS"),
+			"BOT-003 names the enemy kinds of all three roles it has to engage")
+	_check(arena.contains("_arena_prep") and arena.contains("_arena_arm")
+			and arena.contains("_arena_enter_ruins") and arena.contains("_arena_open_ruins_door"),
+			"BOT-003 walks the whole route to its support enemy: supply, steel, gate, puzzle")
+	_check(arena.contains("_arena_pin_kind"),
+			"BOT-003 holds onto one enemy of a role until the sensor records a hit on its kind")
+	_check(arena.contains("_a_walker_melee") and arena.contains("_a_casts"),
+			"BOT-003 counts the swings its own walker lands and the bolts it paid mana for")
+	_check(arena.contains("failed=%s"),
+			"BOT-003 prints which term of its verdict failed instead of a bare FAIL")
+	_check(arena.contains("_set_control_watch(true)") and arena.contains("_set_control_watch(false)"),
+			"BOT-003 samples the control lock for the whole run, not only while it is hunting")
 	_check(magic.contains("exact_costs == skills.size()") and magic.contains("cooldown_blocks >= 1")
 			and magic.contains("_m_status_hits > 0"),
 			"BOT-004 demands exact mana, a blocked recast and a landed status")
 	_check(economy.contains("attack_after == attack_before + 6")
 			and economy.contains("ledger_balanced") and economy.contains("ShopManager.new(GameState)"),
 			"BOT-005 measures the equip in total_attack, balances the potion ledger and sells through the shop's own entry")
+	# The ledger used to compare a bag total across a window in which the world
+	# hands out potions on its own — a ground find walked over, a flask dropped by
+	# the lumberjack — and then failed a run that had cheated nothing and printed
+	# no reason. It is now a chain of exact per-transaction deltas, and the verdict
+	# names the link that broke.
+	_check(economy.contains("fangs_exact") and economy.contains("sell_exact")
+			and economy.contains("equip_intact"),
+			"BOT-005 balances the ledger transaction by transaction instead of on a bag total")
+	_check(economy.contains("buy_price(") and economy.contains("sell_price("),
+			"BOT-005 reads both prices from the shop data instead of hardcoding them")
+	_check(economy.contains("failed=%s"),
+			"BOT-005 prints which term of its ledger failed instead of a bare FAIL")
 	_check(chain.contains("paid_again") and chain.contains("retalk_state"),
 			"BOT-006 measures the reward-once rule as a zero delta across the re-talk")
 	_check(traps.contains("telegraph_seen") and traps.contains("trap_damage_at_distance")
@@ -3834,6 +3941,65 @@ func _test_stagger_recovery() -> void:
 			stays_dead = false
 	_check(stays_dead, "a wolf killed while staggered stays DEAD (never pops back to STAGGER)")
 
+	# --- defect: the melee hitbox is never written during a query flush ---------
+	# An enemy is damaged from inside a physics query: `spell_projectile` resolves
+	# the overlap in which it detected the hit, and from there `receive_damage` can
+	# stagger or kill the attacker, which closes the very collision shape that
+	# attacker's swing had just opened. The 2D server refuses such a write outright
+	# ("Can't change this state while flushing queries"), the shape then keeps the
+	# stale state and a swing that should have ended goes on landing hits. Both AI
+	# scripts now route every monitoring change through one deferred setter; the
+	# audit below is what stops a future edit from writing one directly again.
+	_check(_direct_monitoring_writes("res://scripts/ai/enemy.gd").is_empty(),
+			"enemy.gd writes no monitoring state directly (%s)"
+			% "; ".join(_direct_monitoring_writes("res://scripts/ai/enemy.gd")))
+	_check(_direct_monitoring_writes("res://scripts/ai/boss.gd").is_empty(),
+			"boss.gd writes no monitoring state directly (%s)"
+			% "; ".join(_direct_monitoring_writes("res://scripts/ai/boss.gd")))
+	var ai_src := _read_script_source("res://scripts/ai/enemy.gd")
+	_check(ai_src.contains("set_deferred(\"disabled\""),
+			"the enemy defers the hitbox write, the only form a flushing server accepts")
+	_check(ai_src.contains("if _hitbox_open == open"),
+			"the hitbox has a single writer that no-ops when the intent already matches")
+	# The setter is behaviour, not only a grep. The intent flips on the spot, the
+	# shape follows a step later, and a repeated request changes nothing. The
+	# wolf's own AI is switched off first so that nothing but this test moves it.
+	var boxer := (load("res://scenes/enemies/wolf.tscn") as PackedScene).instantiate() as Node2D
+	boxer.position = Vector2(240, 200)
+	arena.add_child(boxer)
+	await process_frame
+	boxer.set_process(false)
+	boxer.set_physics_process(false)
+	var shape := boxer.get("attack_shape") as CollisionShape2D
+	_check(shape != null, "the wolf owns the melee shape its AI opens and closes")
+	if shape != null:
+		_check(not bool(boxer.get("_hitbox_open")) and shape.disabled,
+				"a fresh wolf agrees with itself: hitbox closed in intent and in shape")
+		boxer.call("_set_hitbox", true)
+		_check(bool(boxer.get("_hitbox_open")), "the setter records the open intent at once")
+		_check(shape.disabled,
+				"the shape is still closed on the frame of the request, because the write is deferred")
+		for i in range(3):
+			await physics_frame
+		_check(not shape.disabled, "the shape opens on a later step, outside any flush")
+		boxer.call("_set_hitbox", true)
+		_check(not shape.disabled, "a request for the state already held changes nothing")
+		# The path the engine used to reject: dying closes the hitbox, and death
+		# arrives from the damage call that itself arrived from inside the query.
+		var boxer_sc := boxer.get_node_or_null("StatusComponent") as StatusComponent
+		if boxer_sc != null:
+			boxer_sc.set_process(false)
+		DamageResolver.resolve_hit(null, boxer, {
+			"damage": 999, "hit_id": "flush-kill-1", "damage_type": "physical",
+		})
+		_check(int(boxer.get("state")) == 6, "the wolf taken mid-swing is DEAD (state=%s)" % str(boxer.get("state")))
+		_check(not bool(boxer.get("_hitbox_open")),
+				"dying closes the hitbox intent through the same single writer")
+		for i in range(3):
+			await physics_frame
+		_check(shape.disabled,
+				"the close a death asks for lands on a later step instead of being refused")
+
 	arena.queue_free()
 	await process_frame
 	DamageResolver.reset()
@@ -3852,6 +4018,24 @@ func _drive_out_of_stagger(node: Node, max_frames: int) -> int:
 		if int(node.get("state")) != 5:
 			return i + 1
 	return -1
+
+
+## Every line of a script that writes a monitoring property of a collision shape
+## or area directly. Such a write is refused outright when it happens while the
+## physics server is flushing its queries, which is precisely where an enemy takes
+## a hit, so the AI scripts are expected to come back empty-handed here. A
+## comparison is not a write, so `==` is skipped along with comments.
+func _direct_monitoring_writes(path: String) -> Array[String]:
+	var found: Array[String] = []
+	for line: String in _read_script_source(path).split("\n"):
+		var t := line.strip_edges()
+		if t.begins_with("#") or not t.contains("="):
+			continue
+		for prop in ["disabled", "monitoring", "monitorable"]:
+			var write := ".%s =" % String(prop)
+			if t.contains(write) and not t.contains(write + "="):
+				found.append(t)
+	return found
 
 
 ## Forest mini-boss (roadmap stage D, spec §10.4, §10.5). `Boss` puts two phases,
@@ -9353,28 +9537,91 @@ func _test_enemy_behaviour_traits() -> void:
 	await process_frame
 
 	# --- teleport_interval: a blinker that hops and never clips a wall ---------
-	# A bare arena has no world above it, so the blink is always allowed; the
-	# displacement is then exactly the sampled hop. The caster is pinned (stationary)
-	# so the only position change on any frame is the blink itself.
+	# A bare arena has no world above it, so no tile can block a landing — but the
+	# player is a real body on a layer the wolf collides with, and a 40-70 px hop
+	# aimed at it lands on top of it often enough to matter. The engine
+	# depenetrates that overlap inside `move_and_slide` even with zero velocity,
+	# so reading the hop as "position at frame N+1 minus position at frame N"
+	# charged the push-out to the blink: a 70 px hop measured 71.1 px and this
+	# group failed at random. The game now refuses a landing point a body already
+	# occupies, records the hop it asked for in `last_teleport_distance`, and
+	# reports every hop through its own signal, so the intended length and the
+	# physical result are measured separately instead of guessed from two frames.
+	# The blinker is pinned (stationary), so the only position change on any frame
+	# is the blink itself.
+	const BLINK_MIN := 40.0  # Enemy.TELEPORT_MIN
+	const BLINK_MAX := 70.0  # Enemy.TELEPORT_MAX
+	# Tolerance on the measured hop. A landing point is validated against tiles
+	# and against bodies, so nothing but the engine's own contact margin (well
+	# under 0.1 px) may separate the measured hop from the recorded one. Half a
+	# pixel is generous, and still far tighter than the 1.1 px push-out that used
+	# to slip through the old 39.0..71.0 window.
+	const BLINK_TOLERANCE := 0.5
+	# Half-extents of the two bodies: the wolf ships a 12x10 rectangle, the player
+	# a 10x10 one, so the two touch no closer than 11 px on x and 10 px on y.
+	const WOLF_HALF_X := 11.0
+	const WOLF_HALF_Y := 10.0
 	var blinker := _spawn_trait_enemy(arena, Vector2.ZERO)
 	blinker.set("teleport_interval", 0.5)
 	blinker.set("stationary", true)
 	player.global_position = Vector2(60, 0)  # induce CHASE, face +x
-	var blink_min := INF
-	var blink_max := 0.0
-	var blink_frames_seen := 0
-	var prev_pos := blinker.global_position
+	_check(blinker.has_signal("blinked"),
+		"a blink reports itself, so an observer does not have to guess which frames it spans")
+	# A lambda captures its locals by value, so everything the handler writes is an
+	# Array it mutates through the captured reference.
+	var hop_lengths: Array = [] # the hop the game asked for, one per blink
+	var hop_origins: Array = [] # where the body stood for that hop
+	var on_hop := func(distance: float, from: Vector2, _to: Vector2) -> void:
+		hop_lengths.append(distance)
+		hop_origins.append(from)
+	if blinker.has_signal("blinked"):
+		blinker.blinked.connect(on_hop)
+	var measured_hops: Array = []
+	var toward_player: Array = []
+	var landed_inside_player := 0
 	for _i in range(150):
 		await physics_frame
-		var jump := prev_pos.distance_to(blinker.global_position)
-		if jump > 1.0:
-			blink_min = minf(blink_min, jump)
-			blink_max = maxf(blink_max, jump)
-			blink_frames_seen += 1
-		prev_pos = blinker.global_position
-	_check(blink_frames_seen >= 2, "the blinker hopped several times while chasing (%d)" % blink_frames_seen)
-	_check(blink_min >= 39.0 and blink_max <= 71.0,
-		"every blink moves 40-70 px (min %.1f, max %.1f)" % [blink_min, blink_max])
+		# The signal fires inside the frame that hops, before that frame's
+		# `move_and_slide`; the position read here is the body's after that step,
+		# so this is the real displacement of one hop and of nothing else.
+		while measured_hops.size() < hop_origins.size():
+			var origin := hop_origins[measured_hops.size()] as Vector2
+			measured_hops.append(origin.distance_to(blinker.global_position))
+			var to_player := player.global_position - origin
+			if to_player.length() > 0.01:
+				toward_player.append((blinker.global_position - origin).dot(to_player.normalized()))
+		var offset := blinker.global_position - player.global_position
+		if absf(offset.x) < WOLF_HALF_X and absf(offset.y) < WOLF_HALF_Y:
+			landed_inside_player += 1
+	var intended_min := INF
+	var intended_max := 0.0
+	for hop in hop_lengths:
+		intended_min = minf(intended_min, float(hop))
+		intended_max = maxf(intended_max, float(hop))
+	var measured_min := INF
+	var measured_max := 0.0
+	for hop in measured_hops:
+		measured_min = minf(measured_min, float(hop))
+		measured_max = maxf(measured_max, float(hop))
+	_check(hop_lengths.size() >= 2,
+		"the blinker hopped several times while chasing (%d)" % hop_lengths.size())
+	_check(intended_min >= BLINK_MIN and intended_max <= BLINK_MAX,
+		"every blink asks for 40-70 px (recorded min %.1f, max %.1f)" % [intended_min, intended_max])
+	_check(measured_min >= BLINK_MIN - BLINK_TOLERANCE and measured_max <= BLINK_MAX + BLINK_TOLERANCE,
+		"every blink moves 40-70 px (measured min %.1f, max %.1f, tolerance %.1f)" % [measured_min, measured_max, BLINK_TOLERANCE])
+	# The chase re-faces at the player on the frame of the hop and the rotation
+	# stays inside +-90 deg of it, so no hop may point away from the player, and
+	# the hops must add up to real ground gained.
+	var hops_pointing_away := 0
+	var ground_gained := 0.0
+	for step in toward_player:
+		if float(step) < -BLINK_TOLERANCE:
+			hops_pointing_away += 1
+		ground_gained += float(step)
+	_check(hops_pointing_away == 0 and ground_gained > 0.0,
+		"every hop is steered toward the player (%d pointing away, %.1f px gained in total)" % [hops_pointing_away, ground_gained])
+	_check(landed_inside_player == 0,
+		"a blink never lands on top of the player's body (%d frames overlapping)" % landed_inside_player)
 	# With a fake world that walls off everything to the right, a blink must never
 	# land on a solid tile — the destination check rejects it outright.
 	var walled := FakeWalledWorld.new()
@@ -10014,7 +10261,15 @@ func _test_enemy_roster() -> void:
 				if post == null:
 					continue
 				posted += 1
-				var tile := _tile_of_node(post)
+				# Measure the authored spawn post, not the live position. An enemy
+				# wanders its leash on the global RNG, so a live sample taken after an
+				# unbounded number of physics frames catches it mid-stride on a tree
+				# tile under load — the assertion would then be measuring the wander,
+				# not the level. `spawn_position` is captured once in the enemy's
+				# `_ready` from the tile the world placed it on, so it is the post the
+				# author actually drew and is identical every run.
+				var spawn_pos: Vector2 = post.get("spawn_position")
+				var tile := _tile_of_pos(spawn_pos)
 				var cell := String(world.call("cell_at", tile))
 				if cell != "." and cell != ",":
 					off_ground.append("%s@%s='%s'" % [String(post.name), str(tile), cell])
@@ -10029,10 +10284,10 @@ func _test_enemy_roster() -> void:
 			print("  %-9s %2d posts, %d types — %s"
 				% [String(leg[0]), posted, zone_types.size(), ", ".join(zone_types)])
 			_check(off_ground.is_empty(),
-				"every %s enemy stands on a walkable tile (%s)"
+				"every %s enemy spawns on a walkable tile (%s)"
 					% [String(leg[0]), ", ".join(off_ground)])
 			_check(in_safe_zone.is_empty(),
-				"no %s enemy stands inside the village safe zone (%s)"
+				"no %s enemy spawns inside the village safe zone (%s)"
 					% [String(leg[0]), ", ".join(in_safe_zone)])
 			_check(zone_types.size() >= 2,
 				"%s fields more than one kind of enemy (got %d)"
@@ -10420,23 +10675,27 @@ func _test_dungeon() -> void:
 				% str(Vector2i(bound.call("map_size")) if bound != null else Vector2i.ZERO))
 		hud.call("open_map_for_shot")
 		for i in range(4):
-			await physics_frame
+			await process_frame
 		_check(bool(hud.call("is_map_open")),
 			"the map opens over the undercroft without an error")
 		# Close it the way the player does, so no later group inherits ui_blocking.
+		# The M edge is consumed by the HUD's `_process`, so the wait is on
+		# `process_frame`, not `physics_frame`: under load several physics steps pack
+		# into one idle frame, and a physics-frame wait can finish without the HUD
+		# ever having run to consume the latch.
 		var m_down := InputEventKey.new()
 		m_down.physical_keycode = KEY_M
 		m_down.keycode = KEY_M
 		m_down.pressed = true
 		Input.parse_input_event(m_down)
 		for i in range(4):
-			await physics_frame
+			await process_frame
 		var m_up := InputEventKey.new()
 		m_up.physical_keycode = KEY_M
 		m_up.keycode = KEY_M
 		m_up.pressed = false
 		Input.parse_input_event(m_up)
-		await physics_frame
+		await process_frame
 		_check(not bool(hud.call("is_map_open")), "the group closed the map again")
 		_check(not gs.ui_blocking, "the group left no ui_blocking behind")
 
@@ -10870,23 +11129,27 @@ func _test_fortress() -> void:
 				% str(Vector2i(bound.call("map_size")) if bound != null else Vector2i.ZERO))
 		hud.call("open_map_for_shot")
 		for i in range(4):
-			await physics_frame
+			await process_frame
 		_check(bool(hud.call("is_map_open")),
 			"the map opens over the fortress without an error")
 		# Close it the way the player does, so no later group inherits ui_blocking.
+		# The M edge is consumed by the HUD's `_process`, so the wait is on
+		# `process_frame`, not `physics_frame`: under load several physics steps pack
+		# into one idle frame, and a physics-frame wait can finish without the HUD
+		# ever having run to consume the latch.
 		var m_down := InputEventKey.new()
 		m_down.physical_keycode = KEY_M
 		m_down.keycode = KEY_M
 		m_down.pressed = true
 		Input.parse_input_event(m_down)
 		for i in range(4):
-			await physics_frame
+			await process_frame
 		var m_up := InputEventKey.new()
 		m_up.physical_keycode = KEY_M
 		m_up.keycode = KEY_M
 		m_up.pressed = false
 		Input.parse_input_event(m_up)
-		await physics_frame
+		await process_frame
 		_check(not bool(hud.call("is_map_open")), "the group closed the map again")
 		_check(not gs.ui_blocking, "the group left no ui_blocking behind")
 

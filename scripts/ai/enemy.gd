@@ -46,11 +46,22 @@ const DEATH_POOL_TICK := 1.0
 const DEATH_POOL_STATUS_DURATION := 1.5
 const DEATH_POOL_MAX := 3
 const DEATH_POOL_GROUP := &"death_pool"
-## Blink hop length and the exposure window that follows it.
+## Blink hop length and the exposure window that follows it. The hop is a hard
+## invariant, not a target: `TELEPORT_MIN`..`TELEPORT_MAX` is what the body must
+## actually end up displaced by, so a landing point is only accepted when nothing
+## can shove the body off it afterwards (see `_do_blink`).
 const TELEPORT_MIN := 40.0
 const TELEPORT_MAX := 70.0
 const TELEPORT_VULNERABLE_TIME := 0.15
 const TELEPORT_VULNERABLE_BONUS := 1.5
+## How many landing points one blink may try before it gives up. A blinker that
+## faces a wall or stands shoulder to shoulder with the player would otherwise
+## refuse every hop it samples and read as a broken trait.
+const TELEPORT_SAMPLES := 6
+## A blink is corrected back onto its landing point only when the physics step
+## moved it further away than this. Anything smaller is the engine's own contact
+## margin (`safe_margin`), not a real push, and is left alone.
+const TELEPORT_LANDING_TOLERANCE := 0.5
 ## Swarm: allies within this radius each add pack_bonus to the speed multiplier,
 ## up to this total bonus.
 const PACK_RADIUS := 90.0
@@ -116,6 +127,13 @@ const PACK_REFRESH_INTERVAL := 0.25
 ## PACK_BONUS_CAP. 0 keeps the lone-wolf speed.
 @export var pack_bonus: float = 0.0
 
+## Emitted the moment a blink lands, before the physics step of that frame. It
+## carries the hop the blink asked for and both endpoints, so an observer can
+## measure one hop without guessing which frames it spans: `distance` is the
+## sampled length, `from` is where the body stood, `to` is the accepted landing
+## point. Never emitted for a blink that was refused.
+signal blinked(distance: float, from: Vector2, to: Vector2)
+
 @onready var sprite: Sprite2D = $Sprite2D
 @onready var health: HealthComponent = $HealthComponent
 @onready var attack_area: Area2D = $AttackHitbox
@@ -151,11 +169,31 @@ var _aura_accum := 0.0
 ## Blink clock and the exposure timer that follows a hop.
 var _teleport_accum := 0.0
 var _teleport_vulnerable_left := 0.0
+## The hop length the last accepted blink asked for, in pixels. 0 until the first
+## hop. This is the number the 40–70 px rule is about: it is what the blink
+## decided to move by, and `_enforce_blink_distance` below keeps the body from
+## ending up further away than this. Read by tests and by any UI that wants to
+## show the real hop rather than guess it from two frames.
+var last_teleport_distance := 0.0
+## Where the body stood before the last accepted blink and the landing point it
+## was validated against. Only live for the one frame of the hop.
+var _blink_origin := Vector2.ZERO
+var _blink_destination := Vector2.ZERO
+## Set by `_do_blink` and consumed by `_enforce_blink_distance` on the same frame.
+var _blink_correction_pending := false
 ## Swarm speed is recomputed on a slow clock (a group scan is not free) and read
 ## from this cache every frame, so `_physics_process` never allocates. For an enemy
 ## with no pack_bonus it is simply `speed_multiplier`, refreshed in place.
 var _effective_speed_mult := 1.0
 var _pack_accum := 0.0
+
+## Whether the melee hitbox is meant to be open right now. The collision shape is
+## never written directly, only through `_set_hitbox` below, because an enemy takes
+## a hit inside a physics query (`spell_projectile` resolves the overlap it was
+## detected in, and a melee swing reads `get_overlapping_bodies()`), and the 2D
+## physics server refuses a monitoring change while it is flushing queries:
+## "Can't change this state while flushing queries".
+var _hitbox_open := false
 
 ## The world node that owns the village safe zone (the `Forest`), resolved through
 ## the `safe_zone_owner` group and cached. Null when no safe zone exists (a bare
@@ -177,7 +215,11 @@ func _ready() -> void:
 	health.current_health = max_health
 	health.died.connect(_on_died)
 	health.damaged.connect(_on_damaged)
-	attack_shape.disabled = true
+	# The scene ships the shape disabled, so that is adopted as the starting intent
+	# and the close below is a no-op for every shipped enemy. A scene that ever
+	# ships the shape open gets it closed on the next step instead of mid-flush.
+	_hitbox_open = not attack_shape.disabled
+	_set_hitbox(false)
 	telegraph.visible = false
 	sprite.modulate = sprite_tint
 	_attack_cooldown_left = randf_range(0.2, 0.9)
@@ -190,6 +232,29 @@ func _ready() -> void:
 	# Seed the movement cache so the first chase frame already reads the scene's
 	# own speed even before the swarm clock has had a chance to refresh.
 	_effective_speed_mult = speed_multiplier
+
+
+## Open or close the melee hitbox — the only writer of the shape's `disabled`.
+##
+## The write is deferred on purpose. A swing is opened and closed from code that
+## can be reached from inside a physics query: a projectile's `body_entered` runs
+## while the space state is flushing, and from there `receive_damage` can stagger
+## or kill the attacker, which closes the very shape the swing had just opened.
+## The server rejects that write outright ("Can't change this state while flushing
+## queries"), so the shape would keep the stale state and the swing would land
+## anyway or never stop. `_hitbox_open` is the intent and the truth the AI reads;
+## the shape catches up on the next step.
+##
+## Nothing depends on the shape in the frame it changes: `_apply_melee_hits` polls
+## `get_overlapping_bodies()` on every frame of the ACTIVE window, so a swing that
+## opens one step late still lands inside the same swing, and a close is only ever
+## a request to stop landing hits from the next step on.
+func _set_hitbox(open: bool) -> void:
+	if _hitbox_open == open:
+		return
+	_hitbox_open = open
+	if attack_shape != null and is_instance_valid(attack_shape):
+		attack_shape.set_deferred("disabled", not open)
 
 
 ## Lazily resolved status component. Attached in code (never edited into the
@@ -365,7 +430,7 @@ func _on_died(_info: Dictionary) -> void:
 	var dead_sc := _status()
 	if dead_sc != null:
 		dead_sc.clear_all()
-	attack_shape.disabled = true
+	_set_hitbox(false)
 	telegraph.visible = false
 	collision_layer = 0
 	collision_mask = 0
@@ -431,6 +496,7 @@ func _physics_process(delta: float) -> void:
 	if stationary:
 		velocity = Vector2.ZERO
 	move_and_slide()
+	_enforce_blink_distance()
 
 
 ## Exit from STAGGER once the clock runs out (spec §10.4). Re-acquire the player
@@ -466,7 +532,7 @@ func _enter(next: State) -> void:
 			velocity = Vector2.ZERO
 		State.STAGGER:
 			telegraph.visible = false
-			attack_shape.disabled = true
+			_set_hitbox(false)
 			# The stagger clock for this hit: the base time plus whatever the
 			# combination on the incoming hit asked for, then the bonus is dropped so
 			# the next hit starts from its own value.
@@ -690,22 +756,88 @@ func _tick_teleport(delta: float) -> void:
 
 
 ## A short hop toward a random offset around the current facing. The rotation only
-## steers the landing point; the displacement is exactly the sampled distance, so a
-## blink always moves 40–70 px. A wall destination is refused outright.
+## steers the landing point; the length is the sampled distance, and that length is
+## the contract: the body must not end up displaced by more than it asked for.
+##
+## A landing point is therefore accepted only when nothing can shove the body off it
+## later in the same frame — neither a solid tile nor a body this enemy collides
+## with. That second half is the part the tile check alone could not cover: the
+## engine depenetrates an overlap inside `move_and_slide` even with zero velocity, so
+## a hop that dropped the body 6 px inside the player was pushed back out to the
+## contact point before the frame ended, and a 70 px hop measured 71.1 px. Refusing
+## an occupied landing point is what makes 40–70 px true rather than aspirational.
+## The sampled length is also recorded in `last_teleport_distance`, and
+## `_enforce_blink_distance` undoes any push that still happens as a backstop. Up to
+## `TELEPORT_SAMPLES` points are tried; if every one is blocked the blink is skipped
+## for this interval, which is what a wall destination already did.
 func _do_blink() -> void:
 	var base := _facing
 	if base.length() < 0.01:
 		base = Vector2.RIGHT
-	var dir := base.rotated(randf_range(-PI * 0.5, PI * 0.5))
-	var destination := global_position + dir * randf_range(TELEPORT_MIN, TELEPORT_MAX)
-	if _tile_is_solid(destination):
+	for _sample in range(TELEPORT_SAMPLES):
+		var dir := base.rotated(randf_range(-PI * 0.5, PI * 0.5))
+		var distance := randf_range(TELEPORT_MIN, TELEPORT_MAX)
+		var destination := global_position + dir * distance
+		if _tile_is_solid(destination) or _body_at(destination):
+			continue
+		_blink_origin = global_position
+		global_position = destination
+		_blink_destination = destination
+		last_teleport_distance = distance
+		_blink_correction_pending = true
+		_teleport_vulnerable_left = TELEPORT_VULNERABLE_TIME
+		Telemetry.event(&"enemy_blink", {
+			"enemy_type": String(enemy_type),
+			"pos": [global_position.x, global_position.y],
+			"distance": distance,
+		})
+		blinked.emit(distance, _blink_origin, destination)
 		return
-	global_position = destination
-	_teleport_vulnerable_left = TELEPORT_VULNERABLE_TIME
-	Telemetry.event(&"enemy_blink", {
-		"enemy_type": String(enemy_type),
-		"pos": [global_position.x, global_position.y],
-	})
+
+
+## True when a body this enemy collides with already covers `pos`, so dropping the
+## body there would start the frame overlapped and let `move_and_slide` push it out.
+## The query uses this body's own shapes and its own `collision_mask`, which is
+## exactly the set of bodies the physics step can push it away from: a body outside
+## that mask cannot inflate a hop, so it must not be allowed to block a landing.
+## With no space (a body outside a viewport) there is nothing to collide with.
+func _body_at(pos: Vector2) -> bool:
+	var space := get_world_2d().direct_space_state
+	if space == null:
+		return false
+	var exclude: Array[RID] = [get_rid()]
+	for owner_id in get_shape_owners():
+		for i in range(shape_owner_get_shape_count(owner_id)):
+			var params := PhysicsShapeQueryParameters2D.new()
+			params.shape = shape_owner_get_shape(owner_id, i)
+			params.transform = Transform2D(0.0, pos) * shape_owner_get_transform(owner_id)
+			params.collision_mask = collision_mask
+			params.collide_with_bodies = true
+			params.collide_with_areas = false
+			params.exclude = exclude
+			if not space.intersect_shape(params, 1).is_empty():
+				return true
+	return false
+
+
+## Backstop for the blink invariant, run on the frame of a hop right after
+## `move_and_slide`. The landing point was validated, so the only thing that can have
+## moved the body off it is a push the validation could not see — a body that slid
+## into the landing point during this very step. While the landing point is still
+## free the body is put back on it, which keeps the measured hop exactly the sampled
+## one. When it is no longer free the pushed position is kept: dragging the body back
+## into an overlap would only have the engine push it out again next frame, and a
+## blinker vibrating against the player is worse than one rare frame where the hop
+## ran a pixel long.
+func _enforce_blink_distance() -> void:
+	if not _blink_correction_pending:
+		return
+	_blink_correction_pending = false
+	if global_position.distance_to(_blink_destination) <= TELEPORT_LANDING_TOLERANCE:
+		return
+	if _tile_is_solid(_blink_destination) or _body_at(_blink_destination):
+		return
+	global_position = _blink_destination
 
 
 ## True when the tile under `pos` is solid in the owning zone. With no world above
@@ -770,7 +902,7 @@ func _process_attack(delta: float) -> void:
 	# back to the chase ("Разряд: короткое прерывание").
 	var swing_sc := _status()
 	if swing_sc != null and swing_sc.attack_multiplier() == 0.0:
-		attack_shape.disabled = true
+		_set_hitbox(false)
 		telegraph.visible = false
 		_enter(State.CHASE)
 		return
@@ -790,14 +922,14 @@ func _process_attack(delta: float) -> void:
 
 	if _state_time < windup + ACTIVE:
 		if kind == Kind.MELEE:
-			attack_shape.disabled = false
+			_set_hitbox(true)
 			_apply_melee_hits()
 		elif not _fired_this_swing:
 			_fired_this_swing = true
 			_fire_projectile()
 		return
 
-	attack_shape.disabled = true
+	_set_hitbox(false)
 	if _state_time >= windup + ACTIVE + RECOVERY:
 		_attack_cooldown_left = ATTACK_COOLDOWN * attack_cooldown_multiplier
 		_enter(State.CHASE)

@@ -475,8 +475,12 @@ func _spawn_actors() -> void:
 	_trap_node = trap
 
 	_spawn_enemy(WOLF_SCENE, 18, 14, "WolfA")
-	_spawn_enemy(WOLF_SCENE, 21, 16, "WolfB")
-	_spawn_enemy(WOLF_SCENE, 25, 13, "WolfC")
+	# WolfB and WolfC sat on (21,16) and (25,13), which this seed's generated grid
+	# paints as trees. The wolves walked onto grass a frame later, so a live-position
+	# check never noticed; an authored-spawn check does. One tile north (21,15) and one
+	# tile south (25,14) are the same pack positions on ground the map calls walkable.
+	_spawn_enemy(WOLF_SCENE, 21, 15, "WolfB")
+	_spawn_enemy(WOLF_SCENE, 25, 14, "WolfC")
 	_spawn_enemy(WOLF_SCENE, 30, 18, "WolfD")
 	_spawn_enemy(WOLF_SCENE, 34, 20, "WolfE")
 	_spawn_enemy(ARCHER_SCENE, MAP_W - 6, 6, "ArcherA")

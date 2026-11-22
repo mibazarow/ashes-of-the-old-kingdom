@@ -5,6 +5,12 @@ extends CanvasLayer
 const BAR_W := 92.0
 const BAR_H := 7.0
 const QUICK_SLOT_ACTIONS := [&"quick_slot_1", &"quick_slot_2", &"quick_slot_3", &"quick_slot_4"]
+## Every action the HUD answers with a one-shot press edge. `_input` latches these
+## so a press that opens or closes a panel is never lost to frame timing; `_process`
+## consumes the latch instead of reading the engine's one-frame `just_pressed`.
+const POLLED_ACTIONS := [&"map", &"pause", &"character", &"skills", &"journal",
+	&"inventory", &"interact", &"move_up", &"move_down", &"save_game", &"load_game"] \
+		+ QUICK_SLOT_ACTIONS
 ## At most this many inventory rows are rendered at once, so the panel can never
 ## grow past the 480x270 viewport; the cursor scrolls a window over the rest.
 const MAX_VISIBLE_ROWS := 8
@@ -175,6 +181,21 @@ var _dialogue_auto_advance := true
 var _dialogue_tab_held := false
 var _dialogue_space_held := false
 var _dialogue_lock_input := false
+
+## Input edge latch (defect A). `Input.is_action_just_pressed` is true for exactly
+## one `_process` frame, so a press whose down and up both land between two `_process`
+## frames — a long frame, a stalled main thread, a fast tap, or several physics steps
+## packed into one idle frame under load — is consumed before the HUD ever polls it,
+## and the key is silently lost. `_input` runs for every event regardless of frame
+## timing, so it records each polled press here; `_process` snapshots the latch at the
+## top of the frame and consumes it, and anything left unconsumed (a press a modal
+## swallowed) is dropped on the next snapshot, exactly like the one-frame edge it
+## replaces. `_pending_input` is written by `_input`; `_active_input` is the snapshot
+## `_process` reads and clears. The bot drives input through the `InputSource`
+## override rather than real events, so `_consume_action` reads the override directly
+## while one is installed and the latch stays out of the bot's way.
+var _pending_input: Dictionary = {}
+var _active_input: Dictionary = {}
 
 
 func _ready() -> void:
@@ -975,9 +996,9 @@ func _activate_inventory_selection() -> void:
 ## the same arrows never move the character.
 func _process_inventory_navigation() -> void:
 	var delta := 0
-	if InputSource.is_action_just_pressed(&"move_up"):
+	if _consume_action(&"move_up"):
 		delta -= 1
-	if InputSource.is_action_just_pressed(&"move_down"):
+	if _consume_action(&"move_down"):
 		delta += 1
 	if delta != 0:
 		_move_inventory_selection(delta)
@@ -986,7 +1007,7 @@ func _process_inventory_navigation() -> void:
 	var enter_now := Input.is_key_pressed(KEY_ENTER)
 	var enter_edge := enter_now and not _enter_held
 	_enter_held = enter_now
-	if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+	if _consume_action(&"interact") or enter_edge:
 		_activate_inventory_selection()
 
 
@@ -1071,16 +1092,16 @@ func _close_character() -> void:
 ## it is edge-detected by hand, exactly like in the inventory.
 func _process_character_navigation() -> void:
 	var delta := 0
-	if InputSource.is_action_just_pressed(&"move_up"):
+	if _consume_action(&"move_up"):
 		delta -= 1
-	if InputSource.is_action_just_pressed(&"move_down"):
+	if _consume_action(&"move_down"):
 		delta += 1
 	if delta != 0 and _character_panel != null:
 		_character_panel.move_selection(delta)
 	var enter_now := Input.is_key_pressed(KEY_ENTER)
 	var enter_edge := enter_now and not _enter_held
 	_enter_held = enter_now
-	if (InputSource.is_action_just_pressed(&"interact") or enter_edge) and _character_panel != null:
+	if (_consume_action(&"interact") or enter_edge) and _character_panel != null:
 		_character_panel.spend_selected_point()
 
 
@@ -1287,21 +1308,21 @@ func _close_skills() -> void:
 ## InputMap action, so both are edge-detected by hand the way Enter is in the
 ## inventory; the bot drives selection through `interact` alone.
 func _process_skills_navigation() -> void:
-	if InputSource.is_action_just_pressed(&"pause") or InputSource.is_action_just_pressed(&"skills"):
+	if _consume_action(&"pause") or _consume_action(&"skills"):
 		_close_skills()
 		return
 	if _skills_panel != null:
 		var delta := 0
-		if InputSource.is_action_just_pressed(&"move_up"):
+		if _consume_action(&"move_up"):
 			delta -= 1
-		if InputSource.is_action_just_pressed(&"move_down"):
+		if _consume_action(&"move_down"):
 			delta += 1
 		if delta != 0:
 			_skills_panel.move_selection(delta)
 		var enter_now := Input.is_key_pressed(KEY_ENTER)
 		var enter_edge := enter_now and not _enter_held
 		_enter_held = enter_now
-		if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+		if _consume_action(&"interact") or enter_edge:
 			_skills_panel.activate()
 		var l_now := Input.is_key_pressed(KEY_L)
 		if l_now and not _skills_l_held:
@@ -1550,7 +1571,7 @@ func _process_dialogue_navigation() -> void:
 	if _dialogue_lock_input:
 		_dialogue_lock_input = false
 		return
-	if InputSource.is_action_just_pressed(&"pause"):
+	if _consume_action(&"pause"):
 		close_dialogue()
 		return
 	var tab_now := Input.is_key_pressed(KEY_TAB)
@@ -1560,9 +1581,9 @@ func _process_dialogue_navigation() -> void:
 	_dialogue_tab_held = tab_now
 	var options := _dialogue_runner.current_options()
 	var delta := 0
-	if InputSource.is_action_just_pressed(&"move_up"):
+	if _consume_action(&"move_up"):
 		delta -= 1
-	if InputSource.is_action_just_pressed(&"move_down"):
+	if _consume_action(&"move_down"):
 		delta += 1
 	if delta != 0 and not options.is_empty():
 		_dialogue_option_index = clampi(_dialogue_option_index + delta, 0, options.size() - 1)
@@ -1570,7 +1591,7 @@ func _process_dialogue_navigation() -> void:
 	var space_now := Input.is_key_pressed(KEY_SPACE)
 	var space_edge := space_now and not _dialogue_space_held
 	_dialogue_space_held = space_now
-	if InputSource.is_action_just_pressed(&"interact") or space_edge:
+	if _consume_action(&"interact") or space_edge:
 		_advance_dialogue()
 
 
@@ -1675,10 +1696,72 @@ func _close_pause() -> void:
 	EventBus.game_paused.emit(false)
 
 
+## Edge latch for the HUD's polled actions (defect A). `_input` is the first hook in
+## the frame and runs for every event regardless of how many physics steps get packed
+## into one idle frame, so it is the only place a press can be caught before the
+## engine's one-frame `just_pressed` window closes. It observes without consuming: it
+## never calls `set_input_as_handled`, so the player, the GUI and the settings panel
+## still receive every event exactly as before. The debug bot installs an `InputSource`
+## override instead of pushing real events, so its presses never reach here; they are
+## read straight from the override in `_consume_action`, leaving bot behaviour
+## identical. Key echo (auto-repeat) is ignored so holding a panel key is one press,
+## matching the engine's own `just_pressed`.
+func _input(event: InputEvent) -> void:
+	var pressed := false
+	var echo := false
+	if event is InputEventKey:
+		var key := event as InputEventKey
+		pressed = key.pressed
+		echo = key.is_echo()
+	elif event is InputEventMouseButton:
+		pressed = (event as InputEventMouseButton).pressed
+	elif event is InputEventJoypadButton:
+		pressed = (event as InputEventJoypadButton).pressed
+	elif event is InputEventAction:
+		var act := event as InputEventAction
+		pressed = act.is_pressed()
+		echo = act.is_echo()
+	else:
+		return
+	if not pressed or echo:
+		return
+	for action in POLLED_ACTIONS:
+		if event.is_action_pressed(action):
+			_pending_input[action] = true
+
+
+## Consume one press of `action` for this `_process` frame. While the debug bot owns
+## input it answers from the override (which serves each edge once per physics tick),
+## so the bot path is byte-for-byte the old engine `just_pressed`. For
+## a human it consumes the latch `_input` captured, clearing it so one press is one
+## action and never repeats.
+func _consume_action(action: StringName) -> bool:
+	if InputSource.has_override():
+		return InputSource.is_action_just_pressed(action)
+	if bool(_active_input.get(action, false)):
+		_active_input[action] = false
+		return true
+	return false
+
+
+## Read a latched press without consuming it. Used only by the settings-just-closed
+## guard, which must leave the Esc edge for the branch that owns it rather than eat it.
+func _peek_action(action: StringName) -> bool:
+	if InputSource.has_override():
+		return InputSource.is_action_just_pressed(action)
+	return bool(_active_input.get(action, false))
+
+
 ## UI polls the same InputSource the player uses, so a human and the debug bot
 ## drive menus through one code path. Real InputEvents would be invisible to the
 ## bot, which is exactly the privileged/unequal access the spec forbids.
 func _process(_delta: float) -> void:
+	# Snapshot the edges `_input` captured since the last frame and start the next
+	# frame's latch empty. Anything a modal swallows this frame is dropped here on the
+	# following snapshot, so a latch lives exactly as long as the one-frame engine edge
+	# it replaces and never leaks into a later frame.
+	_active_input = _pending_input
+	_pending_input = {}
 	# The clock line refreshes on its own one-second cadence, ahead of every
 	# modal early-return below, so it stays readable over the map, shop and bench.
 	_tick_clock(_delta)
@@ -1704,10 +1787,10 @@ func _process(_delta: float) -> void:
 	# the game in the same frame: it belongs to the settings screen alone.
 	if _settings_just_closed:
 		_settings_just_closed = false
-		if InputSource.is_action_just_pressed(&"pause"):
+		if _peek_action(&"pause"):
 			return
 	if _map_open:
-		if InputSource.is_action_just_pressed(&"pause") or InputSource.is_action_just_pressed(&"map"):
+		if _consume_action(&"pause") or _consume_action(&"map"):
 			_close_map()
 			return
 		if _map_panel != null:
@@ -1719,7 +1802,7 @@ func _process(_delta: float) -> void:
 	# by hand the way Enter is in the inventory; the bot never presses Tab, so it
 	# stays on the buy list and can never reach a sell it was not meant to do.
 	if _shop_open:
-		if InputSource.is_action_just_pressed(&"pause"):
+		if _consume_action(&"pause"):
 			close_shop()
 			return
 		if _shop_panel != null:
@@ -1728,13 +1811,13 @@ func _process(_delta: float) -> void:
 				_shop_panel.toggle_mode()
 			_tab_held = tab_now
 			var shop_delta := 0
-			if InputSource.is_action_just_pressed(&"move_up"):
+			if _consume_action(&"move_up"):
 				shop_delta -= 1
-			if InputSource.is_action_just_pressed(&"move_down"):
+			if _consume_action(&"move_down"):
 				shop_delta += 1
 			if shop_delta != 0:
 				_shop_panel.move_selection(shop_delta)
-			if InputSource.is_action_just_pressed(&"interact"):
+			if _consume_action(&"interact"):
 				_shop_panel.activate()
 		return
 	# The craft bench owns the input while it is open, exactly like the shop: Esc
@@ -1743,18 +1826,18 @@ func _process(_delta: float) -> void:
 	# at the forge cannot open the inventory or the map over the bench, and the
 	# panel — not the HUD — decides what E is worth through the CraftManager.
 	if _craft_open:
-		if InputSource.is_action_just_pressed(&"pause"):
+		if _consume_action(&"pause"):
 			close_craft()
 			return
 		if _craft_panel != null:
 			var craft_delta := 0
-			if InputSource.is_action_just_pressed(&"move_up"):
+			if _consume_action(&"move_up"):
 				craft_delta -= 1
-			if InputSource.is_action_just_pressed(&"move_down"):
+			if _consume_action(&"move_down"):
 				craft_delta += 1
 			if craft_delta != 0:
 				_craft_panel.move_selection(craft_delta)
-			if InputSource.is_action_just_pressed(&"interact"):
+			if _consume_action(&"interact"):
 				_craft_panel.activate()
 		return
 	# A data-driven conversation owns the input while it is open, ahead of every
@@ -1767,7 +1850,7 @@ func _process(_delta: float) -> void:
 	# Esc belongs to the character screen while it is open: it closes the panel
 	# instead of pausing the game underneath.
 	if _character_open:
-		if InputSource.is_action_just_pressed(&"pause"):
+		if _consume_action(&"pause"):
 			_toggle_character()
 			return
 	# The skills screen owns the input while it is open, exactly like the shop and
@@ -1777,10 +1860,10 @@ func _process(_delta: float) -> void:
 	if _skills_open:
 		_process_skills_navigation()
 		return
-	if InputSource.is_action_just_pressed(&"map"):
+	if _consume_action(&"map"):
 		_open_map()
 		return
-	if InputSource.is_action_just_pressed(&"pause"):
+	if _consume_action(&"pause"):
 		if _dialogue_open:
 			close_dialogue()
 		elif _journal_open:
@@ -1788,7 +1871,7 @@ func _process(_delta: float) -> void:
 		else:
 			_toggle_pause()
 		return
-	if InputSource.is_action_just_pressed(&"character"):
+	if _consume_action(&"character"):
 		_toggle_character()
 		return
 	# K opens the skills screen. It sits here, alongside the other panel keys and
@@ -1796,7 +1879,7 @@ func _process(_delta: float) -> void:
 	# It is refused while the inventory, journal or a dialogue owns the screen (the
 	# map, shop, bench and settings already returned above), so K never stacks a
 	# second modal over one that is open.
-	if InputSource.is_action_just_pressed(&"skills"):
+	if _consume_action(&"skills"):
 		if not _inventory_open and not _journal_open and not _dialogue_open:
 			_toggle_skills()
 		return
@@ -1809,13 +1892,13 @@ func _process(_delta: float) -> void:
 		if menu_key_edge:
 			return_to_menu()
 			return
-		if InputSource.is_action_just_pressed(&"interact"):
+		if _consume_action(&"interact"):
 			_open_settings()
 		return
-	if InputSource.is_action_just_pressed(&"journal"):
+	if _consume_action(&"journal"):
 		_toggle_journal()
 		return
-	if InputSource.is_action_just_pressed(&"inventory"):
+	if _consume_action(&"inventory"):
 		_toggle_inventory()
 		return
 	if _inventory_open:
@@ -1824,21 +1907,21 @@ func _process(_delta: float) -> void:
 	if _character_open:
 		_process_character_navigation()
 		return
-	if InputSource.is_action_just_pressed(&"interact") and _dialogue_open:
+	if _consume_action(&"interact") and _dialogue_open:
 		close_dialogue()
 		return
 	if _dialogue_open or _inventory_open or _journal_open:
 		return
 	for index in QUICK_SLOT_ACTIONS.size():
 		var action: StringName = QUICK_SLOT_ACTIONS[index]
-		if InputSource.is_action_just_pressed(action):
+		if _consume_action(action):
 			_use_quick_slot(index)
 			return
-	if InputSource.is_action_just_pressed(&"save_game"):
+	if _consume_action(&"save_game"):
 		var res: Dictionary = SaveManager.save_game(1)
 		EventBus.toast.emit("Сохранено" if bool(res.get("ok", false)) else "Ошибка сохранения")
 		return
-	if InputSource.is_action_just_pressed(&"load_game"):
+	if _consume_action(&"load_game"):
 		# Travel first, load second. `load_game` hands the saved position to the
 		# player standing in the tree at that moment, and travelling afterwards
 		# would free that player along with the zone it lives in, dropping the run
@@ -2258,9 +2341,9 @@ func _refresh_defeat() -> void:
 
 func _process_defeat_navigation() -> void:
 	var delta := 0
-	if InputSource.is_action_just_pressed(&"move_up"):
+	if _consume_action(&"move_up"):
 		delta -= 1
-	if InputSource.is_action_just_pressed(&"move_down"):
+	if _consume_action(&"move_down"):
 		delta += 1
 	if delta != 0:
 		_defeat_selected = clampi(_defeat_selected + delta, 0, DEFEAT_OPTIONS.size() - 1)
@@ -2268,7 +2351,7 @@ func _process_defeat_navigation() -> void:
 	var enter_now := Input.is_key_pressed(KEY_ENTER)
 	var enter_edge := enter_now and not _enter_held
 	_enter_held = enter_now
-	if InputSource.is_action_just_pressed(&"interact") or enter_edge:
+	if _consume_action(&"interact") or enter_edge:
 		if _defeat_selected == 0:
 			_close_defeat()
 		else:
@@ -2347,9 +2430,9 @@ func close_victory() -> void:
 
 func _process_victory_navigation() -> void:
 	var delta := 0
-	if InputSource.is_action_just_pressed(&"move_up"):
+	if _consume_action(&"move_up"):
 		delta -= 15
-	if InputSource.is_action_just_pressed(&"move_down"):
+	if _consume_action(&"move_down"):
 		delta += 15
 	if delta != 0 and _victory_scroll != null:
 		_victory_scroll.scroll_vertical = \
@@ -2357,8 +2440,8 @@ func _process_victory_navigation() -> void:
 	var enter_now := Input.is_key_pressed(KEY_ENTER)
 	var enter_edge := enter_now and not _enter_held
 	_enter_held = enter_now
-	if InputSource.is_action_just_pressed(&"interact") or enter_edge \
-			or InputSource.is_action_just_pressed(&"pause"):
+	if _consume_action(&"interact") or enter_edge \
+			or _consume_action(&"pause"):
 		# The ending is terminal: there is no world to step back into, so the confirm
 		# key leaves the run rather than merely hiding the panel. `return_to_menu`
 		# closes the victory screen (clearing `ui_blocking` and the pause) on its way
