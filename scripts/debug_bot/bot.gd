@@ -258,6 +258,41 @@ const ARENA_HEAL_AT := 0.65
 ## break on the very next frame and the run stalls in a different way instead.
 const ARENA_BREAK_BUDGET := 12.0
 const ARENA_BREAK_COOLDOWN := 20.0
+
+## The radius a mini-boss is treated as a hazard to route around rather than a
+## target to walk into. It is the same number the HUD reads to decide when a boss
+## bar is worth drawing (`hud.gd` `BOSS_ENGAGE_RADIUS`): inside it the boss is
+## engaged, so a leg that has no business fighting one should not be standing in
+## it. The A* threat cost prices every tile inside this radius, so a route that
+## can skirt the boss's yard does, and only a goal that genuinely sits inside the
+## yard (the east sword chest, which the warden guards) pulls the lane back in.
+## Named so the test suite reads the radius the path cost actually uses instead of
+## duplicating a literal that could drift from the cost function.
+const BOSS_AVOID_RADIUS := 200.0
+## How close a boss must be, in melee reach, before a leg that is only trying to
+## get somewhere breaks contact with it. The warden's own swing reaches 18 px; this
+## is just past that, so the break happens before the hit, not after.
+const BOSS_RETREAT_MELEE_RANGE := 26.0
+## Below this share of HP a leg that has opted into boss avoidance will not stand
+## in a boss's melee to reach its goal: it breaks contact, heals, and resumes. The
+## east road to the chest is the lane this was written for — a hero who waits to
+## 35 % is a hero the warden ends before the chest.
+const BOSS_RETREAT_HEAL_BELOW := 0.5
+## The whole run's budget for breaking off from a boss, and the cap on one break.
+## Both are load-bearing and both bound the rule: without the per-burst cap one
+## break could drift through a whole attack cycle, and without the run-wide budget
+## a low-HP hero would kite the warden for the rest of the scenario and never open
+## the chest. Surviving the east road must not cost the whole run.
+const BOSS_RETREAT_BURST := 2.5
+const BOSS_RETREAT_BUDGET := 8.0
+## BOT-005's own drink threshold on the map-crossing legs. The profile's 0.5 is
+## tuned for a duel the hero can walk away from; the east road to the chest is not
+## a duel, it is a march past an archer's clearing and into a warden's yard, and a
+## heal window slept through there is not recovered by breaking off. This is the
+## number the walker obeys on those legs, named so the test suite reads the value
+## the scenario actually sets rather than a literal retyped in two places. It must
+## stay well above the old 0.35 that let a run reach the chest as a corpse.
+const ECONOMY_TRAVEL_HEAL_AT := 0.7
 ## The PASS rule, written once here so the guide, the notes and the test suite all
 ## quote the same sentence the scenario actually enforces.
 ## An empty role list: a leg that is only about getting somewhere.
@@ -363,6 +398,14 @@ var _a_watch := false
 ## for a fight the bot can walk away from, while a lane entered at 35 HP into a
 ## shooter's clearing is a lane the bot never reaches the far end of.
 var _travel_heal_at := -1.0
+## Whether the walker treats a boss as a hazard to break off from rather than a
+## body to walk past. Off by default so only the scenarios that opt in (BOT-005's
+## crossing to the guarded chest) change behaviour; the boss-fighting scenarios
+## (BOT-013) never set it and keep walking straight at their boss.
+var _avoid_boss_on_travel := false
+## Seconds of boss break-off this run still has to spend. Reset at the start of the
+## scenario that opts in; the walker spends it, so the rule is bounded per run.
+var _boss_retreat_left := 0.0
 var _a_control_since := -1
 var _a_max_control_ms := 0
 
@@ -2529,9 +2572,18 @@ func _scenario_economy() -> void:
 		return
 	_connect_combat_sensors()
 	# Every leg of this scenario is a crossing of the map rather than a duel, and
-	# the crossings are where the runs died: at the profile's own threshold the
-	# bot walks into a wisp's clearing on 35 HP, and a wisp blinks.
-	_travel_heal_at = 0.7
+	# the crossings are where the runs died: at the profile's own threshold the bot
+	# walks into the east clearing on a sliver of HP, and that clearing holds both an
+	# archer and the warden. So the walker drinks at `ECONOMY_TRAVEL_HEAL_AT` (well
+	# above the old 0.35 that arrived at the chest as a corpse) and treats the
+	# mini-boss as a hazard to break off from, not a body to walk through: the A*
+	# prices the warden's whole engagement radius, and a leg that meets it in melee
+	# while hurt retreats to safe ground, heals, and resumes. The chest and its
+	# ledger are still earned by walking, picking up, opening, buying, selling and
+	# equipping through real input — only the dying part changes.
+	_travel_heal_at = ECONOMY_TRAVEL_HEAL_AT
+	_avoid_boss_on_travel = true
+	_boss_retreat_left = BOSS_RETREAT_BUDGET
 
 	# The village's own first job is taken before anything else, and not as one
 	# more lesson on the shelf: three wolves at the spawn edge, which this prep is
@@ -3316,6 +3368,47 @@ func _near_boss(pos: Vector2, radius: float) -> bool:
 	return false
 
 
+## The nearest live boss, read off the same public "boss" group the HUD and the
+## map mark. The walker uses it to decide whether the body crowding its lane is
+## the one thing it must not trade blows with; a scenario that wants to fight its
+## boss (BOT-013) never asks the walker to break from it, so this answers for the
+## legs that opted into avoidance and nothing else.
+func _nearest_boss() -> Node2D:
+	var best: Node2D = null
+	var best_d := INF
+	var me := _player_pos()
+	for node in get_tree().get_nodes_in_group("boss"):
+		var b := node as Node2D
+		if b == null or not is_instance_valid(b) or b.is_queued_for_deletion():
+			continue
+		var d := me.distance_to(b.global_position)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
+
+## Break contact with a boss by walking back toward the ground the hero woke on,
+## which is the direction that puts the boss's leash between the two of them: the
+## warden turns back once it is `LEASH_RADIUS` from its post, and the hero heals on
+## the safe ground past that line. Bounded by both the per-burst cap and whatever
+## is left of the run's budget, and it stops early the moment the rally is reached,
+## so a break is a pause to recover rather than a flight across the map. Real
+## movement through the same input path the human uses — no teleport, no
+## invulnerability — and a wall or a corner cuts the burst short on its own.
+## Returns the seconds actually spent, so the caller can keep the run's ledger.
+func _break_from_boss(rally: Vector2, budget: float) -> float:
+	var cap := minf(BOSS_RETREAT_BURST, maxf(budget, 0.0))
+	var started := Time.get_ticks_msec()
+	var until := started + int(cap * 1000.0)
+	while Time.get_ticks_msec() < until:
+		if _player_pos().distance_to(rally) <= 40.0:
+			break
+		await _move_step(rally)
+	bot_input.release_all()
+	return float(Time.get_ticks_msec() - started) / 1000.0
+
+
 func _find_node(group: String) -> Node2D:
 	var nodes := get_tree().get_nodes_in_group(group)
 	if nodes.is_empty():
@@ -3626,7 +3719,24 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false,
 		for entry in threat_points:
 			var d: float = (entry[0] as Vector2).distance_to(center)
 			var weight := int(entry[1])
-			if d < 56.0:
+			if weight > 1 and _avoid_boss_on_travel:
+				# A boss is priced across its whole engagement radius
+				# (`BOSS_AVOID_RADIUS`), not just the 96 px it can be hit from: a
+				# lane that can skirt the warden's yard takes the field at an
+				# angle, and only a goal that genuinely sits inside the yard pulls
+				# the lane back in. The outer ring is a nudge, the inner ring a
+				# strong disincentive, so the detour is cheaper than the direct
+				# road but a chest standing in the yard is still reachable. This
+				# wider band is gated on the leg opting in (`_avoid_boss_on_travel`,
+				# set only by BOT-005's crossing): a scenario that exists to walk
+				# into its boss (BOT-013) and the arena legs must price the boss
+				# exactly as before, or this routing change would quietly move
+				# their whole route and the arrival it lands them on.
+				if d < 56.0:
+					penalty += 40 * weight
+				elif d < BOSS_AVOID_RADIUS:
+					penalty += 6 * weight
+			elif d < 56.0:
 				penalty += 40 * weight
 			elif d < 96.0:
 				penalty += 12 * weight
@@ -3712,6 +3822,12 @@ func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats :=
 	var last_stall_pos := Vector2(-1.0e6, -1.0e6)
 	var straight_only := path.is_empty()
 	var last_pos := _player_pos()
+	# A stall against ground the grid says is walkable is usually the hero's
+	# shoulder on a wall corner, not a wall — see `_recenter_in_tile`. The two
+	# counters below let him square up and try the same step again before the
+	# tile is charged as a real nubbin and learned.
+	var recenter_spot := Vector2(-1.0e6, -1.0e6)
+	var recenter_tries := 0
 	# A lane fought at arm's length for the whole budget is the one way a walk can
 	# spend ten minutes without moving an inch: the swing branch below never
 	# presses a movement key, so an opponent that is neither dying nor stepping
@@ -3730,6 +3846,22 @@ func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats :=
 			bot_input.release_all()
 			return true
 		await _heal_if_hurt(_travel_heal_at)
+		# A mini-boss is a hazard to route around, not a body to walk through on the
+		# way to a goal. When a leg that has opted into boss avoidance finds a boss
+		# in its melee and is hurt enough that trading blows would be the last thing
+		# it does, it breaks contact back toward the ground it woke on — the one
+		# direction that puts the boss's own leash between the two of them — heals on
+		# safe ground, and resumes. Bounded by the run's budget so this is a pause to
+		# recover, never a permanent kite: once the budget is spent the lane is walked
+		# again and the bot fights or dies on its own terms. The boss is never the
+		# thing this attacks; it is only ever walked away from.
+		if _avoid_boss_on_travel and _boss_retreat_left > 0.0 \
+				and GameState.hp < int(GameState.max_hp * BOSS_RETREAT_HEAL_BELOW):
+			var boss := _nearest_boss()
+			if boss != null and pos.distance_to(boss.global_position) < BOSS_RETREAT_MELEE_RANGE:
+				_boss_retreat_left -= await _break_from_boss(_rally_point(), _boss_retreat_left)
+				await _heal_if_hurt(_travel_heal_at)
+				continue
 		# Out of medicine and bleeding out: a human breaks off for a moment,
 		# even mid-errand. The burst is short by design — the lane is resumed
 		# before the whole map notices the bot is walking.
@@ -3822,6 +3954,25 @@ func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats :=
 					await _tap(&"pause")
 					await _wait(0.2)
 				_notes.append("leg_ui_stuck=%s" % str(GameState.ui_blocking))
+			# A tile the grid calls ground that still refuses the step is, more
+			# often than not, the hero arriving at a doorway off-centre — low in
+			# the tile after coming up a corridor — so his shoulder catches the
+			# corner of the wall beside the opening and the straight step will
+			# not go through. That is a squeeze, not a wall, and charging it to
+			# the bump memory is what turned a three-pixel corner into a reroute
+			# away from the door and a bot oscillating between the two. A person
+			# squares up in the doorway and goes again; the recenter below does
+			# the same. Only after two squares still refuse the tile is it
+			# treated as the invisible nubbin the bump memory exists for.
+			if repeat_stall and _walkable(_tile_of(waypoint), true) \
+					and _bumped.size() < 60 and recenter_tries < 2:
+				if pos.distance_to(recenter_spot) < 28.0:
+					recenter_tries += 1
+				else:
+					recenter_tries = 1
+				recenter_spot = pos
+				await _recenter_in_tile()
+				continue
 			# Learning a wall is reserved for a spot that refuses the bot
 			# twice — sliding a corner or orbiting a waypoint is steering
 			# noise, and a memory that fills with fake walls is the bot
@@ -3861,6 +4012,23 @@ func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats :=
 		await _move_step(waypoint)
 	bot_input.release_all()
 	return false
+
+
+## Lift the hero clear of a wall corner he is pressing his shoulder into.
+## The grid calls the tile ahead ground and the step is legal, but a body
+## that arrived off-centre — low in the tile after coming up a corridor —
+## catches the corner of the wall beside the doorway and cannot make the
+## straight step. Pressing back to the centre of the tile he stands on
+## moves the body off that corner, the way a person squares up before
+## squeezing past a doorframe, and the step then goes through. The tile is
+## real ground, so this is deliberately not recorded as a wall.
+func _recenter_in_tile() -> void:
+	var center := _tile_center(_tile_of(_player_pos()))
+	for _i in range(10):
+		if _player_pos().distance_to(center) <= 1.5:
+			break
+		await _move_step(center)
+	bot_input.release_all()
 
 
 ## How many live enemies sit within `radius` of the player. The arena reads

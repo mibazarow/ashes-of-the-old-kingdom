@@ -3546,6 +3546,75 @@ func _test_bot_extended() -> void:
 	_check(_extract_gdscript_func(source, "_find_path").contains("if avoid_threats:"),
 			"the pathfinder can be asked for a road that ignores who is standing on it")
 
+	# --- BOT-005 east-road survival: drink early, route around the warden --------
+	# The east road to the sword chest runs past an archer's clearing and into the
+	# forest warden's yard, and the runs that died there did it for two reasons the
+	# profile threshold and a boss-blind route could not answer: they waited to 35 %
+	# before drinking, and the path cost priced the boss only inside the 96 px it can
+	# be hit from, not the 200 px it is engaged at. Both are pinned off the live bot
+	# so neither can be quietly walked back. The heal threshold is a named constant
+	# the scenario sets and the walker reads — no literal retyped in two places.
+	var econ_heal_at := float(consts.get("ECONOMY_TRAVEL_HEAL_AT", -1.0))
+	_check(econ_heal_at > 0.35,
+			"BOT-005 drinks earlier than the old 0.35 (threshold %.2f)" % econ_heal_at)
+	_check(econ_heal_at > 0.0 and econ_heal_at <= 1.0,
+			"the BOT-005 travel heal threshold is a real HP fraction (got %.2f)" % econ_heal_at)
+	_check(economy.contains("_travel_heal_at = ECONOMY_TRAVEL_HEAL_AT"),
+			"BOT-005 sets its travel heal threshold from the named constant, not a literal")
+	_check(not economy.contains("_travel_heal_at = 0."),
+			"BOT-005 does not retype the travel heal threshold as a literal")
+	# The walker obeys that threshold on every leg, and the potion still goes through
+	# the real quick-slot input path the human uses.
+	var travel_heal := _extract_gdscript_func(source, "_travel_to")
+	_check(travel_heal.contains("_heal_if_hurt(_travel_heal_at)"),
+			"the walker drinks at the threshold the scenario set, on the crossing legs")
+	_check(_extract_gdscript_func(source, "_heal_if_hurt").contains('_tap(&"quick_slot_1")'),
+			"the BOT-005 heal still runs through the real quick-slot input action")
+
+	# The mini-boss is a hazard to route around, not a target to walk into. The A*
+	# prices every tile inside the boss's engagement radius, so a lane that can skirt
+	# the warden's yard does, and only a goal genuinely inside the yard pulls it back.
+	var boss_avoid := float(consts.get("BOSS_AVOID_RADIUS", -1.0))
+	_check(boss_avoid > 96.0,
+			"the boss is priced past its 96 px hit reach, out to its engagement radius (got %.0f)" % boss_avoid)
+	_check(is_equal_approx(boss_avoid, 200.0),
+			"the boss avoidance radius is the 200 px the HUD reads as a boss being engaged")
+	_check(find_path.contains("BOSS_AVOID_RADIUS"),
+			"the path cost consults BOSS_AVOID_RADIUS rather than a duplicated literal")
+	_check(find_path.contains("elif d < BOSS_AVOID_RADIUS:"),
+			"the path cost prices a boss across its whole engagement radius, not just its melee")
+	# The wider band must be gated on the leg opting in. Applied to every
+	# avoid_threats leg it would re-route the arena and the boss-fighting march,
+	# moving the arrival they land on and the ground they then have to walk — the
+	# kind of change that reads as "harmless pathing" yet moves another scenario.
+	_check(find_path.contains("weight > 1 and _avoid_boss_on_travel"),
+			"the wider boss band applies only to legs that opted in, so other scenarios path exactly as before")
+	# A leg that meets the boss in melee while hurt breaks contact, heals, and
+	# resumes — bounded, so it is a pause to recover and never a permanent kite.
+	_check(travel_body.contains("_avoid_boss_on_travel"),
+			"the walker breaks off from a boss only for a leg that opted in")
+	_check(travel_body.contains("BOSS_RETREAT_HEAL_BELOW")
+			and travel_body.contains("BOSS_RETREAT_MELEE_RANGE"),
+			"the boss break-off triggers on a boss in melee below a named HP share")
+	_check(travel_body.contains("_break_from_boss") and travel_body.contains("_boss_retreat_left"),
+			"the boss break-off is bounded by a per-run budget")
+	_check(travel_body.contains("_nearest_boss()"),
+			"the break-off reads the boss off the public boss group, never a hardcoded node")
+	var boss_retreat := _extract_gdscript_func(source, "_break_from_boss")
+	_check(float(consts.get("BOSS_RETREAT_BURST", -1.0)) > 0.0
+			and float(consts.get("BOSS_RETREAT_BUDGET", -1.0)) > 0.0,
+			"the boss break-off is bounded both per-burst and per-run")
+	_check(float(consts.get("BOSS_RETREAT_HEAL_BELOW", -1.0)) >= 0.5,
+			"the bot will not stand in a boss's melee below half HP to reach a goal")
+	_check(boss_retreat.contains("_move_step") and not boss_retreat.contains("global_position ="),
+			"the boss break-off walks away through the real input path, no teleport and no HP write")
+	# BOT-005 opts into the rule; the boss-fighting scenario must not, or it could
+	# never reach the King it exists to fight.
+	_check(economy.contains("_avoid_boss_on_travel = true"),
+			"BOT-005 opts into treating the mini-boss as a hazard to break off from")
+	_check(not fortress.contains("_avoid_boss_on_travel = true"),
+			"BOT-013 does not opt into boss avoidance, so it can still reach and fight the King")
+
 	# --- the soak window: simulated seconds, and a flag that moves it -----------
 	# 75 s of wandering was a smoke test that had been allowed to call itself an
 	# endurance run. The spec's own table asks for tens of minutes, so the default is
@@ -11901,6 +11970,35 @@ func _test_fortress() -> void:
 	_check(gate_tile != down_entry
 			and maxi(absi(gate_tile.x - down_entry.x), absi(gate_tile.y - down_entry.y)) >= 2,
 		"the ascent is not on the tile the player arrives on, nor near enough to open on arrival")
+
+	# The BOT-013 flake was never the door being unreachable — the stair reaches
+	# its tile in fifty steps — it was the hero reaching the doorway but never
+	# standing close enough to knock, because the wall beside the opening clips a
+	# body that comes at it off-centre and the bot then charged the tile to its
+	# wall memory and rerouted away from the door. What the ascent really needs is
+	# ground the hero can walk to that sits inside his own interact radius of the
+	# door, so he knocks from the doorway instead of trying to stand on the door.
+	# That radius is the player's, read from the player, never retyped here.
+	var player_script := load("res://scripts/player/player.gd") as GDScript
+	var interact_radius := float(
+			player_script.get_script_constant_map().get("INTERACT_RADIUS", -1.0)) \
+			if player_script != null else -1.0
+	_check(is_equal_approx(interact_radius, 26.0),
+			"the ascent is judged against the hero's real 26 px interact radius (got %.1f)"
+					% interact_radius)
+	var gate_pos := (gate as Node2D).global_position
+	var doorway_tiles: Array[String] = []
+	for tile: Vector2i in undercroft_dist.keys():
+		if tile == gate_tile:
+			continue
+		if maxi(absi(gate_tile.x - tile.x), absi(gate_tile.y - tile.y)) != 1:
+			continue
+		var centre := Vector2(tile.x * 16 + 8.0, tile.y * 16 + 8.0)
+		if centre.distance_to(gate_pos) <= interact_radius:
+			doorway_tiles.append("%s@%d" % [str(tile), int(undercroft_dist[tile])])
+	_check(not doorway_tiles.is_empty(),
+			"the ascent is knockable from a doorway tile reachable from the stair and "
+					+ "within the interact radius (%s)" % ", ".join(doorway_tiles))
 
 	# Far from everything the hazards and the garrison stand on, so the door never
 	# competes with another prompt and nothing spawns in the doorway.
