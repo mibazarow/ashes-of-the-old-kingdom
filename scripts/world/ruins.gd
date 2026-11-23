@@ -15,14 +15,14 @@ extends ZoneBase
 
 const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
 const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
-## The four new hall guards (spec §10). Each one is a different mechanic on the
-## shared `Enemy` script: the shieldbearer soaks what it faces, the caster keeps
-## the room alive, the royal guard trades a longer windup for a faster recovery
-## behind a lighter shield, and the hound is only dangerous in pairs.
-const SHIELDBEARER_SCENE := "res://scenes/enemies/shieldbearer.tscn"
+## The hall's own new guard (spec §10): the cultist caster, the only healing aura in
+## the game, which is exactly why it stays behind the sealed door — the arena bot is
+## sent into this hall specifically to meet a support enemy, and the hall is the one
+## place in the world it is found. The shieldbearer and the royal guard the hall used
+## to field here now debut in the garrison above, and the hound pair has gone down to
+## the undercroft below, so the last two zones each introduce new kinds instead of
+## re-fielding the hall's roster (D4-R3).
 const CULTIST_CASTER_SCENE := "res://scenes/enemies/cultist_caster.tscn"
-const ROYAL_GUARD_SCENE := "res://scenes/enemies/royal_guard.tscn"
-const GRAVE_HOUND_SCENE := "res://scenes/enemies/grave_hound.tscn"
 ## The ruins' boss (spec §11): the Captain of the Funeral Guard, met in the hall the
 ## locked door keeps shut. Its shield defines phase one and its fall defines phase
 ## two, so it is a different fight from the hall guards rather than a tougher one.
@@ -160,18 +160,14 @@ const SKELETON_D_ANCHOR := Vector2i(22, 16)
 const SKELETON_ARCHER_A_ANCHOR := Vector2i(20, 5)
 const SKELETON_ARCHER_B_ANCHOR := Vector2i(27, 13)
 
-## The four new guard types (spec §10), also behind the door and also snapped by
-## `_find_prop_tile`. They are placed after the six skeletons so they inherit the
-## reserved set the first wave already claimed and cannot be parked on a skeleton,
-## and before the descent so their tiles are visible to the collision check the
-## stair makes at the end. None of them is within six tiles of `DUNGEON_GATE_TILE`
-## even after the scan has shifted it by its full radius, which is what the ruins
-## test measures against every hostile in the zone rather than only the skeletons.
-const SHIELDBEARER_A_ANCHOR := Vector2i(19, 11)
+## The caster (spec §10), behind the door and snapped by `_find_prop_tile`. Placed
+## after the six skeletons so it inherits the reserved set the first wave already
+## claimed and cannot be parked on a skeleton, and before the descent so its tile is
+## visible to the collision check the stair makes at the end. It is not within six
+## tiles of `DUNGEON_GATE_TILE` even after the scan has shifted it by its full
+## radius, which is what the ruins test measures against every hostile in the zone
+## rather than only the skeletons.
 const CULTIST_CASTER_A_ANCHOR := Vector2i(26, 12)
-const ROYAL_GUARD_A_ANCHOR := Vector2i(30, 11)
-const GRAVE_HOUND_A_ANCHOR := Vector2i(21, 19)
-const GRAVE_HOUND_B_ANCHOR := Vector2i(25, 17)
 
 ## The Captain's post (spec §11), deep in the hall behind the door and clear of every
 ## guard post, pillar and the descent. It is placed after the new posts so it inherits
@@ -504,20 +500,17 @@ func _spawn_skeletons(entry: Vector2i, reserved: Dictionary) -> void:
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
 
 
-## The four new guard types, on the same reserved-tile flow as the skeletons and
-## placed right after them, so every tile the first wave took is already off
-## limits and every tile this wave takes is still visible to the collision check
-## the descent makes when it is placed last. The hound pair is deliberately
-## adjacent: `pack_bonus` only pays inside a 90 px radius, so two hounds on
-## neighbouring posts run faster than either would alone, which is the whole
-## difference between them and a lone skeleton.
+## The caster, on the same reserved-tile flow as the skeletons and placed right after
+## them, so every tile the first wave took is already off limits and every tile this
+## post takes is still visible to the collision check the descent makes when it is
+## placed last. It is the only healing aura in the game and the reason the hall is
+## worth opening: the arena bot is sent behind this door specifically to meet a
+## support enemy, so it stays. The shieldbearer and the royal guard the hall used to
+## field here now debut in the garrison above, and the hound pair has gone down to
+## the undercroft below (D4-R3).
 func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 	for post: Array in [
-		[SHIELDBEARER_SCENE, SHIELDBEARER_A_ANCHOR, "ShieldbearerA"],
 		[CULTIST_CASTER_SCENE, CULTIST_CASTER_A_ANCHOR, "CultistCasterA"],
-		[ROYAL_GUARD_SCENE, ROYAL_GUARD_A_ANCHOR, "RoyalGuardA"],
-		[GRAVE_HOUND_SCENE, GRAVE_HOUND_A_ANCHOR, "GraveHoundA"],
-		[GRAVE_HOUND_SCENE, GRAVE_HOUND_B_ANCHOR, "GraveHoundB"],
 	]:
 		var tile := _find_prop_tile(
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)

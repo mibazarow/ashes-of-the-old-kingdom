@@ -39,16 +39,18 @@ const BOAR_SCENE := "res://scenes/enemies/boar.tscn"
 ## and 1.35x the speed, meant to close a room before the player reads the room.
 const ASH_KNIGHT_SCENE := "res://scenes/enemies/ash_knight.tscn"
 const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
-## The garrison the finale is built out of (spec §10). The fortress used to field
-## one kind the player had not already met and a boar borrowed from the forest, so
-## the last hour of the world introduced less than the first one did. These three
+## The garrison the finale is built out of (spec §10, D4-R3). The fortress used to
+## field one kind the player had not already met and a boar borrowed from the forest,
+## so the last hour of the world introduced less than the first one did. These four
 ## types come up from the ruins — the shield that soaks the lane, the caster that
-## keeps the room alive behind its pack, the hound pair that only works in twos —
+## keeps the room alive behind its pack, the guard that trades a longer windup for a
+## faster recovery behind a lighter shield, the hound pair that only works in twos —
 ## and they change what the rooms ask of a player: the archive needs a line of
 ## sight broken, the barracks need flanking, the throne approach needs a healer
 ## killed before the elite it supports is touched.
 const SHIELDBEARER_SCENE := "res://scenes/enemies/shieldbearer.tscn"
 const CULTIST_CASTER_SCENE := "res://scenes/enemies/cultist_caster.tscn"
+const ROYAL_GUARD_SCENE := "res://scenes/enemies/royal_guard.tscn"
 const GRAVE_HOUND_SCENE := "res://scenes/enemies/grave_hound.tscn"
 ## The final boss (spec §11.4) and the throne that ends the run. The King is the only
 ## enemy the arena was kept empty for; the altar is the choice the death unlocks. The
@@ -210,17 +212,21 @@ const ARCHER_C_ANCHOR := Vector2i(26, 19)
 ## hold; the caster to the archive north run, where it can stand behind a rack and
 ## be unreachable until the player commits to the room; the two hounds to the
 ## archive south floor, two tiles apart so the pack bonus is real and the pair is
-## the thing that makes the long southern run cost something. All of them are on
-## the spine or off it by one room, all are well past the six-tile ring the zone
-## asks of every hostile, and none is anywhere near the ring kept for the final
-## boss. Each is snapped by `_find_prop_tile` against the reserved set the first
-## wave already claimed, so none of them can sit on the stair, the entry or
-## another post.
+## the thing that makes the long southern run cost something; and the royal guard,
+## which debuts here rather than in the hall above (D4-R3), to the throne hall
+## south floor, where it stands between the spine and the sanctum door so the last
+## approach to the King is barred by a shield the player has not had to break
+## before. All of them are on the spine or off it by one room, all are well past
+## the six-tile ring the zone asks of every hostile, and none is anywhere near the
+## ring kept for the final boss. Each is snapped by `_find_prop_tile` against the
+## reserved set the first wave already claimed, so none of them can sit on the
+## stair, the entry or another post.
 const ASH_KNIGHT_A_ANCHOR := Vector2i(19, 14)
 const ASH_KNIGHT_B_ANCHOR := Vector2i(36, 12)
 const BONE_CRAWLER_C_ANCHOR := Vector2i(29, 14)
 const SHIELDBEARER_A_ANCHOR := Vector2i(17, 20)
 const CULTIST_CASTER_A_ANCHOR := Vector2i(30, 7)
+const ROYAL_GUARD_A_ANCHOR := Vector2i(38, 17)
 const GRAVE_HOUND_A_ANCHOR := Vector2i(32, 25)
 const GRAVE_HOUND_B_ANCHOR := Vector2i(30, 25)
 const BONE_CRAWLER_D_ANCHOR := Vector2i(20, 12)
@@ -463,6 +469,7 @@ func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 		[BONE_CRAWLER_SCENE, BONE_CRAWLER_D_ANCHOR, "BoneCrawlerD"],
 		[SHIELDBEARER_SCENE, SHIELDBEARER_A_ANCHOR, "ShieldbearerA"],
 		[CULTIST_CASTER_SCENE, CULTIST_CASTER_A_ANCHOR, "CultistCasterA"],
+		[ROYAL_GUARD_SCENE, ROYAL_GUARD_A_ANCHOR, "RoyalGuardA"],
 		[GRAVE_HOUND_SCENE, GRAVE_HOUND_A_ANCHOR, "GraveHoundA"],
 		[GRAVE_HOUND_SCENE, GRAVE_HOUND_B_ANCHOR, "GraveHoundB"],
 	]:

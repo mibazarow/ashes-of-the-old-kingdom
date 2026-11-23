@@ -11744,10 +11744,10 @@ const READABLE_SPAWN_ZONES: Dictionary = {
 	&"root_beast": ["forest"],
 	&"ruin_skeleton": ["ruins", "dungeon", "fortress"],
 	&"ruin_skeleton_archer": ["ruins", "dungeon", "fortress"],
-	&"shieldbearer": ["ruins", "fortress"],
+	&"shieldbearer": ["fortress"],
 	&"cultist_caster": ["ruins", "fortress"],
-	&"grave_hound": ["ruins", "fortress"],
-	&"royal_guard": ["ruins"],
+	&"grave_hound": ["dungeon", "fortress"],
+	&"royal_guard": ["fortress"],
 	&"bone_crawler": ["dungeon", "fortress"],
 	&"plague_bearer": ["dungeon"],
 	&"ash_knight": ["fortress"],
@@ -11812,10 +11812,9 @@ const ROSTER_NEW_TYPES: Dictionary = {
 const ROSTER_ZONES: Dictionary = {
 	"forest": ["ash_wolf", "ash_archer", "ash_boar", "ash_wisp", "spider", "slime",
 		"tick", "lumberjack", "root_beast"],
-	"ruins": ["ruin_skeleton", "ruin_skeleton_archer", "shieldbearer",
-		"cultist_caster", "royal_guard", "grave_hound"],
-	"dungeon": ["bone_crawler", "plague_bearer"],
-	"fortress": ["ash_knight"],
+	"ruins": ["ruin_skeleton", "ruin_skeleton_archer", "cultist_caster"],
+	"dungeon": ["bone_crawler", "plague_bearer", "grave_hound"],
+	"fortress": ["ash_knight", "shieldbearer", "royal_guard"],
 }
 
 ## The bosses are deliberately outside the count. Spec §10 asks for eighteen
@@ -12279,6 +12278,7 @@ func _test_enemy_roster() -> void:
 	var zone_avg: Dictionary = {}
 	var zone_regular_posts: Dictionary = {}
 	var zone_kinds: Dictionary = {}
+	var zone_regular_type_sets: Dictionary = {}
 	if manager != null:
 		for leg: Array in [["forest", Vector2i(4, 9)], ["ruins", Vector2i(3, 11)],
 				["dungeon", Vector2i(3, 12)], ["fortress", Vector2i(4, 14)]]:
@@ -12336,6 +12336,7 @@ func _test_enemy_roster() -> void:
 				float(regular_pool) / float(regular_posts) if regular_posts > 0 else 0.0)
 			zone_regular_posts[String(leg[0])] = regular_posts
 			zone_kinds[String(leg[0])] = regular_kinds.size()
+			zone_regular_type_sets[String(leg[0])] = regular_kinds.duplicate()
 			print("  %-9s %2d posts, %d types, avg pool %.2f hp — %s"
 				% [String(leg[0]), posted, zone_types.size(),
 					float(zone_avg[String(leg[0])]), ", ".join(zone_types)])
@@ -12403,6 +12404,49 @@ func _test_enemy_roster() -> void:
 	_check(int(zone_kinds.get("fortress", 0)) >= int(zone_kinds.get("forest", 0)),
 		"the finale is no less varied than the opening zone (%d types vs %d)"
 			% [int(zone_kinds.get("fortress", 0)), int(zone_kinds.get("forest", 0))])
+
+	# --- 4c. the zones introduce new kinds in order (D4-R3) --------------------
+	#
+	# The critic's finding was that the last two zones introduced almost nothing
+	# new: the undercroft debuted two kinds and the sanctum one, so the deep half of
+	# the world was the least novel half of it. This reads the debut of every regular
+	# type off the live zones — the shallowest zone a type is actually seen in — and
+	# asks three things: that the two deep zones each introduce at least three kinds
+	# the player has not met, that every regular type debuts somewhere (so none is
+	# only ever a borrowed re-run of a shallower zone), and that no type is ever seen
+	# before the zone its roster debut names, which is what keeps "introduced here"
+	# honest rather than a label that disagrees with the map.
+	var zone_depth := {"forest": 0, "ruins": 1, "dungeon": 2, "fortress": 3}
+	var debut_depth: Dictionary = {}
+	for zone_id: String in ROSTER_ZONES.keys():
+		for type: String in (ROSTER_ZONES[zone_id] as Array):
+			debut_depth[type] = int(zone_depth[zone_id])
+	var first_seen_depth: Dictionary = {}
+	var introduced := {"forest": [], "ruins": [], "dungeon": [], "fortress": []}
+	for zone_id: String in curve:
+		for type: String in (zone_regular_type_sets.get(zone_id, []) as Array):
+			if not first_seen_depth.has(type):
+				first_seen_depth[type] = int(zone_depth[zone_id])
+				(introduced[zone_id] as Array).append(type)
+	print("  first appearance — forest %d, ruins %d, dungeon %d, fortress %d"
+		% [(introduced["forest"] as Array).size(), (introduced["ruins"] as Array).size(),
+			(introduced["dungeon"] as Array).size(), (introduced["fortress"] as Array).size()])
+	_check((introduced["dungeon"] as Array).size() >= 3,
+		"the undercroft introduces at least 3 kinds the player has not met (got %d: %s)"
+			% [(introduced["dungeon"] as Array).size(), ", ".join(introduced["dungeon"])])
+	_check((introduced["fortress"] as Array).size() >= 3,
+		"the sanctum introduces at least 3 kinds the player has not met (got %d: %s)"
+			% [(introduced["fortress"] as Array).size(), ", ".join(introduced["fortress"])])
+	_check(first_seen_depth.size() == 18,
+		"every regular type debuts in exactly one zone (got %d of 18)"
+			% first_seen_depth.size())
+	var premature: Array[String] = []
+	for zone_id: String in curve:
+		for type: String in (zone_regular_type_sets.get(zone_id, []) as Array):
+			if debut_depth.has(type) and int(debut_depth[type]) > int(zone_depth[zone_id]):
+				premature.append("%s seen in %s but its roster debut is deeper" % [type, zone_id])
+	_check(premature.is_empty(),
+		"no type is ever spawned before the zone that introduces it (%s)" % ", ".join(premature))
 	_check(bool(manager.call("travel", "forest")), "the roster group returns to the forest")
 	await process_frame
 	scene.queue_free()
@@ -12755,6 +12799,58 @@ func _test_dungeon() -> void:
 		_check(not post_tiles.has(tile), "no enemy is parked on a trap plate at %s" % str(tile))
 	_check(not post_tiles.has(exit_tile) and not post_tiles.has(entry),
 		"no enemy is parked on the stair or the entry tile")
+
+	# --- the undercroft's own new posts (D4-R3) --------------------------------
+	# The borrowed garrison above is the skeleton/archer/wisp wave the hall lends;
+	# the undercroft's own kinds — the crawler, the bearer and the hound pair that now
+	# debuts here rather than in the hall — are the posts this zone introduces, laid
+	# by `_spawn_new_posts` on the same reserved-tile flow. They are checked apart
+	# from the borrowed seven so that garrison's count stays the number the hall
+	# lends, while every new post is still held to the same ground rules: walkable,
+	# reachable from the entry, clear of the six-tile arrival ring, on a tile nobody
+	# else holds and not parked on a plate. The hound pair is the third debut that
+	# closes the critic's finding that the undercroft introduced only two new kinds.
+	var new_kinds: Array[String] = ["bone_crawler", "plague_bearer", "grave_hound"]
+	var new_posts_seen: Array[String] = []
+	var new_off_ground: Array[String] = []
+	var new_unreachable: Array[String] = []
+	var new_too_near: Array[String] = []
+	var new_post_tiles := {}
+	var new_doubled: Array[String] = []
+	for node in get_nodes_in_group("enemy"):
+		var new_type := String(node.get("enemy_type"))
+		if not new_kinds.has(new_type):
+			continue
+		if not new_posts_seen.has(new_type):
+			new_posts_seen.append(new_type)
+		var tile := _tile_of_node(node as Node2D)
+		var cell := String(world.call("cell_at", tile))
+		if cell != "." and cell != ",":
+			new_off_ground.append("%s@%s='%s'" % [String(node.name), str(tile), cell])
+		if not dist.has(tile):
+			new_unreachable.append("%s@%s" % [String(node.name), str(tile)])
+		var clear := maxi(absi(tile.x - entry.x), absi(tile.y - entry.y))
+		if clear < 6:
+			new_too_near.append("%s@%s=%d" % [String(node.name), str(tile), clear])
+		if new_post_tiles.has(tile):
+			new_doubled.append("%s and %s on %s"
+				% [String(new_post_tiles[tile]), String(node.name), str(tile)])
+		new_post_tiles[tile] = String(node.name)
+	_check(new_posts_seen.size() >= 3,
+		"the undercroft introduces at least 3 new kinds (got %d: %s)"
+			% [new_posts_seen.size(), ", ".join(new_posts_seen)])
+	_check(new_off_ground.is_empty(),
+		"every new undercroft post stands on a walkable tile (%s)" % ", ".join(new_off_ground))
+	_check(new_unreachable.is_empty(),
+		"every new undercroft post is reachable from the entry (%s)" % ", ".join(new_unreachable))
+	_check(new_too_near.is_empty(),
+		"every new undercroft post is at least 6 tiles from the entry tile (%s)"
+			% ", ".join(new_too_near))
+	_check(new_doubled.is_empty(),
+		"no two new undercroft posts share a tile (%s)" % ", ".join(new_doubled))
+	for tile: Vector2i in trap_tiles:
+		_check(not new_post_tiles.has(tile),
+			"no new undercroft post is parked on a trap plate at %s" % str(tile))
 
 	# --- what the map marks, and the clock the HUD reads ------------------------
 	var landmark_kinds: Array[String] = []
@@ -13239,6 +13335,63 @@ func _test_fortress() -> void:
 			in_ring.append("%s@%s" % [String(post_tiles[tile]), str(tile)])
 	_check(in_ring.is_empty(),
 		"nothing is standing in the ring kept for the final boss (%s)" % ", ".join(in_ring))
+
+	# --- the sanctum's own new posts (D4-R3) -----------------------------------
+	# The borrowed eight above are the hall's wave; the sanctum's own kinds are the
+	# posts that make the finale introduce new content rather than re-field the road.
+	# Every one of them is held to the same ground rules as the borrowed garrison —
+	# walkable, reachable from the entry, clear of the six-tile arrival ring, on a
+	# tile nobody else holds and nowhere near the ring kept for the King — and the
+	# three that debut here (the ash knight, the shieldbearer and the royal guard,
+	# the last two brought up from the hall above) are named so the finale is proved
+	# to introduce at least as many new kinds as the undercroft, closing the critic's
+	# finding that the sanctum introduced only one.
+	var new_kinds: Array[String] = [
+		"ash_knight", "bone_crawler", "shieldbearer", "cultist_caster",
+		"grave_hound", "royal_guard",
+	]
+	var debut_kinds: Array[String] = ["ash_knight", "shieldbearer", "royal_guard"]
+	var new_posts_seen: Array[String] = []
+	var new_off_ground: Array[String] = []
+	var new_unreachable: Array[String] = []
+	var new_too_near: Array[String] = []
+	var new_in_ring: Array[String] = []
+	var new_post_tiles := {}
+	var new_doubled: Array[String] = []
+	for node in get_nodes_in_group("enemy"):
+		var new_type := String(node.get("enemy_type"))
+		if not new_kinds.has(new_type):
+			continue
+		if not new_posts_seen.has(new_type):
+			new_posts_seen.append(new_type)
+		var tile := _tile_of_node(node as Node2D)
+		var cell := String(world.call("cell_at", tile))
+		if cell != "." and cell != ",":
+			new_off_ground.append("%s@%s='%s'" % [String(node.name), str(tile), cell])
+		if not dist.has(tile):
+			new_unreachable.append("%s@%s" % [String(node.name), str(tile)])
+		var clear := maxi(absi(tile.x - entry.x), absi(tile.y - entry.y))
+		if clear < 6:
+			new_too_near.append("%s@%s=%d" % [String(node.name), str(tile), clear])
+		if arena_tiles.has(tile):
+			new_in_ring.append("%s@%s" % [String(node.name), str(tile)])
+		if new_post_tiles.has(tile):
+			new_doubled.append("%s and %s on %s"
+				% [String(new_post_tiles[tile]), String(node.name), str(tile)])
+		new_post_tiles[tile] = String(node.name)
+	for kind: String in debut_kinds:
+		_check(new_posts_seen.has(kind), "the sanctum fields the new kind %s" % kind)
+	_check(new_off_ground.is_empty(),
+		"every new sanctum post stands on a walkable tile (%s)" % ", ".join(new_off_ground))
+	_check(new_unreachable.is_empty(),
+		"every new sanctum post is reachable from the entry (%s)" % ", ".join(new_unreachable))
+	_check(new_too_near.is_empty(),
+		"every new sanctum post is at least 6 tiles from the entry tile (%s)"
+			% ", ".join(new_too_near))
+	_check(new_in_ring.is_empty(),
+		"no new sanctum post stands in the ring kept for the King (%s)" % ", ".join(new_in_ring))
+	_check(new_doubled.is_empty(),
+		"no two new sanctum posts share a tile (%s)" % ", ".join(new_doubled))
 
 	# --- what the map marks, and the clock the HUD reads ------------------------
 	var landmark_kinds: Array[String] = []

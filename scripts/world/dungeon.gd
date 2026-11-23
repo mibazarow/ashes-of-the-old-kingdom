@@ -26,11 +26,16 @@ extends ZoneBase
 const SKELETON_SCENE := "res://scenes/enemies/skeleton.tscn"
 const SKELETON_ARCHER_SCENE := "res://scenes/enemies/skeleton_archer.tscn"
 const WISP_SCENE := "res://scenes/enemies/wisp.tscn"
-## The two new undercroft types (spec §10): the crawler is a fast, low melee pest
-## that closes the corridor before you read it, the bearer is a slow carrier whose
-## corpse turns the ground it fell on into `blight` for anyone standing there.
+## The three new undercroft types (spec §10, D4-R3): the crawler is a fast, low
+## melee pest that closes the corridor before you read it, the bearer is a slow
+## carrier whose corpse turns the ground it fell on into `blight` for anyone
+## standing there, and the hound — brought down from the hall above so the
+## undercroft introduces three kinds the player has not met rather than two — is
+## only dangerous in pairs, which is what makes the two of them a pack rather than
+## two lone crawlers.
 const BONE_CRAWLER_SCENE := "res://scenes/enemies/bone_crawler.tscn"
 const PLAGUE_BEARER_SCENE := "res://scenes/enemies/plague_bearer.tscn"
+const GRAVE_HOUND_SCENE := "res://scenes/enemies/grave_hound.tscn"
 ## The undercroft's boss (spec §11): the Bell Ringer of the Empty Crypt, met deep
 ## past the trap plates. Its ringing shock wave and phase-two hazard circles make it
 ## a fight about ground and spacing, not another skeleton with a bigger pool.
@@ -165,7 +170,7 @@ const SKELETON_ARCHER_B_ANCHOR := Vector2i(38, 25)
 const WISP_A_ANCHOR := Vector2i(13, 7)
 const WISP_B_ANCHOR := Vector2i(25, 20)
 
-## The undercroft's own two types, all of them down a long corridor and well past
+## The undercroft's own three types, all of them down a long corridor and well past
 ## the six-tile ring the zone asks of every hostile: the crawlers take the south
 ## road at either end of it and once more between, where a fast melee enemy has the
 ## longest run at a player walking the undercroft end to end, and the bearers take
@@ -174,14 +179,19 @@ const WISP_B_ANCHOR := Vector2i(25, 20)
 ## crawlers and two bearers rather than two and one: the undercroft was the thinnest
 ## zone in the game at eleven live instances, and a single carrier made the hazard
 ## that owns this place a one-off instead of a rule the player has to plan around.
-## Each post is snapped by `_find_prop_tile` against the reserved set the plates and
-## the first wave already claimed, so none of them can sit on a trap, a stair or a
-## post.
+## The hound pair takes the east of the middle corridor, two tiles apart so the pack
+## bonus is real and the pair runs the central crossing the way the hall's pair used
+## to; they came down from the ruins so the undercroft introduces three kinds rather
+## than two. Each post is snapped by `_find_prop_tile` against the reserved set the
+## plates and the first wave already claimed, so none of them can sit on a trap, a
+## stair or a post.
 const BONE_CRAWLER_A_ANCHOR := Vector2i(7, 25)
 const BONE_CRAWLER_B_ANCHOR := Vector2i(34, 26)
 const BONE_CRAWLER_C_ANCHOR := Vector2i(28, 26)
 const PLAGUE_BEARER_A_ANCHOR := Vector2i(21, 2)
 const PLAGUE_BEARER_B_ANCHOR := Vector2i(16, 26)
+const GRAVE_HOUND_A_ANCHOR := Vector2i(30, 13)
+const GRAVE_HOUND_B_ANCHOR := Vector2i(32, 13)
 
 ## The Bell Ringer's post (spec §11), deep in the south corridor past both trap
 ## plates and clear of every post, plate, column and the two stairs. It keeps ten
@@ -471,10 +481,12 @@ func _spawn_enemies(entry: Vector2i, reserved: Dictionary) -> void:
 		_spawn_enemy(String(post[0]), tile.x, tile.y, String(post[2]))
 
 
-## The undercroft's own two types, on the same reserved-tile flow as the first wave
+## The undercroft's own three types, on the same reserved-tile flow as the first wave
 ## and placed right after it, so every tile the plates and the seven originals took
-## is already off limits and every tile these five take is still visible to the
-## collision check the door to the fortress makes when it is placed last.
+## is already off limits and every tile these seven take is still visible to the
+## collision check the door to the fortress makes when it is placed last. The hounds
+## are listed as a pair and consecutively, so the second lands on the tile next to
+## the first rather than somewhere the pack bonus would not reach.
 func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 	for post: Array in [
 		[BONE_CRAWLER_SCENE, BONE_CRAWLER_A_ANCHOR, "BoneCrawlerA"],
@@ -482,6 +494,8 @@ func _spawn_new_posts(entry: Vector2i, reserved: Dictionary) -> void:
 		[BONE_CRAWLER_SCENE, BONE_CRAWLER_C_ANCHOR, "BoneCrawlerC"],
 		[PLAGUE_BEARER_SCENE, PLAGUE_BEARER_A_ANCHOR, "PlagueBearerA"],
 		[PLAGUE_BEARER_SCENE, PLAGUE_BEARER_B_ANCHOR, "PlagueBearerB"],
+		[GRAVE_HOUND_SCENE, GRAVE_HOUND_A_ANCHOR, "GraveHoundA"],
+		[GRAVE_HOUND_SCENE, GRAVE_HOUND_B_ANCHOR, "GraveHoundB"],
 	]:
 		var tile := _find_prop_tile(
 			post[1] as Vector2i, ENEMY_SCAN_RADIUS, entry, reserved, ENEMY_CLEAR_FROM_ENTRY)
