@@ -1348,6 +1348,84 @@ func _test_quest_reward_once() -> void:
 	_check(qm.state_of("q10_armor_fit") == qm.STATE_LOCKED,
 		"the level alone does not open her while the captain is alive")
 
+	# --- every objective verb can start, progress and be handed in --------------
+	# The chain above proves the twelve authored quests wire up; this proves the
+	# engine behind them understands all six objective verbs on its own, from a
+	# synthetic quest of each type, so a future quest can pick any verb and the
+	# manager will start it, advance it from the right event and pay it exactly once.
+	# Each synthetic quest carries the same 10-gold reward so the payout is one sum.
+	qm.reset()
+	var verbs := {
+		"syn_kill": ["kill", "ash_wolf", 2],
+		"syn_collect": ["collect", "wolf_fang", 2],
+		"syn_deliver": ["deliver", "bone_shard", 2],
+		"syn_use": ["use", "ruin_mechanism", 1],
+		"syn_visit": ["visit", "dungeon", 1],
+		"syn_talk": ["talk", "nela", 1],
+	}
+	for vid: String in verbs.keys():
+		var spec: Array = verbs[vid]
+		qm.quests[vid] = {
+			"title": "Синтетика " + String(spec[0]),
+			"giver": "ruins_tablet",
+			"requires": [],
+			"min_level": 1,
+			"objective": {"type": String(spec[0]), "target": String(spec[1]), "count": int(spec[2])},
+			"reward": {"gold": 10, "xp": 0, "items": {}},
+		}
+	# kill: two deaths of the named enemy type arm it, one short of that does not.
+	qm.start("syn_kill")
+	bus.enemy_died.emit(&"synk1", &"ash_wolf", Vector2.ZERO)
+	_check(qm.state_of("syn_kill") == qm.STATE_ACTIVE and qm.progress_of("syn_kill") == 1,
+		"kill: one of two wolf deaths is counted")
+	bus.enemy_died.emit(&"synk2", &"ash_wolf", Vector2.ZERO)
+	_check(qm.state_of("syn_kill") == qm.STATE_READY, "kill: the second death arms the quest")
+	# collect and deliver both read the live bag; the two bag verbs spend on hand-in.
+	qm.start("syn_collect")
+	gs.add_item("wolf_fang", 2)
+	_check(qm.state_of("syn_collect") == qm.STATE_READY, "collect: two fangs in the bag arm it")
+	qm.start("syn_deliver")
+	gs.add_item("bone_shard", 2)
+	_check(qm.state_of("syn_deliver") == qm.STATE_READY, "deliver: two shards in the bag arm it")
+	# use, visit and talk each advance from the one matching world event.
+	qm.start("syn_use")
+	qm.notify_objective_used("ruin_mechanism")
+	_check(qm.state_of("syn_use") == qm.STATE_READY, "use: working the named mechanism arms it")
+	qm.start("syn_visit")
+	qm.notify_zone_visited("dungeon")
+	_check(qm.state_of("syn_visit") == qm.STATE_READY, "visit: reaching the named zone arms it")
+	qm.start("syn_talk")
+	qm.notify_npc_talked("nela")
+	_check(qm.state_of("syn_talk") == qm.STATE_READY, "talk: speaking to the named speaker arms it")
+	# every verb turns in once and pays its single reward; the two bag verbs spend.
+	var verb_gold: int = gs.gold
+	var fang_before: int = gs.count_item("wolf_fang")
+	var shard_before: int = gs.count_item("bone_shard")
+	for vid: String in verbs.keys():
+		_check(bool(qm.turn_in(vid)), "%s turns in" % String((verbs[vid] as Array)[0]))
+		_check(qm.state_of(vid) == qm.STATE_DONE, "%s is done after turn-in" % String((verbs[vid] as Array)[0]))
+	_check(not bool(qm.turn_in("syn_kill")), "a verb cannot be paid twice")
+	_check(gs.gold == verb_gold + 60, "all six verbs paid 10 gold each (got %d over %d)" % [gs.gold, verb_gold])
+	_check(gs.count_item("wolf_fang") == fang_before - 2,
+		"collect spent its two fangs on hand-in (got %d)" % gs.count_item("wolf_fang"))
+	_check(gs.count_item("bone_shard") == shard_before - 2,
+		"deliver spent its two shards on hand-in (got %d)" % gs.count_item("bone_shard"))
+	# a stored verb ignores an event aimed at a different target.
+	qm.reset()
+	qm.quests["syn_visit2"] = {
+		"title": "V2", "giver": "ruins_tablet", "requires": [], "min_level": 1,
+		"objective": {"type": "visit", "target": "fortress", "count": 1},
+		"reward": {"gold": 0, "xp": 0, "items": {}},
+	}
+	qm.start("syn_visit2")
+	qm.notify_zone_visited("dungeon")
+	_check(qm.state_of("syn_visit2") == qm.STATE_ACTIVE and qm.progress_of("syn_visit2") == 0,
+		"a visit quest is not armed by the wrong zone")
+	# wipe the synthetic table so no later group reads a fake quest.
+	for vid: String in verbs.keys():
+		qm.quests.erase(vid)
+	qm.quests.erase("syn_visit2")
+
 	gs.reset()
 	qm.reset()
 	completed["quests"] = true
@@ -9837,10 +9915,10 @@ func _test_ruins_quests() -> void:
 	_check(String(keyq.get("title", "")) == "Ключ от зала"
 			and String(keyq.get("giver", "")) == "ruins_tablet",
 		"q05_ruin_key is 'Ключ от зала' and is given by ruins_tablet")
-	_check(String(key_objective.get("type", "")) == "collect"
-			and String(key_objective.get("target", "")) == "ruin_key"
+	_check(String(key_objective.get("type", "")) == "use"
+			and String(key_objective.get("target", "")) == "ruin_mechanism"
 			and int(key_objective.get("count", 0)) == 1,
-		"q05_ruin_key asks for one ruin_key out of the bag")
+		"q05_ruin_key asks for the ruin lever to be worked")
 	var key_reward: Dictionary = keyq.get("reward", {})
 	var key_items: Dictionary = key_reward.get("items", {})
 	_check(int(key_reward.get("gold", 0)) == 50 and int(key_reward.get("xp", 0)) == 40
@@ -9896,8 +9974,8 @@ func _test_ruins_quests() -> void:
 	var offered: Array[String] = []
 	for quest_id: String in (tablet.get("quest_ids") as Array):
 		offered.append(quest_id)
-	_check(offered == ["q04_bone_guard", "q05_ruin_key"],
-		"the tablet offers q04 first and q05 after it (%s)" % ", ".join(offered))
+	_check(offered == ["q04_bone_guard", "q05_ruin_key", "q06_the_crown"],
+		"the tablet offers q04, then q05, then q06 (%s)" % ", ".join(offered))
 
 	# Where it stands is the part a player feels rather than reads: a giver behind
 	# the door would be a prize for the puzzle instead of a reason to start
@@ -10016,42 +10094,76 @@ func _test_ruins_quests() -> void:
 	_check(_last_toast == "Скрижаль: Ключ от зала",
 		"the tablet named the second quest (got '%s')" % _last_toast)
 
-	# --- the key, taken the way a player takes it -------------------------------
-	_check(qm.progress_of("q05_ruin_key") == 0, "the key quest starts at zero")
-	_check(gs.count_item("ruin_key") == 0, "the player holds no key yet")
+	# --- the lever, thrown the way a player throws it ---------------------------
+	# q05 is no longer a key to carry to the stone but a mechanism to work: the
+	# objective is `use`, aimed at the ruin lever by its own id. The lever reports its
+	# motion on its `triggered` signal, which the ruins wire to the quest manager, so
+	# the test drives the real signal rather than calling the manager by hand — that
+	# is the wiring this group is here to prove. The key the lever spends is still laid
+	# in the passage (the world still places it), but the signal is what arms the quest,
+	# so the group never picks it up and leaves none behind.
+	_check(qm.progress_of("q05_ruin_key") == 0, "the lever quest starts at zero")
 	var ground_key := _find_pickup_by_name("RuinKey") as Node2D
-	_check(ground_key != null, "the key still lies in the passage")
-	if ground_key != null:
-		player.global_position = ground_key.global_position
-		var frames := 0
-		while gs.count_item("ruin_key") == 0 and frames < 10:
-			await physics_frame
-			frames += 1
-		await process_frame
-	_check(gs.count_item("ruin_key") == 1,
-		"walking over the key put exactly one in the bag (got %d)" % gs.count_item("ruin_key"))
+	_check(ground_key != null, "the key the lever spends still lies in the passage")
+	var lever: Node = null
+	for node in get_nodes_in_group("interactable"):
+		if String(node.name) == "RuinMechanism":
+			lever = node
+	_check(lever != null, "the ruin lever stands where the zone declares it")
+	if lever != null:
+		_check(not lever.get_signal_connection_list("triggered").is_empty(),
+			"the lever is wired to report its motion to the quests")
+		lever.emit_signal("triggered", "ruin_mechanism")
 	_check(qm.state_of("q05_ruin_key") == qm.STATE_READY,
-		"the collect objective reads the live bag rather than a stored counter")
-	_check(qm.progress_of("q05_ruin_key") == 1, "the collect quest reports the bag")
+		"the lever falling armed the use objective")
+	_check(qm.progress_of("q05_ruin_key") == 1, "the use quest reports one mechanism worked")
 	_check(String(tablet.call("prompt_text")) == "Сдать задание",
-		"a bag holding the key changes the prompt too")
+		"a worked lever changes the prompt to 'Сдать задание'")
 
-	# Two keys in the bag before the hand-over, so the check measures one item
-	# spent instead of noticing that the stack went to zero either way.
-	gs.add_item("ruin_key", 1)
-	_check(gs.count_item("ruin_key") == 2, "the bag holds two keys before the hand-over")
 	var key_gold: int = gs.gold
 	var key_xp: int = gs.xp
 	_toast_count = 0
 	_last_toast = ""
 	tablet.call("interact", player)
-	_check(qm.state_of("q05_ruin_key") == qm.STATE_DONE, "the key was handed in")
-	_check(gs.gold == key_gold + 50, "the key paid 50 gold (got %d over %d)" % [gs.gold, key_gold])
-	_check(gs.xp == key_xp + 40, "the key paid 40 xp (got %d over %d)" % [gs.xp, key_xp])
-	_check(gs.count_item("ruin_key") == 1,
-		"the turn-in spent exactly one ruin_key (got %d left)" % gs.count_item("ruin_key"))
+	_check(qm.state_of("q05_ruin_key") == qm.STATE_DONE, "the lever quest was handed in")
+	_check(gs.gold == key_gold + 50, "the lever paid 50 gold (got %d over %d)" % [gs.gold, key_gold])
+	_check(gs.xp == key_xp + 40, "the lever paid 40 xp (got %d over %d)" % [gs.xp, key_xp])
+	_check(gs.count_item("ruin_key") == 0,
+		"a use turn-in spends no item from the bag (got %d)" % gs.count_item("ruin_key"))
 	_check(_last_toast == "Сдано: Ключ от зала",
-		"the tablet announced the second hand-over (got '%s')" % _last_toast)
+		"the tablet announced the lever hand-over (got '%s')" % _last_toast)
+
+	# --- the third reading opens the descent (a `visit` quest) ------------------
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q06_the_crown") == qm.STATE_ACTIVE,
+		"the tablet moved on to q06 once q05 was paid for")
+	_check(_last_toast == "Скрижаль: Пепельный венец",
+		"the tablet named the third quest (got '%s')" % _last_toast)
+	# q06 is a `visit`: the undercroft reports the player's arrival on its own build,
+	# so the descent arms it. Reported through the manager here (the zone's own call is
+	# exercised by the story-quest group and the bots); the stone only has to take the
+	# word and hand out its reward.
+	_check(qm.progress_of("q06_the_crown") == 0, "the descent quest starts at zero")
+	qm.notify_zone_visited("dungeon")
+	_check(qm.state_of("q06_the_crown") == qm.STATE_READY,
+		"reaching the undercroft armed the visit objective")
+	_check(String(tablet.call("prompt_text")) == "Сдать задание",
+		"a reached undercroft changes the prompt to 'Сдать задание'")
+	var crown_gold: int = gs.gold
+	var crown_xp: int = gs.xp
+	var crown_potions: int = gs.count_item("health_potion")
+	_toast_count = 0
+	_last_toast = ""
+	tablet.call("interact", player)
+	_check(qm.state_of("q06_the_crown") == qm.STATE_DONE, "the descent quest was handed in")
+	_check(gs.gold == crown_gold + 120, "the descent paid 120 gold (got %d over %d)" % [gs.gold, crown_gold])
+	_check(gs.xp == crown_xp + 100, "the descent paid 100 xp (got %d over %d)" % [gs.xp, crown_xp])
+	_check(gs.count_item("health_potion") == crown_potions + 2,
+		"the descent paid two potions (got %d over %d)" % [gs.count_item("health_potion"), crown_potions])
+	_check(_last_toast == "Сдано: Пепельный венец",
+		"the tablet announced the descent hand-over (got '%s')" % _last_toast)
 
 	# --- a stone with nothing left to give still answers ------------------------
 	_toast_count = 0
@@ -10059,7 +10171,7 @@ func _test_ruins_quests() -> void:
 	tablet.call("interact", player)
 	_check(_toast_count == 1 and _last_toast == "Скрижаль молчит",
 		"a finished tablet says so once (got %d toast, '%s')" % [_toast_count, _last_toast])
-	_check(gs.gold == key_gold + 50, "a finished tablet pays nothing more")
+	_check(gs.gold == crown_gold + 120, "a finished tablet pays nothing more")
 	_check(String(tablet.call("prompt_text")) == "Прочесть скрижаль",
 		"with nothing ready the prompt falls back to 'Прочесть скрижаль'")
 
@@ -13350,6 +13462,21 @@ func _test_new_npc_and_quests() -> void:
 	_satisfy_gates("q09_the_mill")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_AVAILABLE, "q09 starts available")
 	seris.call("interact", player)
+	# D5-R2: Seris's intro offers a refusal that changes nothing in the world — no
+	# quest, no flag, no reward — and the HUD must mark that free answer on its row so
+	# the player can tell it from the commitment beside it. Walk the HUD's own advance
+	# path until the choice node renders, then read the option list it painted.
+	if hud != null and hud.has_method("dialogue_options_text"):
+		var cos_runner: DialogueRunner = hud.call("dialogue_runner") as DialogueRunner
+		for _g in range(8):
+			if cos_runner == null or cos_runner.is_finished():
+				break
+			if not cos_runner.current_options().is_empty():
+				break
+			hud.call("_advance_dialogue")
+		var cos_text := String(hud.call("dialogue_options_text"))
+		_check(cos_text.contains("без последствий"),
+			"a consequence-free option is marked as such on its row (got '%s')" % cos_text)
 	_check(_take_dialogue_offer(hud), "Seris offers her errand as a conversation, not a toast")
 	_check(qm.state_of("q09_the_mill") == qm.STATE_ACTIVE, "talking to Seris starts q09")
 	gs.add_item("wolf_fang", 2)
@@ -13433,8 +13560,11 @@ func _test_new_npc_and_quests() -> void:
 		"the undercroft places Nela as an interactable")
 	if nela != null and undercroft != null:
 		var nela_qids: PackedStringArray = (nela.get("quest_ids") as PackedStringArray)
-		_check(nela_qids.size() == 1 and String(nela_qids[0]) == "q11_light_the_way",
-			"Nela carries q11_light_the_way (got %s)" % str(nela_qids))
+		_check(nela_qids.size() == 2 and String(nela_qids[0]) == "q08_the_bell"
+				and String(nela_qids[1]) == "q11_light_the_way",
+			"Nela carries the bell (moved off the stone) and her own light-the-way (got %s)" % str(nela_qids))
+		_check(String(nela.get("dialogue_quest_id")) == "q11_light_the_way",
+			"Nela's spoken conversation is q11, not the moved bell task (got '%s')" % String(nela.get("dialogue_quest_id")))
 		var sp_n := String(nela.get("speaker_id"))
 		if sp_n != "" and not giver_speakers.has(sp_n):
 			giver_speakers.append(sp_n)
@@ -13501,8 +13631,11 @@ func _test_new_npc_and_quests() -> void:
 		"the fortress places Oren as an interactable")
 	if oren != null and fortress != null:
 		var oren_qids: PackedStringArray = (oren.get("quest_ids") as PackedStringArray)
-		_check(oren_qids.size() == 1 and String(oren_qids[0]) == "q12_officers_seal",
-			"Oren carries q12_officers_seal (got %s)" % str(oren_qids))
+		_check(oren_qids.size() == 2 and String(oren_qids[0]) == "q07_captain_guard"
+				and String(oren_qids[1]) == "q12_officers_seal",
+			"Oren carries the word-to-Nela errand (moved off the stone) and his own seal (got %s)" % str(oren_qids))
+		_check(String(oren.get("dialogue_quest_id")) == "q12_officers_seal",
+			"Oren's spoken conversation is q12, not the moved errand (got '%s')" % String(oren.get("dialogue_quest_id")))
 		var sp_o := String(oren.get("speaker_id"))
 		if sp_o != "" and not giver_speakers.has(sp_o):
 			giver_speakers.append(sp_o)
@@ -14036,14 +14169,16 @@ func _test_king_and_endings() -> void:
 	for quest_id: String in ["q06_the_crown", "q07_captain_guard", "q08_the_bell"]:
 		var def: Dictionary = qm.call("get_quest", quest_id)
 		_check(not def.is_empty(), "%s is defined in data/quests.json" % quest_id)
-	_check(String(qm.call("objective_type", "q06_the_crown")) == "kill"
-			and String(qm.call("objective_target", "q06_the_crown")) == "ruin_skeleton"
-			and int(qm.call("target_count", "q06_the_crown")) == 6,
-		"q06 hunts six ruin_skeleton")
-	_check(String(qm.call("objective_target", "q07_captain_guard")) == "captain_of_the_guard"
+	_check(String(qm.call("objective_type", "q06_the_crown")) == "visit"
+			and String(qm.call("objective_target", "q06_the_crown")) == "dungeon"
+			and int(qm.call("target_count", "q06_the_crown")) == 1,
+		"q06 sends the player down to the undercroft")
+	_check(String(qm.call("objective_type", "q07_captain_guard")) == "talk"
+			and String(qm.call("objective_target", "q07_captain_guard")) == "nela"
 			and int(qm.call("target_count", "q07_captain_guard")) == 1,
-		"q07 hunts the Captain once")
-	_check(String(qm.call("objective_target", "q08_the_bell")) == "bell_ringer"
+		"q07 is a word carried to Nela")
+	_check(String(qm.call("objective_type", "q08_the_bell")) == "kill"
+			and String(qm.call("objective_target", "q08_the_bell")) == "bell_ringer"
 			and int(qm.call("target_count", "q08_the_bell")) == 1,
 		"q08 hunts the Bell Ringer once")
 
@@ -14438,15 +14573,14 @@ func _test_king_and_endings() -> void:
 	king6.queue_free()
 	await process_frame
 
-	# --- 13. the story quests track kills (including boss kills) and pay once ---
+	# --- 13. the story quests track their objectives (kill, visit, talk) --------
 	gs.reset()
 	qm.reset()
 	DamageResolver.reset()
 	_satisfy_gates("q06_the_crown")
 	_check(bool(qm.call("start", "q06_the_crown")), "q06 starts")
-	for i in range(6):
-		bus.enemy_died.emit(StringName("rs%d" % i), &"ruin_skeleton", Vector2.ZERO)
-	_check(String(qm.call("state_of", "q06_the_crown")) == "ready", "six skeleton kills make q06 ready")
+	qm.notify_zone_visited("dungeon")
+	_check(String(qm.call("state_of", "q06_the_crown")) == "ready", "reaching the undercroft makes q06 ready")
 	_check(bool(qm.call("turn_in", "q06_the_crown")), "q06 turns in")
 	_check(gs.gold == 120, "q06 paid 120 gold (got %d)" % gs.gold)
 	_check(gs.count_item("health_potion") == 2, "q06 paid two health potions (got %d)" % gs.count_item("health_potion"))
@@ -14457,8 +14591,8 @@ func _test_king_and_endings() -> void:
 	qm.reset()
 	_satisfy_gates("q07_captain_guard")
 	_check(bool(qm.call("start", "q07_captain_guard")), "q07 starts")
-	bus.enemy_died.emit(&"cap1", &"captain_of_the_guard", Vector2.ZERO)
-	_check(String(qm.call("state_of", "q07_captain_guard")) == "ready", "a boss kill makes q07 ready")
+	qm.notify_npc_talked("nela")
+	_check(String(qm.call("state_of", "q07_captain_guard")) == "ready", "speaking to Nela makes q07 ready")
 	_check(bool(qm.call("turn_in", "q07_captain_guard")), "q07 turns in")
 	_check(gs.gold == 200, "q07 paid 200 gold (got %d)" % gs.gold)
 
@@ -14756,6 +14890,31 @@ func _test_pilgrim() -> void:
 		gs.ui_blocking = false
 
 	bus.dialogue_requested.disconnect(on_line)
+
+	# --- the journal remembers the fragments the pilgrim told (D6-R2) -----------
+	# The pilgrim gives no quest, so his fragments can never reach the quest list —
+	# yet they are the one story thread the player pieces together himself, and a
+	# fragment heard and then nowhere written down is a clue lost to the run. The
+	# journal keeps its own block for them: how many of the four he has sat through and
+	# whether the last one told him the truth. Set the flags the way hearing the
+	# fragments would, rebuild the journal, and read what it now says.
+	gs.reset()
+	qm.reset()
+	if hud != null and hud.has_method("get_journal_text"):
+		hud.call("_refresh_journal")
+		_check(not String(hud.call("get_journal_text")).contains("Паломник"),
+			"the journal stays silent about the pilgrim before any fragment is heard")
+		gs.set_flag("pilgrim_met_forest", true)
+		gs.set_flag("pilgrim_met_ruins", true)
+		hud.call("_refresh_journal")
+		var j_frag := String(hud.call("get_journal_text"))
+		_check(j_frag.contains("Паломник") and j_frag.contains("2 из 4"),
+			"the journal counts the two fragments heard (got '%s')" % j_frag)
+		gs.set_flag("pilgrim_truth_known", true)
+		hud.call("_refresh_journal")
+		var j_truth := String(hud.call("get_journal_text"))
+		_check(j_truth.contains("Правда о короле открыта"),
+			"the journal records the truth once the last fragment is heard (got '%s')" % j_truth)
 
 	# --- leave no state behind -------------------------------------------------
 	_check(bool(manager.call("travel", "forest")), "the pilgrim group travels back to the forest")

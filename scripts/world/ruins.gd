@@ -130,7 +130,7 @@ const KEY_SCAN_RADIUS := 2
 ## on offer and offers nothing else while it is running, so the sequence is decided
 ## by this list rather than by anything the stone knows.
 const TABLET_STONE_ID := "ruins_tablet"
-const TABLET_QUEST_IDS: Array[String] = ["q04_bone_guard", "q05_ruin_key"]
+const TABLET_QUEST_IDS: Array[String] = ["q04_bone_guard", "q05_ruin_key", "q06_the_crown"]
 
 ## The tablet's tile: on the near side of the door, like the lever, because a
 ## quest giver the player has to solve the puzzle to reach would be a reward for
@@ -430,7 +430,19 @@ func _spawn_mechanism() -> void:
 	lever.sets_flag = DOOR_OPEN_FLAG
 	lever.position = _tile_center(MECHANISM_TILE.x, MECHANISM_TILE.y)
 	add_child(lever)
+	# The lever is also the `use` objective of q05: when it falls, the quest manager
+	# is told which mechanism moved, so a `use` quest aimed at this mechanism advances.
+	# The connection lives here, beside the node that owns the signal, so the lever
+	# never has to know quests exist.
+	lever.triggered.connect(_on_mechanism_triggered)
 	_mechanism_node = lever
+
+
+## A world mechanism finished its motion. Forwarded to the quest manager as a `use`
+## event keyed by the mechanism's own id, which is exactly the `use` target a quest
+## names; quests aimed at any other mechanism (or none) are untouched.
+func _on_mechanism_triggered(mechanism_id: String) -> void:
+	QuestManager.notify_objective_used(mechanism_id)
 
 
 ## The key, lying on the ground and collected by walking over it like every other

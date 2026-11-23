@@ -179,10 +179,22 @@ func _is_collect(quest_id: String) -> bool:
 	return objective_type(quest_id) == "collect"
 
 
-## True only while a `collect` quest is being tracked (not finished): that is the
-## window in which its progress is derived from the inventory rather than stored.
+## The two objective types whose progress is the live bag rather than a stored
+## counter. `collect` is "amass N of an item for the giver"; `deliver` is "carry N
+## of an item to the giver" — the same bag read, because handing goods to the very
+## NPC who holds the quest is exactly what the giver turn-in already does, and both
+## spend the items on hand-over. They stay distinct type strings so the journal and
+## the objective vocabulary can tell an errand from a haul.
+func _is_bag_tracking(quest_id: String) -> bool:
+	var t := objective_type(quest_id)
+	return t == "collect" or t == "deliver"
+
+
+## True only while a bag-tracked quest (`collect` or `deliver`) is being tracked
+## (not finished): that is the window in which its progress is derived from the
+## inventory rather than stored.
 func _is_collect_tracking(quest_id: String) -> bool:
-	if not _is_collect(quest_id):
+	if not _is_bag_tracking(quest_id):
 		return false
 	var state: String = state_of(quest_id)
 	return state == STATE_ACTIVE or state == STATE_READY
@@ -246,6 +258,45 @@ func _on_enemy_died(enemy_id: StringName, enemy_type: StringName, _pos: Vector2)
 		Telemetry.event(&"quest_progress", {"quest_id": quest_id, "progress": entry["progress"], "target": target})
 
 
+## Progress hooks for the objective types that are neither a kill counter nor a bag
+## read: `visit` (reach a zone), `talk` (speak to a named speaker) and `use` (trigger
+## a world mechanism). Each advances a stored counter by exactly one matching event —
+## the same shape `_on_enemy_died` uses for `kill`. The world props call these when
+## the thing happens (`Dungeon` reports arrival, `Villager` reports a conversation,
+## `Ruins` reports the lever falling), so the quest never polls the world; the world
+## tells the quest. Progress is clamped at the target, and a quest that is not
+## `active`, or whose type/target does not match the event, is left untouched.
+func notify_zone_visited(zone_id: String) -> void:
+	_advance_stored_objective("visit", zone_id)
+
+
+func notify_npc_talked(speaker_id: String) -> void:
+	_advance_stored_objective("talk", speaker_id)
+
+
+func notify_objective_used(object_id: String) -> void:
+	_advance_stored_objective("use", object_id)
+
+
+func _advance_stored_objective(obj_type: String, target: String) -> void:
+	for quest_id: String in states.keys():
+		if state_of(quest_id) != STATE_ACTIVE:
+			continue
+		var obj: Dictionary = get_quest(quest_id).get("objective", {})
+		if String(obj.get("type", "")) != obj_type:
+			continue
+		if String(obj.get("target", "")) != target:
+			continue
+		var count := int(obj.get("count", 0))
+		var entry: Dictionary = states[quest_id]
+		entry["progress"] = mini(count, int(entry.get("progress", 0)) + 1)
+		if int(entry["progress"]) >= count:
+			entry["state"] = STATE_READY
+			EventBus.toast.emit("Цель выполнена: %s" % String(get_quest(quest_id).get("title", quest_id)))
+		EventBus.quest_progress.emit(StringName(quest_id), int(entry["progress"]), count)
+		Telemetry.event(&"quest_progress", {"quest_id": quest_id, "progress": entry["progress"], "target": count})
+
+
 ## Re-evaluates every tracked `collect` quest against the live inventory. Runs on
 ## each `inventory_changed`. Progress is clamped to the target, and the ready flag
 ## follows the bag in both directions: enough items flips ACTIVE -> READY, dropping
@@ -277,12 +328,12 @@ func _recompute_collect_progress() -> void:
 func turn_in(quest_id: String) -> bool:
 	if state_of(quest_id) != STATE_READY:
 		return false
-	# A `collect` quest is paid for with items, so the bag is re-checked at the
-	# counter: if the player dropped or spent the required amount since the goal
-	# flashed ready, the turn-in is refused and the quest falls back to active
-	# rather than paying out for nothing.
+	# A bag-tracked quest (`collect` or `deliver`) is paid for with items, so the bag
+	# is re-checked at the counter: if the player dropped or spent the required amount
+	# since the goal flashed ready, the turn-in is refused and the quest falls back to
+	# active rather than paying out for nothing.
 	var required := 0
-	if _is_collect(quest_id):
+	if _is_bag_tracking(quest_id):
 		required = target_count(quest_id)
 		if GameState.count_item(_collect_target(quest_id)) < required:
 			var revert: Dictionary = states.get(quest_id, {})

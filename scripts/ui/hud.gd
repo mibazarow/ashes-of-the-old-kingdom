@@ -121,6 +121,7 @@ var _enter_held: bool = false
 var _quick_slot_list: VBoxContainer
 var _journal_panel: PanelContainer
 var _journal_list: VBoxContainer
+var _journal_snapshot: String = ""
 var _pause_panel: PanelContainer
 var _hint_label: Label
 var _map_panel: MapPanel
@@ -1832,10 +1833,23 @@ func _render_dialogue_node() -> void:
 		for i in range(options.size()):
 			var option: Variant = options[i]
 			var label := String((option as Dictionary).get("text", "")) if option is Dictionary else String(option)
+			# A cosmetic choice changes nothing in the world — no quest, no flag, no
+			# reward — so it is marked as consequence-free right on its row. Without
+			# the mark a player reads every option as a commitment and never picks the
+			# one that is only there to let him answer in character.
+			if option is Dictionary and bool((option as Dictionary).get("cosmetic", false)):
+				label += " (без последствий)"
 			rows.append("> %d. %s" % [i + 1, label] if i == _dialogue_option_index else "  %d. %s" % [i + 1, label])
 		_dialogue_options.text = "\n".join(rows)
 		_dialogue_options.visible = true
 	_refresh_dialogue_hint(not options.is_empty())
+
+
+## The exact text currently shown in the option list, for tests and any caller that
+## needs to read what the player sees without reaching into the label. Empty when no
+## conversation with choices is open.
+func dialogue_options_text() -> String:
+	return _dialogue_options.text if _dialogue_options != null else ""
 
 
 ## One compact controls line that reflects the live auto-advance state, so the
@@ -1946,6 +1960,9 @@ func _refresh_journal() -> void:
 		return
 	for child in _journal_list.get_children():
 		child.queue_free()
+	# Rebuilt from scratch every open, so the snapshot the tests and any reader use
+	# is reset here rather than left holding last open's lines.
+	_journal_snapshot = ""
 	var shown := 0
 	for quest_id: String in QuestManager.quests.keys():
 		var q: Variant = QuestManager.quests[quest_id]
@@ -1955,16 +1972,49 @@ func _refresh_journal() -> void:
 		var state: String = QuestManager.state_of(quest_id)
 		if state == QuestManager.STATE_ACTIVE:
 			var line := "• %s — %d/%d" % [title, QuestManager.progress_of(quest_id), QuestManager.target_count(quest_id)]
-			_journal_list.add_child(_make_text(line, Color(0.9, 0.92, 0.86)))
+			_journal_add(line, Color(0.9, 0.92, 0.86))
 			shown += 1
 		elif state == QuestManager.STATE_READY:
-			_journal_list.add_child(_make_text("✔ %s — сдать" % title, Color(0.96, 0.86, 0.5)))
+			_journal_add("✔ %s — сдать" % title, Color(0.96, 0.86, 0.5))
 			shown += 1
 		elif state == QuestManager.STATE_DONE:
-			_journal_list.add_child(_make_text("✓ %s — выполнено" % title, Color(0.55, 0.57, 0.55)))
+			_journal_add("✓ %s — выполнено" % title, Color(0.55, 0.57, 0.55))
 			shown += 1
-	if shown == 0:
-		_journal_list.add_child(_make_text("пока пусто", Color(0.6, 0.6, 0.58)))
+	# The pilgrim's fragments are not a quest, so the loop above can never show them —
+	# yet they are the one thread of the main story the player pieces together himself,
+	# and a fragment heard and then nowhere written down is a clue lost to the run. They
+	# get their own block: how many of the four he has sat through and where, and whether
+	# the last one has told him the truth about the king. It appears only once there is
+	# something to report, so a player who has never met the stranger sees no empty
+	# heading hinting at content he has not unlocked.
+	var heard: Array[String] = []
+	for zone_place in [["forest", "в лесу"], ["ruins", "в руинах"], ["dungeon", "в подземелье"], ["fortress", "в крепости"]]:
+		if GameState.get_flag("pilgrim_met_" + String(zone_place[0]), false):
+			heard.append(String(zone_place[1]))
+	var truth_known: bool = GameState.get_flag("pilgrim_truth_known", false)
+	if not heard.is_empty() or truth_known:
+		_journal_add("— Паломник —", Color(0.72, 0.66, 0.5))
+		if not heard.is_empty():
+			_journal_add("Услышано %d из 4: %s" % [heard.size(), ", ".join(heard)], Color(0.82, 0.8, 0.72))
+		if truth_known:
+			_journal_add("Правда о короле открыта", Color(0.9, 0.82, 0.6))
+	if shown == 0 and heard.is_empty() and not truth_known:
+		_journal_add("пока пусто", Color(0.6, 0.6, 0.58))
+
+
+## Adds one journal row and records its text in the snapshot, so the visible list and
+## the string `get_journal_text()` returns can never drift apart.
+func _journal_add(text: String, color: Color) -> void:
+	_journal_list.add_child(_make_text(text, color))
+	_journal_snapshot += text + "\n"
+
+
+## The plain text of the journal as last built, one line per row. For tests and any
+## caller that needs to read the journal without walking the label nodes (the old rows
+## are freed on a deferred frame, so reading the children right after a rebuild would
+## still see the previous open's lines).
+func get_journal_text() -> String:
+	return _journal_snapshot
 
 
 func _toggle_pause() -> void:

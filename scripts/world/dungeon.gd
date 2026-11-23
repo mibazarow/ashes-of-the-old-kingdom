@@ -402,6 +402,11 @@ func _spawn_actors() -> void:
 	# `_find_prop_tile` against that set with the six-tile clearance the zone asks of
 	# a prop that is not a hostile.
 	_spawn_pilgrim(spawn_tile, reserved)
+	# Arriving in the undercroft is itself the `visit` objective of q06. Reported once
+	# the zone is fully built and the player is standing in it, so the quest manager
+	# advances a `visit` quest aimed at this zone and nothing else; a quest that is not
+	# active, or aimed at another zone, is left untouched.
+	QuestManager.notify_zone_visited(zone_id())
 
 
 ## The door up to the fortress, at the far end of the longest walk the undercroft
@@ -514,7 +519,13 @@ func _spawn_nela(entry: Vector2i, reserved: Dictionary) -> void:
 	nela.set("display_name", "Смотрящая Нела")
 	nela.set("speaker_id", "nela")
 	nela.set("sprite_texture", load(NPC_SPRITE))
-	nela.set("quest_ids", PackedStringArray(["q11_light_the_way"]))
+	# Нела now carries two quests: the bell she needs silenced below the stair (q08,
+	# moved off the tablet so the stone no longer hands out most of the chain) and her
+	# own light-the-way (q11). Only q11 is a spoken conversation — it is the one with a
+	# dialogue tree of hers — so `dialogue_quest_id` names it and q08 is offered and
+	# turned in through the plain quest flow.
+	nela.set("quest_ids", PackedStringArray(["q08_the_bell", "q11_light_the_way"]))
+	nela.set("dialogue_quest_id", "q11_light_the_way")
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
 	spr.texture = load(NPC_SPRITE)

@@ -492,7 +492,12 @@ func _spawn_oren(entry: Vector2i, reserved: Dictionary) -> void:
 	oren.set("display_name", "Офицер Орен")
 	oren.set("speaker_id", "oren")
 	oren.set("sprite_texture", load(NPC_SPRITE))
-	oren.set("quest_ids", PackedStringArray(["q12_officers_seal"]))
+	# Орен now carries two quests: the word he needs carried down to the watchwoman
+	# (q07, moved off the tablet so the stone no longer hands out most of the chain)
+	# and his own officer's seal (q12). Only q12 is a spoken conversation, so
+	# `dialogue_quest_id` names it and q07 runs through the plain quest flow.
+	oren.set("quest_ids", PackedStringArray(["q07_captain_guard", "q12_officers_seal"]))
+	oren.set("dialogue_quest_id", "q12_officers_seal")
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
 	spr.texture = load(NPC_SPRITE)
