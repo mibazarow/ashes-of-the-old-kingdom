@@ -31,6 +31,7 @@ SaveManager="*res://scripts/save/save_manager.gd"
 InputBindings="*res://scripts/core/input_bindings.gd"
 HitStop="*res://scripts/core/hit_stop.gd"
 AudioManager="*res://scripts/core/audio_manager.gd"
+Accessibility="*res://scripts/core/accessibility.gd"
 
 [display]
 

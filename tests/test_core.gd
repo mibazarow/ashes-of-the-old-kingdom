@@ -11,6 +11,9 @@ const FIXTURE_DIR := "res://tests/fixtures/saves"
 ## autoload so the suite keeps no compile-time dependency on an autoload
 ## identifier (the group resolves the node at runtime and calls it directly).
 const AUDIO_SETTINGS_PATH := "user://settings/audio.json"
+## The screen/accessibility store (CRITIC-P1-11 / P2-22). A separate file from the
+## audio store on purpose, so the two writers never touch the same bytes.
+const ACCESSIBILITY_SETTINGS_PATH := "user://settings/accessibility.json"
 ## Frames to let the audio pool run dry before the suite quits. Longest sample in
 ## `assets/audio` is `boss_roar` at 500 ms, and a sample stolen at half pitch runs to
 ## ~830 ms, so 60 frames at 60 Hz covers any cue any group could have started.
@@ -2281,6 +2284,122 @@ func _test_map_panel() -> void:
 	_check(not bool(hud.call("is_map_open")),
 		"two presses delivered together close the map once, not twice (edge latch)")
 	_check(not gs.ui_blocking, "the latch regression left no ui_blocking behind")
+
+	# --- CRITIC-PLAYER readability / accessibility on the live HUD -------------
+	# The plates, the captioned bars and the font scale are all checked against the
+	# HUD the player actually sees, not a detached instance, so a regression in the
+	# real scene graph fails here.
+
+	# The dark plates behind the status block and the controls band (CRITIC-P1-01):
+	# text sat on bare world art and vanished over bright tiles. Each plate must be a
+	# dark, reasonably opaque box.
+	var status_plate: StyleBoxFlat = hud.call("status_plate_style")
+	var hint_plate: StyleBoxFlat = hud.call("hint_plate_style")
+	_check(status_plate != null, "the status block has a backing plate")
+	_check(hint_plate != null, "the controls band has a backing plate")
+	if status_plate != null:
+		var sc := status_plate.bg_color
+		var sc_max: float = maxf(sc.r, maxf(sc.g, sc.b))
+		_check(sc_max < 0.25, "the status plate is dark (max channel %.2f)" % sc_max)
+		_check(sc.a >= 0.7, "the status plate is opaque enough to read over art (a %.2f)" % sc.a)
+	if hint_plate != null:
+		var hc := hint_plate.bg_color
+		var hc_max: float = maxf(hc.r, maxf(hc.g, hc.b))
+		_check(hc_max < 0.25, "the hint plate is dark (max channel %.2f)" % hc_max)
+		_check(hc.a >= 0.7, "the hint plate is opaque enough to read over art (a %.2f)" % hc.a)
+
+	# The bars now carry a text caption, not just a coloured fill (CRITIC-P1-02).
+	hud.call("_on_health", 42, 100)
+	hud.call("_on_mana", 17, 60)
+	hud.call("_on_xp", 30, 120, 3)
+	_check(String(hud.call("hp_caption_text")) == "HP 42/100",
+		"the health bar caption reads HP current/max (got %s)" % String(hud.call("hp_caption_text")))
+	_check(String(hud.call("mp_caption_text")) == "MP 17/60",
+		"the mana bar caption reads MP current/max (got %s)" % String(hud.call("mp_caption_text")))
+	_check(String(hud.call("xp_caption_text")) == "XP 30/120",
+		"the experience bar caption reads XP current/needed (got %s)" % String(hud.call("xp_caption_text")))
+
+	# The XP bar used to be forced to 3 px and was effectively invisible (P1-03).
+	_check(float(hud.call("xp_bar_min_height")) >= 5.0,
+		"the XP bar is at least 5 px tall (got %.1f)" % float(hud.call("xp_bar_min_height")))
+
+	# The font scale must move the live theme and still fit the 480x270 viewport at
+	# the largest setting (CRITIC-P2-21: the HUD overflowed when text was enlarged).
+	var acc := root.get_node_or_null("Accessibility")
+	_check(acc != null, "Accessibility autoload present for the HUD font check")
+	if acc != null:
+		_reset_accessibility_to_defaults(acc)
+		_check(int(hud.call("current_font_size")) == 8, "the HUD font starts at the base 8 px")
+		acc.call("set_font_scale", 150)
+		await process_frame
+		_check(int(hud.call("current_font_size")) == 12,
+			"the HUD font scales to 12 px at 150%% (got %d)" % int(hud.call("current_font_size")))
+		await process_frame
+		var bounds: Rect2 = hud.call("hud_content_bounds")
+		_check(bounds.size != Vector2.ZERO, "the HUD reports non-empty content bounds")
+		_check(bounds.position.x >= -1.0 and bounds.position.y >= -1.0
+			and bounds.end.x <= 481.0 and bounds.end.y <= 271.0,
+			"the HUD stays inside 480x270 at the largest font (bounds %s)" % str(bounds))
+		_reset_accessibility_to_defaults(acc)
+		await process_frame
+		_check(int(hud.call("current_font_size")) == 8, "the HUD font returns to 8 px after reset")
+
+	# Colour-blind mode must change the rarity colour, so the mode does something
+	# real rather than being a dead toggle (CRITIC-P2-15: rarity was hue-only).
+	if acc != null:
+		var common_normal: Color = hud.call("rarity_display_color", "common")
+		var legendary_normal: Color = hud.call("rarity_display_color", "legendary")
+		acc.call("set_colorblind_mode", true)
+		var common_cb: Color = hud.call("rarity_display_color", "common")
+		var legendary_cb: Color = hud.call("rarity_display_color", "legendary")
+		acc.call("set_colorblind_mode", false)
+		_check(common_cb != common_normal or legendary_cb != legendary_normal,
+			"colour-blind mode changes the rarity colours")
+		# In the colour-blind ramp the tiers still separate by lightness, so the
+		# legendary step is lighter than the common step by WCAG luminance.
+		_check(_wcag_lum(legendary_cb) > _wcag_lum(common_cb),
+			"the colour-blind rarity ramp separates common from legendary by lightness")
+
+	# Hit-flash intensity (CRITIC-P1-04 / P2-16): the shipped flash must be dialable
+	# to nothing without a hit stopping to register. The endpoints are pinned through
+	# live instances with a runtime call, never by naming the Player/Enemy class here
+	# — a compile-time class reference would drag those scripts into this file's
+	# compile graph, where the autoloads they use are not yet resolvable (the same
+	# reason the rest of this suite spells enum values as raw numbers). The live
+	# player then proves it reads the store rather than a hard-coded tint, and that
+	# the flash timer still arms at intensity 0.
+	var enemy := get_first_node_in_group("enemy")
+	_check(enemy != null, "a live enemy is present for the flash endpoint checks")
+	var p_flash0: Color = player.call("hit_flash_color", 0.0)
+	var p_flash1: Color = player.call("hit_flash_color", 1.0)
+	_check(p_flash0 == Color.WHITE,
+		"a player flash at intensity 0 is the identity tint (no flash)")
+	_check(p_flash1 == Color(1.0, 0.45, 0.45),
+		"a player flash at intensity 1 is the shipped red")
+	if enemy != null:
+		var e_flash0: Color = enemy.call("hit_flash_color", 0.0)
+		var e_flash1: Color = enemy.call("hit_flash_color", 1.0)
+		_check(e_flash0 == Color(1.0, 1.0, 1.0),
+			"an enemy flash at intensity 0 is the identity multiplier (no flash)")
+		_check(e_flash1 == Color(1.6, 1.2, 1.2),
+			"an enemy flash at intensity 1 is the shipped brightening")
+	if acc != null:
+		acc.call("set_flash_intensity", 0)
+		_check(absf(float(player.call("flash_strength"))) < 0.001,
+			"the player reads flash intensity 0 from the store")
+		player.call("_apply_hit_flash")
+		_check(player.modulate == Color.WHITE,
+			"a player hit at flash 0 leaves the sprite untinted (modulate %s)" % str(player.modulate))
+		_check(float(player.get("_flash_timer")) > 0.0,
+			"the flash timer still arms at intensity 0, so the hit is not swallowed")
+		acc.call("set_flash_intensity", 100)
+		_check(absf(float(player.call("flash_strength")) - 1.0) < 0.001,
+			"the player reads full flash intensity from the store")
+		player.call("_apply_hit_flash")
+		_check(player.modulate == Color(1.0, 0.45, 0.45),
+			"a player hit at flash 100 shows the shipped red (modulate %s)" % str(player.modulate))
+		_reset_accessibility_to_defaults(acc)
+		player.modulate = Color.WHITE
 
 	scene.queue_free()
 	await process_frame
@@ -5544,6 +5663,16 @@ func _test_inventory_equip() -> void:
 	_check(bool(hud.call("is_inventory_open")), "key I opens the inventory")
 	_check(gs.ui_blocking, "ui_blocking is set while the inventory is open")
 	_check(int(hud.call("inventory_selection")) == 0, "opening the inventory puts the cursor at 0")
+	# The panel is anchored to the viewport centre and re-centred from its laid-out
+	# width; its horizontal centre must land on the viewport centre, not drift to the
+	# left edge (CRITIC-P2-13). Read through the live node so no class-name reference
+	# drags hud.gd into this file's compile graph.
+	await process_frame
+	var inv_panel: Variant = hud.get("_inventory_panel")
+	var vp_center_x: float = hud.get_viewport().get_visible_rect().size.x * 0.5
+	var panel_center_x: float = inv_panel.global_position.x + inv_panel.size.x * 0.5
+	_check(absf(panel_center_x - vp_center_x) < 1.0,
+		"the inventory panel is horizontally centred (panel %.1f vs viewport %.1f)" % [panel_center_x, vp_center_x])
 	await _tap_key(KEY_W)
 	_check(int(hud.call("inventory_selection")) == 0, "move_up at the top stays clamped at 0")
 
@@ -8468,6 +8597,19 @@ func _delete_audio_settings() -> void:
 			DirAccess.remove_absolute(path)
 
 
+func _delete_accessibility_settings() -> void:
+	for path in [ACCESSIBILITY_SETTINGS_PATH, ACCESSIBILITY_SETTINGS_PATH + ".tmp"]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+
+## Puts the Accessibility store back on its shipped defaults without touching the
+## file, so a screen-section check cannot pass on a value an earlier group left behind.
+func _reset_accessibility_to_defaults(acc: Node) -> void:
+	if acc != null and acc.has_method("set_defaults"):
+		acc.call("set_defaults")
+
+
 ## Minimal WAV reader: RIFF header, then a walk over the chunks, so the check
 ## reads the same bytes `tools/gen_audio.py` wrote instead of trusting the
 ## engine's import. Peak is the largest absolute int16 in the data chunk.
@@ -8894,24 +9036,28 @@ func _test_settings_sound() -> void:
 			% [drift_bus, reset_level, int(panel.sound_value(drift_bus))])
 		_check(absf(float(am.call("volume", drift_bus)) - float(manager_defaults[drift_bus])) < 0.01,
 			"the %s bus follows R to the autoload default too" % drift_bus)
-	# Every row is back on its default, so the section switch below still starts
-	# from the state `open()` left behind.
+	# After the reset sweep the cursor sits on the last sound row. Tab moves it to
+	# the next section; with three sections (CRITIC-P1-11) the cycle is
+	# Controls -> Sound -> Screen -> Controls, so one Tab leaves Sound for the new
+	# Screen section and a second wraps back to Controls, resetting its cursor.
 	await _tap_key(KEY_TAB)
 	_check(not bool(panel.sound_section()), "Tab leaves the sound section after the reset sweep")
+	_check(bool(panel.screen_section()), "the section after sound is the new screen section")
+	_check(String(panel.selected_screen_key()) == "flash_intensity",
+		"the screen cursor lands on the first screen row")
+	await _tap_key(KEY_TAB)
+	_check(not bool(panel.sound_section()) and not bool(panel.screen_section()),
+		"Tab wraps from the screen section back to controls")
+	_check(String(panel.selected_action()) == "move_up",
+		"the rebind cursor resets to the first row on entering controls")
 
-	# --- Tab switches sections, the cursor lands on the first row ------------
+	# --- arrows walk the rebind list, then Tab lands on the first row ---------
 	await _tap_key(KEY_DOWN)
 	await _tap_key(KEY_DOWN)
 	_check(String(panel.selected_action()) == "move_left", "the arrows walk the rebind list (row 3)")
 	await _tap_key(KEY_TAB)
 	_check(bool(panel.sound_section()), "Tab switches to the sound section")
 	_check(String(panel.selected_bus()) == "Music", "Tab lands on the first row of the new section")
-	await _tap_key(KEY_TAB)
-	_check(not bool(panel.sound_section()), "Tab switches back to the controls section")
-	_check(String(panel.selected_action()) == "move_up", "the cursor reset to the first rebind row")
-	await _tap_key(KEY_TAB)
-	_check(bool(panel.sound_section()) and String(panel.selected_bus()) == "Music",
-		"Tab returns to the Music row")
 
 	# --- Right raises the selected volume and the bus follows ----------------
 	_check(int(panel.sound_value("Music")) == 70, "Music starts at 70")
@@ -8995,6 +9141,117 @@ func _test_settings_sound() -> void:
 	await _tap_key(KEY_R)
 	_check(_action_has_key("move_up", KEY_W), "R in the controls section still restores the default")
 	_check(not _action_has_key("move_up", KEY_F), "R drops the rebound key")
+
+	# --- the screen section: three rows, live store, save/load round trip -----
+	# CRITIC-P1-11 / P2-22: the panel used to have exactly two sections and no way
+	# to reach the display settings at all. This drives the third section the same
+	# way the sound rows are driven and proves the values reach the Accessibility
+	# store and survive a save/load, not just a repaint.
+	var acc := root.get_node_or_null("Accessibility")
+	_check(acc != null, "Accessibility autoload present for the screen section")
+	if acc != null:
+		_reset_accessibility_to_defaults(acc)
+		_delete_accessibility_settings()
+		panel.open()
+		_check(int(panel.section_count()) == 3, "the panel exposes three sections")
+		await _tap_key(KEY_TAB)
+		await _tap_key(KEY_TAB)
+		_check(bool(panel.screen_section()), "two Tabs land on the screen section")
+		_check(String(panel.selected_screen_key()) == "flash_intensity",
+			"the screen cursor starts on the flash row")
+		_check(int(panel.screen_value("flash_intensity")) == 100, "flash intensity defaults to 100")
+		_check(int(panel.screen_value("font_scale")) == 100, "font scale defaults to 100")
+		_check(int(panel.screen_value("colorblind_mode")) == 0, "colour-blind defaults to off")
+
+		# Left/Right drive the store, not just the label; the store clamps.
+		await _tap_key(KEY_LEFT)
+		_check(int(panel.screen_value("flash_intensity")) == 90,
+			"Left lowers flash intensity by 10 (got %d)" % int(panel.screen_value("flash_intensity")))
+		_check(absf(float(acc.call("flash_intensity_normalized")) - 0.9) < 0.001,
+			"the store reports the lowered flash as 0.9")
+		await _tap_key(KEY_RIGHT)
+		await _tap_key(KEY_RIGHT)
+		_check(int(panel.screen_value("flash_intensity")) == 100,
+			"flash intensity clamps at 100 (got %d)" % int(panel.screen_value("flash_intensity")))
+
+		# Down to the font row: it scales up but never past the viewport ceiling.
+		await _tap_key(KEY_DOWN)
+		_check(String(panel.selected_screen_key()) == "font_scale", "Down moves to the font row")
+		await _tap_key(KEY_RIGHT)
+		_check(int(panel.screen_value("font_scale")) == 110,
+			"Right raises font scale to 110 (got %d)" % int(panel.screen_value("font_scale")))
+		_check(absf(float(acc.call("font_scale_factor")) - 1.1) < 0.001,
+			"the store reports the raised font as 1.1")
+		for i in 5:
+			await _tap_key(KEY_RIGHT)
+		_check(int(panel.screen_value("font_scale")) == 150,
+			"font scale clamps at 150 (got %d)" % int(panel.screen_value("font_scale")))
+
+		# Down to the colour-blind row: a boolean, toggled by either arrow.
+		await _tap_key(KEY_DOWN)
+		_check(String(panel.selected_screen_key()) == "colorblind_mode",
+			"Down moves to the colour-blind row")
+		await _tap_key(KEY_RIGHT)
+		_check(bool(acc.call("colorblind_enabled")), "Right turns colour-blind mode on")
+		await _tap_key(KEY_RIGHT)
+		_check(not bool(acc.call("colorblind_enabled")), "Right toggles colour-blind mode back off")
+
+		# R on a screen row restores just that row.
+		await _tap_key(KEY_RIGHT)
+		_check(bool(acc.call("colorblind_enabled")), "colour-blind on before its reset")
+		await _tap_key(KEY_R)
+		_check(not bool(acc.call("colorblind_enabled")), "R restores the colour-blind default")
+
+		# A save/load round trip through the panel's own Esc write.
+		panel.select_screen("flash_intensity")
+		for i in 6:
+			await _tap_key(KEY_LEFT)
+		panel.select_screen("font_scale")
+		await _tap_key(KEY_R)
+		for i in 3:
+			await _tap_key(KEY_RIGHT)
+		panel.select_screen("colorblind_mode")
+		if not bool(acc.call("colorblind_enabled")):
+			await _tap_key(KEY_RIGHT)
+		_check(not FileAccess.file_exists(ACCESSIBILITY_SETTINGS_PATH),
+			"no accessibility file while the panel is still open")
+		await _tap_key(KEY_ESCAPE)
+		_check(FileAccess.file_exists(ACCESSIBILITY_SETTINGS_PATH),
+			"closing the panel wrote the accessibility settings file")
+		_check(not ACCESSIBILITY_SETTINGS_PATH.begins_with("user://saves"),
+			"screen settings live outside the saves directory")
+		_check(not FileAccess.file_exists(ACCESSIBILITY_SETTINGS_PATH + ".tmp"),
+			"the accessibility save renamed its tmp file away")
+		_reset_accessibility_to_defaults(acc)
+		_check(int(panel.screen_value("flash_intensity")) == 100, "store reset to defaults before reload")
+		acc.call("load_settings")
+		_check(int(acc.get("flash_intensity")) == 40,
+			"flash intensity survives the save/load round trip (got %d)" % int(acc.get("flash_intensity")))
+		_check(int(acc.get("font_scale")) == 130,
+			"font scale survives the save/load round trip (got %d)" % int(acc.get("font_scale")))
+		_check(bool(acc.get("colorblind_mode")), "colour-blind mode survives the save/load round trip")
+		_reset_accessibility_to_defaults(acc)
+		_delete_accessibility_settings()
+		_check(not FileAccess.file_exists(ACCESSIBILITY_SETTINGS_PATH),
+			"settings sound group left no accessibility settings file behind")
+
+	# --- the footer hint clears WCAG AA against the panel interior -------------
+	# CRITIC-P1-12: the footer sat at 2.92:1 over the panel and was unreadable. The
+	# ratio is recomputed here from the panel's own colour constants, so the fix and
+	# the contract can never drift apart — a future edit that dims COLOR_HINT or
+	# lightens PANEL_INTERIOR fails this line, not a screenshot nobody compares. The
+	# constants are read through a runtime `load`, never by naming SettingsPanel here,
+	# for the same compile-graph reason described in the flash checks above.
+	var sp_cls: GDScript = load("res://scripts/ui/settings_panel.gd")
+	var hint_color: Color = sp_cls.get("COLOR_HINT")
+	var interior_color: Color = sp_cls.get("PANEL_INTERIOR")
+	var section_off_color: Color = sp_cls.get("COLOR_SECTION_OFF")
+	var footer_ratio := _wcag_contrast(hint_color, interior_color)
+	_check(footer_ratio >= 4.5,
+		"the settings footer clears WCAG AA 4.5:1 (got %.2f:1)" % footer_ratio)
+	var section_off_ratio := _wcag_contrast(section_off_color, interior_color)
+	_check(section_off_ratio >= 3.0,
+		"the inactive section header clears the 3:1 large-text floor (got %.2f:1)" % section_off_ratio)
 
 	# --- leave no residue for the next run, a bot or the editor --------------
 	panel.queue_free()

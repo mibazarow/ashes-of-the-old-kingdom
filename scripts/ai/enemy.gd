@@ -543,11 +543,49 @@ func _set_telegraph_shown(shown: bool) -> void:
 
 
 func _on_damaged(_amount: int, _info: Dictionary) -> void:
+	_apply_hit_flash()
+
+
+## The hit flash, scaled by the «Яркость вспышек» accessibility setting. The flash
+## brightens this enemy's own tint rather than replacing it, so a hit boar still
+## flashes boar-coloured; intensity scales how far that brightening sits from the
+## identity multiplier. At 100 % the product is the original flash colour byte for
+## byte; at 0 % the multiplier is `Color(1,1,1)`, so the sprite does not change at
+## all — the honest "no flash". Split out so the flash and its intensity are one
+## path the damage handler and a test both drive.
+func _apply_hit_flash() -> void:
 	_flash_timer = 0.1
-	# The flash brightens this enemy's own tint instead of replacing it, so a
-	# hit boar still flashes boar-coloured. With the default white tint the
-	# product is the original flash colour, byte for byte.
-	sprite.modulate = sprite_tint * Color(1.6, 1.2, 1.2)
+	sprite.modulate = sprite_tint * hit_flash_color(_accessibility_flash_intensity())
+
+
+## The flash multiplier for a given 0..1 intensity. Pure and static so a test can
+## pin the endpoints without a live scene: 0 -> WHITE (identity, no flash),
+## 1 -> the shipped brightening. With the default white tint the product at 1 is
+## the original `Color(1.6, 1.2, 1.2)` flash, byte for byte.
+static func hit_flash_color(intensity: float) -> Color:
+	return Color(1.0, 1.0, 1.0).lerp(Color(1.6, 1.2, 1.2), clampf(intensity, 0.0, 1.0))
+
+
+## The effective flash strength this enemy would apply right now, 0..1, read from
+## the Accessibility autoload. Exposed so a test can prove the enemy reads the
+## setting (0 when the store is 0), not only that its modulate looks neutral.
+func flash_strength() -> float:
+	return clampf(_accessibility_flash_intensity(), 0.0, 1.0)
+
+
+## The Accessibility autoload's flash strength, resolved by name through the scene
+## root (the project rule that gameplay never names an autoload as an identifier,
+## and what keeps this script loading under `godot --script`). No autoload ->
+## full flash, so removing the accessibility layer is a no-op.
+func _accessibility_flash_intensity() -> float:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return 1.0
+	var store := loop.root.get_node_or_null("Accessibility")
+	if store == null or not store.has_method("flash_intensity_normalized"):
+		return 1.0
+	return float(store.call("flash_intensity_normalized"))
+
 
 
 func _on_died(_info: Dictionary) -> void:

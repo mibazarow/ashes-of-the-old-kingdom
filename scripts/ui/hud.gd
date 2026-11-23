@@ -17,6 +17,17 @@ const MAX_VISIBLE_ROWS := 8
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
 const COLOR_HINT := Color(0.6, 0.62, 0.6)
+## The dark, semi-opaque surface behind the HUD status block and the controls band
+## (CRITIC-P1-02 / P1-03 / P2-20). Dark enough that every HUD string clears 4.5:1
+## against it even after compositing over the brightest floor, yet translucent
+## enough to read as a HUD plate rather than a solid panel.
+const PLATE_COLOR := Color(0.04, 0.05, 0.07, 0.86)
+## The always-visible control hint colour, lifted so it clears 4.5:1 on the plate
+## (the old 0.72,0.74,0.7 was 1.06:1 on grass).
+const COLOR_HINT_TEXT := Color(0.82, 0.84, 0.8)
+## The base theme font size in pixels. The accessibility font scale is a percent
+## of this; the result is rounded to an integer so glyphs stay on the pixel grid.
+const BASE_FONT_SIZE := 8
 
 ## Boss bar (spec §10.4 "полоска здоровья босса"). The boss is looked up through
 ## the `boss` group rather than a node path or a class reference, exactly like the
@@ -80,10 +91,16 @@ var _mp_bar: ProgressBar
 var _xp_bar: ProgressBar
 var _hp_label: Label
 var _mp_label: Label
+var _xp_label: Label
 var _level_label: Label
 var _gold_label: Label
 var _clock_label: Label
 var _zone_label: Label
+## The dark plate behind the top-left status block and the one behind the bottom
+## controls band (CRITIC-P1-02 / P1-03 / P2-20). Kept as fields so a test can read
+## their style and a bounds check can measure them without walking the tree.
+var _status_plate: PanelContainer
+var _hint_plate: PanelContainer
 var _quest_label: Label
 var _skill_label: Label
 var _prompt_label: Label
@@ -222,6 +239,13 @@ func _ready() -> void:
 	add_to_group("hud")
 	_build_ui()
 	_connect_signals()
+	# The font scale lives in the Accessibility store; re-apply it live so a change
+	# made in the settings screen resizes the HUD text without reopening the world.
+	# The connection dies with the HUD (Godot disconnects signals of a freed object),
+	# so it needs no explicit teardown.
+	var accessibility := _accessibility()
+	if accessibility != null and accessibility.has_signal("changed"):
+		accessibility.changed.connect(_apply_font_scale)
 	_refresh_all()
 
 
@@ -246,11 +270,24 @@ func _build_ui() -> void:
 	column.add_theme_constant_override("separation", 0)
 	margin.add_child(column)
 
-	# --- top row: stats left, level/gold right ---
+	# --- top row: stats left, level/gold right, on one dark plate --------------
+	# The plate (CRITIC-P1-02 / P2-20) is what makes every string in this row —
+	# the zone line, the gold line, the day clock — readable on any floor: the
+	# text used to sit directly on grass at 1.1–1.2:1. It is a full-width row so
+	# the right-hand column stays in the top-right corner exactly where it was;
+	# the plate only adds a dark surface behind the existing layout, it moves
+	# nothing. The HBox fills the plate, so the expanding spacer still pushes the
+	# level/gold/clock column to the right edge.
+	_status_plate = PanelContainer.new()
+	_status_plate.name = "StatusPlate"
+	_status_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_status_plate.add_theme_stylebox_override("panel", _plate_style(PLATE_COLOR))
+	column.add_child(_status_plate)
+
 	var top := HBoxContainer.new()
 	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	top.add_theme_constant_override("separation", 4)
-	column.add_child(top)
+	_status_plate.add_child(top)
 
 	var stats := VBoxContainer.new()
 	stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -266,9 +303,12 @@ func _build_ui() -> void:
 	_mp_label = _make_bar_label("MP")
 	stats.add_child(_wrap_bar(_mp_bar, _mp_label))
 
+	# The experience bar used to be a bare 3 px strip with no caption (CRITIC-P1-03:
+	# colour-only, no label, forced to 3 px against BAR_H=7). It is now a captioned
+	# row like HP/MP — "XP 30/190" beside the bar — and keeps the full BAR_H height.
 	_xp_bar = _make_bar(Color(0.62, 0.78, 0.32))
-	_xp_bar.custom_minimum_size = Vector2(BAR_W + 20, 3)
-	stats.add_child(_xp_bar)
+	_xp_label = _make_bar_label("XP")
+	stats.add_child(_wrap_bar(_xp_bar, _xp_label))
 
 	# Zone line, the fourth row of the left column, under the experience bar. It
 	# lives here rather than in the right column because that one is only 58 px
@@ -345,10 +385,25 @@ func _build_ui() -> void:
 	_prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	prompt_row.add_child(_prompt_label)
 
-	# --- quest tracker, then the controls hint on its own full-width row ---
+	# --- quest tracker + skill + controls hint, all on one dark plate ----------
+	# The bottom band used to float on the world too (CRITIC-P1-02: controls line
+	# 1.06:1). One plate behind the tracker, the skill line and the hint puts every
+	# one of them on a dark surface. The interact prompt above stays off the plate:
+	# it is transient and already high-contrast.
+	_hint_plate = PanelContainer.new()
+	_hint_plate.name = "HintPlate"
+	_hint_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hint_plate.add_theme_stylebox_override("panel", _plate_style(PLATE_COLOR))
+	column.add_child(_hint_plate)
+
+	var bottom := VBoxContainer.new()
+	bottom.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bottom.add_theme_constant_override("separation", 1)
+	_hint_plate.add_child(bottom)
+
 	_quest_label = _make_text("", Color(0.86, 0.88, 0.78))
 	_quest_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	column.add_child(_quest_label)
+	bottom.add_child(_quest_label)
 
 	# Selected skill, one compact line under the tracker. Clipped with an
 	# ellipsis so a long skill name can never push past the 480 px viewport.
@@ -356,15 +411,19 @@ func _build_ui() -> void:
 	_skill_label.clip_text = true
 	_skill_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	_skill_label.max_lines_visible = 1
-	column.add_child(_skill_label)
+	bottom.add_child(_skill_label)
 
+	# The always-visible control hint (CRITIC-P2-05): it used to omit `pause`/Esc
+	# and the four quick slots even though both are rebindable and documented. They
+	# go on a compact second line so the band stays inside 480x270. The colour is
+	# lifted onto the plate's dark surface for a clear ≥4.5:1 (was 1.06:1 on grass).
 	_hint_label = _make_text(
-		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · K навыки · F5/F9",
-		Color(0.72, 0.74, 0.7)
+		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · K навыки · F5/F9\nEsc пауза · 1–4 быстрый слот",
+		COLOR_HINT_TEXT
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	column.add_child(_hint_label)
+	bottom.add_child(_hint_label)
 
 	_build_dialogue_panel()
 	_build_inventory_panel()
@@ -597,6 +656,100 @@ func map_bound_world() -> Node:
 	return _map_panel.bound_world() if _map_panel != null else null
 
 
+# --- read-only views for the readability/accessibility checks ------------------
+# Same contract as `zone_line_text`/`clock_line_text`: a test reads what the player
+# sees and what the plates are made of without reaching into the HUD's private tree.
+
+func hp_caption_text() -> String:
+	return _hp_label.text if _hp_label != null else ""
+
+
+func mp_caption_text() -> String:
+	return _mp_label.text if _mp_label != null else ""
+
+
+func xp_caption_text() -> String:
+	return _xp_label.text if _xp_label != null else ""
+
+
+## The XP bar's minimum height in pixels. CRITIC-P1-03 flagged it forced to 3 px;
+## it must now be at least 5 (it uses BAR_H).
+func xp_bar_min_height() -> float:
+	return _xp_bar.custom_minimum_size.y if _xp_bar != null else 0.0
+
+
+## The dark plate styles behind the status block and the controls band. A test
+## asserts each is a dark, reasonably opaque StyleBoxFlat.
+func status_plate_style() -> StyleBoxFlat:
+	if _status_plate == null:
+		return null
+	return _status_plate.get_theme_stylebox("panel") as StyleBoxFlat
+
+
+func hint_plate_style() -> StyleBoxFlat:
+	if _hint_plate == null:
+		return null
+	return _hint_plate.get_theme_stylebox("panel") as StyleBoxFlat
+
+
+## The union of the on-screen HUD overlay bounds, so a test can prove the HUD stays
+## inside the 480x270 viewport at the largest font scale. Only the always-present
+## plates and the transient centred rows are measured; hidden panels contribute
+## nothing. Returns an empty Rect2 when nothing is drawn.
+func hud_content_bounds() -> Rect2:
+	var bounds := Rect2()
+	var controls: Array = [_status_plate, _hint_plate, _toast_label, _prompt_label, _boss_panel]
+	for control in controls:
+		if control == null or not is_instance_valid(control) or not control.visible:
+			continue
+		var rect := (control as Control).get_global_rect()
+		if rect.size == Vector2.ZERO:
+			continue
+		bounds = rect if bounds.size == Vector2.ZERO else bounds.merge(rect)
+	return bounds
+
+
+## The current theme font size in pixels, so a test can confirm the accessibility
+## font scale actually moved the HUD's `default_font_size`.
+func current_font_size() -> int:
+	if _root == null or _root.theme == null:
+		return 0
+	return _root.theme.default_font_size
+
+
+## The rarity colour as actually painted in the inventory list. Normally the item's
+## own tier colour; in colour-blind mode a luminance-graded variant so the tiers
+## separate by lightness, not hue alone (CRITIC-P1-11 / P2-15: rarity was colour-
+## only). Reading the colourblind flag through the Accessibility store keeps the
+## HUD free of any autoload identifier and makes the mode do something real.
+func rarity_display_color(tier: String) -> Color:
+	var base := ItemDB.rarity_color(tier)
+	var store := _accessibility()
+	if store != null and store.has_method("colorblind_enabled") and bool(store.call("colorblind_enabled")):
+		return _colorblind_rarity_color(tier, base)
+	return base
+
+
+## A colour-blind-safe rarity ramp: the tiers are re-ordered onto a monotonic
+## luminance ladder (grey -> blue -> amber -> magenta -> white-gold) so each step
+## differs in lightness, which the two common red-green colour-blindness types still
+## resolve. Only used while colour-blind mode is on.
+func _colorblind_rarity_color(tier: String, _base: Color) -> Color:
+	match tier:
+		"common":
+			return Color(0.62, 0.62, 0.64)
+		"uncommon":
+			return Color(0.45, 0.66, 0.95)
+		"rare":
+			return Color(0.98, 0.78, 0.30)
+		"epic":
+			return Color(0.80, 0.52, 0.95)
+		"legendary":
+			return Color(1.0, 0.94, 0.62)
+		_:
+			return _base
+
+
 ## The boss bar is its own centred row in the top column, between the stat row and
 ## the toast row. It is a row rather than an absolutely placed panel for one
 ## reason: a row can never overlap the HP/mana column on its left or the day-clock
@@ -685,7 +838,13 @@ func _build_dialogue_panel() -> void:
 func _build_inventory_panel() -> void:
 	_inventory_panel = PanelContainer.new()
 	_inventory_panel.set_anchors_preset(Control.PRESET_CENTER)
-	_inventory_panel.position = Vector2(-90, -70)
+	# CRITIC-P2-13: the inventory sat 6 px left of centre while every other panel is
+	# exact. With PRESET_CENTER the position is an offset from the viewport centre, so
+	# centring a panel of width W needs offset.x = -W/2. The minimum width is 168, so
+	# the offset was -90 where it should be -84. `_center_inventory_panel` re-derives
+	# it from the laid-out width on open, so it stays centred even if a long item name
+	# grows the panel past its minimum.
+	_inventory_panel.position = Vector2(-84, -70)
 	_inventory_panel.custom_minimum_size = Vector2(168, 0)
 	_inventory_panel.visible = false
 	_inventory_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.06, 0.07, 0.09, 0.97)))
@@ -785,15 +944,75 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("Q — В главное меню", Color(0.9, 0.9, 0.86)))
 
 
+## The HUD theme (CRITIC-P1-04). No pixel font ships in `assets/` and downloading
+## one is out of scope, so the honest fix is option (a): keep the built-in OS font
+## but render it hard-edged and pixel-snapped. `antialiasing = NONE` and
+## `subpixel_positioning = DISABLED` (both 0 in Godot 4.7) stop the text server
+## from blurring and sub-pixel-shifting the glyphs, so at the native 480x270 buffer
+## each glyph lands on whole pixels and the project's integer 3x nearest upscale
+## (`window/stretch/scale_mode="integer"`, `default_texture_filter=0`) keeps it
+## crisp instead of smearing an anti-aliased bitmap. The size is an integer
+## multiple of the pixel grid (see `_hud_font_size`). The limitation is recorded in
+## `docs/ARCHITECTURE.md`: this is still a proportional OS font, so glyph metrics
+## remain platform-dependent — a shipped bitmap font is the only full fix, and that
+## needs an asset we deliberately do not download here.
 func _make_theme() -> Theme:
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray([
 		"Helvetica Neue", "Arial Unicode MS", "Arial", "DejaVu Sans", "sans-serif"
 	])
+	font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
+	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
 	var theme := Theme.new()
 	theme.default_font = font
-	theme.default_font_size = 8
+	theme.default_font_size = _hud_font_size()
 	return theme
+
+
+## The theme font size in pixels: the base 8 px scaled by the accessibility font
+## scale, rounded to an integer and clamped to 8..12 (100..150 %). The clamp is
+## what keeps the HUD inside 480x270 at the largest setting; the integer rounding is
+## what keeps the glyphs on the pixel grid.
+func _hud_font_size() -> int:
+	var factor := 1.0
+	var store := _accessibility()
+	if store != null and store.has_method("font_scale_factor"):
+		factor = float(store.call("font_scale_factor"))
+	return clampi(int(round(float(BASE_FONT_SIZE) * factor)), BASE_FONT_SIZE, 12)
+
+
+## Re-applies the current accessibility font scale to the live theme. Called on the
+## `Accessibility.changed` signal so a change made in the settings screen takes
+## effect without reopening the world.
+func _apply_font_scale() -> void:
+	if _root != null and _root.theme != null:
+		_root.theme.default_font_size = _hud_font_size()
+
+
+## The Accessibility autoload by name through the scene root (the project rule that
+## nothing names an autoload as an identifier, and what keeps the HUD loading under
+## `godot --script`). Null when absent, in which case every reader falls back to the
+## shipped default.
+func _accessibility() -> Node:
+	var loop := Engine.get_main_loop() as SceneTree
+	if loop == null or loop.root == null:
+		return null
+	return loop.root.get_node_or_null("Accessibility")
+
+
+## The dark plate behind a HUD band: a flat, borderless, slightly rounded box in
+## `PLATE_COLOR`. Unlike `_panel_style` it carries no border (a border would draw a
+## hard frame around the overlay) and it adds a small content margin so text never
+## sits flush against the plate edge.
+func _plate_style(color: Color) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = color
+	sb.set_corner_radius_all(2)
+	sb.content_margin_left = 4.0
+	sb.content_margin_right = 4.0
+	sb.content_margin_top = 2.0
+	sb.content_margin_bottom = 2.0
+	return sb
 
 
 func _panel_style(color: Color) -> StyleBoxFlat:
@@ -829,7 +1048,10 @@ func _make_bar_label(prefix: String) -> Label:
 func _wrap_bar(bar: ProgressBar, label: Label) -> Control:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 3)
-	label.custom_minimum_size = Vector2(16, 0)
+	# The caption now carries the whole "HP 84/100" text (CRITIC-P1-03), so it needs
+	# room for the widest value ("MP 100/100"); a fixed minimum keeps all three bars
+	# starting on the same column instead of sliding as the numbers change width.
+	label.custom_minimum_size = Vector2(46, 0)
 	row.add_child(label)
 	row.add_child(bar)
 	return row
@@ -887,22 +1109,27 @@ func _refresh_all() -> void:
 	refresh_zone_line()
 
 
+## The bar captions now read "HP 84/100" (CRITIC-P1-03): the number used to
+## overwrite the "HP" caption, so the bar was colour-only. The caption names the
+## resource and shows current/max as text; the bar still shows the same value
+## graphically. The format is asserted by a test, so it is a contract, not a detail.
 func _on_health(current: int, maximum: int) -> void:
 	_hp_bar.max_value = maxi(1, maximum)
 	_hp_bar.value = current
-	_hp_label.text = "%d" % current
+	_hp_label.text = "HP %d/%d" % [current, maximum]
 
 
 func _on_mana(current: int, maximum: int) -> void:
 	_mp_bar.max_value = maxi(1, maximum)
 	_mp_bar.value = current
-	_mp_label.text = "%d" % current
+	_mp_label.text = "MP %d/%d" % [current, maximum]
 	_refresh_skill()
 
 
 func _on_xp(current: int, needed: int, level: int) -> void:
 	_xp_bar.max_value = maxi(1, needed)
 	_xp_bar.value = current
+	_xp_label.text = "XP %d/%d" % [current, needed]
 	_level_label.text = "Ур. %d" % level
 
 
@@ -948,10 +1175,11 @@ func _refresh_inventory() -> void:
 		var selected: bool = i == _inventory_selection
 		if selected:
 			label = "> " + label
-		# Row colour is the item's rarity colour; the selected row is lightened so
-		# the "> " cursor stays visible against every tier, from pale common-grey
-		# to bright legendary-gold.
-		var row_color := ItemDB.rarity_color(ItemDB.rarity(id))
+		# Row colour is the item's rarity colour (or its colour-blind-safe variant
+		# while that mode is on); the selected row is lightened so the "> " cursor
+		# stays visible against every tier, from pale common-grey to bright
+		# legendary-gold.
+		var row_color := rarity_display_color(ItemDB.rarity(id))
 		if selected:
 			row_color = row_color.lightened(0.35)
 		_inventory_list.add_child(_make_text(label, row_color))
@@ -976,7 +1204,7 @@ func _set_inventory_detail(item_id: String) -> void:
 	if source != "":
 		detail += " · Источник: %s" % source
 	_inventory_detail.text = detail
-	_inventory_detail.add_theme_color_override("font_color", ItemDB.rarity_color(tier))
+	_inventory_detail.add_theme_color_override("font_color", rarity_display_color(tier))
 	var unmet: PackedStringArray = []
 	var requirements := ItemDB.requirements(item_id)
 	for attr_name: String in requirements:
@@ -1694,6 +1922,7 @@ func _toggle_inventory() -> void:
 		_inventory_scroll = 0
 		_enter_held = false
 		_refresh_inventory()
+		_center_inventory_panel.call_deferred()
 	else:
 		_enter_held = false
 	_inventory_panel.visible = _inventory_open
@@ -2015,6 +2244,28 @@ func open_inventory_for_shot() -> void:
 	_enter_held = false
 	_inventory_panel.visible = true
 	_refresh_inventory()
+	_center_inventory_panel.call_deferred()
+
+
+## Re-centres the inventory panel horizontally from its laid-out width. The panel is
+## anchored to the viewport centre, but `position` on an anchored Control is the
+## absolute left in the parent, not an offset from the anchor — so centring a panel of
+## width W in a viewport of width Vp is `(Vp - W) / 2`, never `-W / 2`. (The build-time
+## `-84` only looks centred because it is authored while `_root` is still zero-sized and
+## then anchor-resizes into place; re-deriving here, after the container has sized the
+## panel to its rows, is what keeps it centred when a long item name grows it past the
+## 168 px minimum — CRITIC-P2-13.) Vertical placement is left as authored to match the
+## rest of the centred-panel family; only the horizontal off-centre is corrected.
+func _center_inventory_panel() -> void:
+	if _inventory_panel == null or not _inventory_panel.visible:
+		return
+	var viewport := get_viewport()
+	if viewport == null:
+		return
+	var vp := viewport.get_visible_rect().size
+	if vp == Vector2.ZERO or _inventory_panel.size.x <= 0.0:
+		return
+	_inventory_panel.position.x = (vp.x - _inventory_panel.size.x) * 0.5
 
 
 func is_journal_open() -> bool:
