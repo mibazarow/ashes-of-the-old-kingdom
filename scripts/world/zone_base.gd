@@ -92,6 +92,23 @@ func tile_atlas_path() -> String:
 	return ATLAS_FOREST
 
 
+## Readability (CRITIC-P1-18): the silhouette outline colour an enemy sprite
+## wears in THIS zone. The base is the light-floor default — a dark outline that
+## separates on the forest grass; the dark zones (dungeon, fortress) override
+## with a light outline so a body does not sink into dark masonry. Pure data,
+## safe on an unparented instance, and read per zone by the readability test.
+func enemy_outline_color() -> Color:
+	return Color(0.043, 0.051, 0.067)
+
+
+## Readability (CRITIC-P1-18): the body brightness scalar a type's hue is scaled
+## by in THIS zone. Dark zones brighten the body (value > 1) so it clears the
+## dark floor; light zones darken it (value < 1) so it clears the light floor.
+## The base is the forest value; every concrete zone states its own.
+func enemy_body_tint() -> Color:
+	return Color(0.5, 0.5, 0.5)
+
+
 ## Builds the runtime TileSet from the shared atlas and paints `_map` into a new
 ## TileMapLayer. The character-to-tile mapping is the project-wide one, so a zone
 ## only overrides this when it genuinely needs a different tileset.

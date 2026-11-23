@@ -288,6 +288,17 @@ func tile_atlas_path() -> String:
 	return "res://assets/sprites/tiles_fortress.png"
 
 
+## Readability (CRITIC-P1-18): the fortress floor is a dark warm brown, brighter
+## than the dungeon's, so it needs the strongest body brightening (3.4) of any
+## zone to clear >=3:1; the outline is the same light one the dungeon uses.
+func enemy_outline_color() -> Color:
+	return Color(0.910, 0.933, 0.965)
+
+
+func enemy_body_tint() -> Color:
+	return Color(3.4, 3.4, 3.4)
+
+
 func zone_id() -> String:
 	return "fortress"
 

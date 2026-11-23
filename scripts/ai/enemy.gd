@@ -139,19 +139,43 @@ void fragment() {
 }
 "
 
-static var _outline_material: ShaderMaterial = null
+## The two silhouette outline colours (CRITIC-P1-18). A single near-black
+## outline camouflaged every enemy into the dark dungeon and fortress floors, so
+## the outline is now chosen per zone: dark on the light forest/ruins floors,
+## light on the dark dungeon/fortress floors. Each clears >=3:1 against the
+## floors of the zones that use it; the zone scripts own which colour applies.
+const OUTLINE_DARK := Color(0.043, 0.051, 0.067)
+const OUTLINE_LIGHT := Color(0.910, 0.933, 0.965)
+
+## One cached ShaderMaterial per outline colour (two in practice), so the whole
+## roster shares at most two shader programs and a headless test that never
+## draws an enemy pays nothing for either.
+static var _outline_materials: Dictionary = {}
 
 
-## The one silhouette material every enemy sprite shares. Built on first use so
-## a headless test that never draws an enemy pays nothing for it.
-static func outline_material() -> ShaderMaterial:
-	if _outline_material == null:
+## The silhouette material for one outline colour, built on first use.
+static func outline_material(outline_color: Color = OUTLINE_DARK) -> ShaderMaterial:
+	var key := outline_color.to_html(false)
+	var cached: ShaderMaterial = _outline_materials.get(key)
+	if cached == null:
 		var shader := Shader.new()
 		shader.code = OUTLINE_SHADER_CODE
 		var material := ShaderMaterial.new()
 		material.shader = shader
-		_outline_material = material
-	return _outline_material
+		material.set_shader_parameter("outline_color", outline_color)
+		_outline_materials[key] = material
+		cached = material
+	return cached
+
+
+## The body modulate a type wears in a zone (CRITIC-P1-18): the type's own hue
+## and saturation at full value — so a reused placeholder sprite still reads as a
+## different creature — scaled by the zone's brightness scalar. Bright on the
+## dark floors, dark on the light ones, so the body separates from the floor it
+## stands on. Pure data; the readability test derives the same colour per zone.
+static func readable_body_tint(type: StringName, zone_scalar: Color) -> Color:
+	var base: Color = READABLE_TINTS.get(type, Color(0.6, 0.62, 0.72))
+	return Color.from_hsv(base.h, base.s, 1.0) * zone_scalar
 
 @export var kind: Kind = Kind.MELEE
 @export var enemy_type: StringName = &"ash_wolf"
@@ -303,16 +327,22 @@ func _ready() -> void:
 	# ships the shape open gets it closed on the next step instead of mid-flush.
 	_hitbox_open = not attack_shape.disabled
 	_set_hitbox(false)
-	# Readability pass (CRITIC-P1-18): the scene's authored tint is replaced by
-	# the roster's readable tint when one exists, and every sprite gets the
-	# shared 1px dark silhouette so its outline separates on any floor.
-	if READABLE_TINTS.has(enemy_type):
-		sprite_tint = READABLE_TINTS[enemy_type]
+	# Readability pass (CRITIC-P1-18): the body tint and the silhouette outline
+	# are chosen for the zone this enemy actually stands in, so no enemy
+	# camouflages into its own floor. The body keeps the type's hue (a reused
+	# placeholder sprite still reads as a different creature) at the zone's
+	# brightness; the outline flips to light on the dark floors and stays dark on
+	# the light ones. With no zone above (a bare test arena) the forest defaults
+	# apply — still a readable non-white tint over a dark silhouette.
+	var zone := _readability_zone()
+	var zone_scalar: Color = zone.call("enemy_body_tint") if zone != null else Color(0.5, 0.5, 0.5)
+	var zone_outline: Color = zone.call("enemy_outline_color") if zone != null else OUTLINE_DARK
+	sprite_tint = readable_body_tint(enemy_type, zone_scalar)
 	# NB: this engine build exposes CanvasItem's local material as `material`
 	# (with `use_parent_material`), not 4.x `material_override` — verified
 	# against the live property list; assigning the latter fails at runtime
 	# with "Invalid assignment of property or key 'material_override'".
-	sprite.material = outline_material()
+	sprite.material = outline_material(zone_outline)
 	# The warning shape: cool saturated fill over a hard dark outline (the
 	# outline is a sibling so the telegraph's own alpha ramp never fades it).
 	telegraph.color = TELEGRAPH_FILL
@@ -1027,6 +1057,21 @@ func _world_node() -> Node:
 			_world = parent
 			return _world
 		parent = parent.get_parent()
+	return null
+
+
+## The zone node that decides this enemy's readability colours (CRITIC-P1-18):
+## the nearest ancestor that answers both `enemy_body_tint` and
+## `enemy_outline_color` (a ZoneBase). Null in a bare test arena, where _ready
+## falls back to the forest defaults. Kept separate from `_world_node` because a
+## stand-in world that only answers `cell_at` must not be mistaken for a zone
+## that has chosen readability colours.
+func _readability_zone() -> Node:
+	var node := get_parent()
+	while node != null:
+		if node.has_method("enemy_body_tint") and node.has_method("enemy_outline_color"):
+			return node
+		node = node.get_parent()
 	return null
 
 

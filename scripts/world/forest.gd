@@ -247,6 +247,17 @@ func tile_atlas_path() -> String:
 	return "res://assets/sprites/tiles_forest.png"
 
 
+## Readability (CRITIC-P1-18): the forest floor is the lightest in the game, so
+## enemies keep the dark silhouette and a moderately darkened body — both clear
+## >=3:1 against the bright grass and dirt.
+func enemy_outline_color() -> Color:
+	return Color(0.043, 0.051, 0.067)
+
+
+func enemy_body_tint() -> Color:
+	return Color(0.5, 0.5, 0.5)
+
+
 func zone_id() -> String:
 	return "forest"
 

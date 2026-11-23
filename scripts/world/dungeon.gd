@@ -241,6 +241,19 @@ func tile_atlas_path() -> String:
 	return "res://assets/sprites/tiles_dungeon.png"
 
 
+## Readability (CRITIC-P1-18): the dungeon floor is near-black blue masonry, so
+## the dark silhouette that works in the forest would vanish here. The outline
+## flips to light and the body is brightened (value > 1) so both separate from
+## the dark floor; the body's own near-black shading pixels are framed by the
+## light outline, which is what keeps the silhouette readable.
+func enemy_outline_color() -> Color:
+	return Color(0.910, 0.933, 0.965)
+
+
+func enemy_body_tint() -> Color:
+	return Color(2.6, 2.6, 2.6)
+
+
 func zone_id() -> String:
 	return "dungeon"
 

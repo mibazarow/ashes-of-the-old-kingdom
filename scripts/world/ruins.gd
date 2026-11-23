@@ -236,6 +236,17 @@ func tile_atlas_path() -> String:
 	return "res://assets/sprites/tiles_ruins.png"
 
 
+## Readability (CRITIC-P1-18): the ruins floor is a mid-tone grey, the hardest
+## to separate from, so the body is driven darker than the forest's (0.32) to
+## clear >=3:1 against it while the outline stays dark.
+func enemy_outline_color() -> Color:
+	return Color(0.043, 0.051, 0.067)
+
+
+func enemy_body_tint() -> Color:
+	return Color(0.32, 0.32, 0.32)
+
+
 func zone_id() -> String:
 	return "ruins"
 

@@ -2092,16 +2092,18 @@ func _check_original_enemy_defaults(who: String, node: Node) -> void:
 		"%s keeps windup_multiplier 1.0" % who)
 	_check(not bool(node.get("charge_on_sight")), "%s keeps charge_on_sight false" % who)
 	# The white tint is gone on purpose (CRITIC-P1-18): every roster type now
-	# carries the readable tint the Enemy script applies in _ready, so the
-	# original pair is checked against that contract instead of against white.
+	# wears a zone-aware readable tint the Enemy script applies in _ready (the
+	# type's hue at its zone's brightness), so the original pair is checked
+	# against that contract — a non-white tint, consistent on the sprite — rather
+	# than against a single fixed colour, which no longer exists across zones.
 	var enemy_cls: GDScript = load("res://scripts/ai/enemy.gd")
 	var readable_tints: Dictionary = enemy_cls.get("READABLE_TINTS")
 	var readable: Color = readable_tints[node.get("enemy_type")]
-	_check(readable != Color.WHITE, "%s readable roster tint is not the old white" % who)
-	_check((node.get("sprite_tint") as Color).is_equal_approx(readable),
-		"%s carries its readable roster tint" % who)
+	_check(readable != Color.WHITE, "%s roster hue entry is not the old white" % who)
+	var applied: Color = node.get("sprite_tint")
+	_check(applied != Color.WHITE, "%s carries a non-white readable tint" % who)
 	var spr := node.get_node_or_null("Sprite2D") as Sprite2D
-	_check(spr != null and spr.modulate.is_equal_approx(readable),
+	_check(spr != null and spr.modulate.is_equal_approx(applied),
 		"%s sprite wears the readable tint" % who)
 
 
@@ -11523,12 +11525,96 @@ func _atlas_floor_max_share(path: String) -> float:
 	return float(best) / 512.0
 
 
-## Shortest hue distance in degrees between two colours, the way "outside the
-## floor's colour family" is measured: a tint at least this far from every
-## floor hue of its zones cannot read as more floor.
-func _hue_separation_deg(a: Color, b: Color) -> float:
-	var d := absf(a.h - b.h)
-	return minf(d, 1.0 - d) * 360.0
+## The sprite's own image, decoded from the PNG bytes its texture points at, so
+## the readability measurement reads the pixels the generator wrote rather than
+## whatever the import pipeline stored. Falls back to the live texture when a
+## sprite has no on-disk path (a procedurally drawn stand-in).
+func _sprite_image(spr: Sprite2D) -> Image:
+	if spr == null or spr.texture == null:
+		return null
+	var path := spr.texture.resource_path
+	if path.is_empty():
+		return spr.texture.get_image()
+	return _atlas_image(path)
+
+
+## Reproduces the enemy outline shader on one sprite over one floor colour and
+## reports how much of the RENDERED silhouette separates from that floor.
+##
+## The shader paints body pixels as `tex * modulate` (the zone-aware tint) and a
+## 1px ring of `outline_color` on the transparent pixels just outside the sprite.
+## The composite is CLAMPED to [0,1] exactly as the LDR canvas framebuffer does
+## before display: a dark-zone body scalar (>1) drives `tex * modulate` past 1.0,
+## and the GPU shows white there, not a super-bright colour. Measuring the
+## unclamped value would overstate how many pixels clear 3:1 (the fortress
+## cultist_caster measured 78.9% unclamped against 65.0% as actually rendered),
+## so every contrast here is computed on the clamped pixel the player sees.
+##
+## A rendered pixel is DIRECT when it clears 3:1 against the floor; it is
+## SEPARATED when it is direct OR 4-connected to a direct pixel — the outline is
+## a sanctioned separator, and a sprite's own near-black shading (36% of the
+## wolf) cannot clear 3:1 on a dark floor by any modulate, so the outline framing
+## those pixels keeps the silhouette readable. But a ring alone must not pass an
+## invisible body, so `interior_direct` counts ONLY the sprite's own opaque body
+## pixels that clear 3:1 against the floor, independent of the outline. A body
+## that is identical to its floor scores interior_direct 0 no matter how bright
+## its ring is, which is the clause that stops "a bright outline around nothing".
+## `outline_contrast` is the outline colour against the floor on its own.
+func _silhouette_separation(img: Image, tint: Color, outline: Color, floor: Color) -> Dictionary:
+	if img == null:
+		return {"separated": 0.0, "direct": 0.0, "interior_direct": 0.0, "outline_contrast": 0.0}
+	var w := img.get_width()
+	var h := img.get_height()
+	var opaque := {}
+	for y in range(h):
+		for x in range(w):
+			if img.get_pixel(x, y).a >= 0.5:
+				opaque["%d,%d" % [x, y]] = true
+	var rendered := {}
+	var is_body := {}
+	for y in range(h):
+		for x in range(w):
+			var key := "%d,%d" % [x, y]
+			if opaque.has(key):
+				var c := img.get_pixel(x, y)
+				rendered[key] = Color(clampf(c.r * tint.r, 0.0, 1.0),
+					clampf(c.g * tint.g, 0.0, 1.0), clampf(c.b * tint.b, 0.0, 1.0))
+				is_body[key] = true
+			else:
+				for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+					if opaque.has("%d,%d" % [x + d.x, y + d.y]):
+						rendered[key] = outline
+						break
+	var total := rendered.size()
+	var body_total := is_body.size()
+	if total == 0:
+		return {"separated": 0.0, "direct": 0.0, "interior_direct": 0.0, "outline_contrast": 0.0}
+	var readable := {}
+	var direct := 0
+	var interior_direct := 0
+	for key: String in rendered.keys():
+		if _wcag_contrast(rendered[key], floor) >= 3.0:
+			readable[key] = true
+			direct += 1
+			if is_body.has(key):
+				interior_direct += 1
+	var separated := direct
+	for key: String in rendered.keys():
+		if readable.has(key):
+			continue
+		var parts := key.split(",")
+		var x := int(parts[0])
+		var y := int(parts[1])
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			if readable.has("%d,%d" % [x + d.x, y + d.y]):
+				separated += 1
+				break
+	return {
+		"separated": float(separated) / float(total),
+		"direct": float(direct) / float(total),
+		"interior_direct": (float(interior_direct) / float(body_total)) if body_total > 0 else 0.0,
+		"outline_contrast": _wcag_contrast(outline, floor),
+	}
 
 
 ## Where each roster type actually spawns, read off the zone scripts' scene
@@ -11565,6 +11651,16 @@ const READABLE_ATLASES: Dictionary = {
 	"ruins": "res://assets/sprites/tiles_ruins.png",
 	"dungeon": "res://assets/sprites/tiles_dungeon.png",
 	"fortress": "res://assets/sprites/tiles_fortress.png",
+}
+
+## The script that owns each zone's readability colours (outline + body scalar).
+## The test reads them off the scripts themselves, so it measures the shipped
+## per-zone choices rather than a copy kept in this file.
+const READABLE_ZONE_SCRIPTS: Dictionary = {
+	"forest": "res://scripts/world/forest.gd",
+	"ruins": "res://scripts/world/ruins.gd",
+	"dungeon": "res://scripts/world/dungeon.gd",
+	"fortress": "res://scripts/world/fortress.gd",
 }
 
 
@@ -11777,18 +11873,40 @@ func _test_enemy_roster() -> void:
 	await process_frame
 
 	# --- 2b. readability: no enemy camouflages into its own zone (CRITIC-P1-18) -
-	# Every scene in scenes/enemies, run through _ready in the tree, must come
-	# out with (a) the shared 1px dark silhouette material on its sprite, (b) a
-	# non-default readable tint, and (c) a body hue that is either 45 degrees or
-	# more away from every floor colour of every zone it spawns in, or clears
-	# 3:1 against those floors outright. The floors are decoded from the four
-	# per-zone atlases, so this measures the shipped palette, not a copy.
+	# Every scene in scenes/enemies, run through _ready in the tree, must come out
+	# with (a) the shared silhouette outline material on its sprite and (b) a
+	# non-white readable tint, and (c) for every zone it spawns in, its RENDERED
+	# sprite — body pixels modulated by the zone-aware tint plus the 1px outline
+	# ring the shader paints — must separate from that zone's floor.
+	#
+	# This replaces the old hue loophole, which passed a sprite when its flat tint
+	# sat 45 degrees from the floor hue even if every pixel matched the floor in
+	# luminance (the verifier measured 0 of 23 sprites clearing the bar). There is
+	# no hue escape here: only real composite pixels against the shipped atlas
+	# floors are measured, clamped to [0,1] as the LDR framebuffer shows them. A
+	# pixel counts as separated when it clears 3:1 against the floor OR is
+	# 4-connected to a pixel that does — the outline is a sanctioned separator,
+	# and a sprite's own near-black shading (36% of the wolf) cannot clear 3:1 on
+	# a dark floor by any modulate, so the light outline framing those pixels
+	# keeps the silhouette readable. Three hard clauses keep it honest: the
+	# outline colour must clear 3:1 against the floor; at least half the rendered
+	# pixels must clear 3:1 directly; and at least half the sprite's OWN body
+	# pixels (interior_direct, ring excluded) must clear 3:1 against the floor —
+	# so a body identical to the floor fails no matter how bright its ring is,
+	# and a thin outline cannot carry an otherwise invisible creature.
 	var enemy_cls: GDScript = load("res://scripts/ai/enemy.gd")
 	var readable_tints: Dictionary = enemy_cls.get("READABLE_TINTS")
-	var zone_floors := {}
+	# Per-zone readability colours, read off the zone scripts themselves.
+	var zone_readability := {}
 	for zone_id: String in READABLE_ATLASES.keys():
-		var floors: Dictionary = _atlas_floor_colors(String(READABLE_ATLASES[zone_id]))
-		zone_floors[zone_id] = [floors["grass"], floors["dirt"]]
+		var zscript: GDScript = load(String(READABLE_ZONE_SCRIPTS[zone_id]))
+		var zinst: Node = zscript.new()
+		zone_readability[zone_id] = {
+			"outline": zinst.call("enemy_outline_color"),
+			"scalar": zinst.call("enemy_body_tint"),
+			"floors": _atlas_floor_colors(String(READABLE_ATLASES[zone_id])),
+		}
+		zinst.free()
 	var readability_dir := DirAccess.open("res://scenes/enemies")
 	var readability_files: Array[String] = []
 	if readability_dir != null:
@@ -11810,22 +11928,34 @@ func _test_enemy_roster() -> void:
 		# `material_override` (see the note in Enemy._ready).
 		var mat := (spr.material if spr != null else null) as ShaderMaterial
 		_check(mat != null and mat.shader != null,
-			"%s draws the 1px dark silhouette (outline shader on the sprite)" % type)
+			"%s draws the silhouette outline (outline shader on the sprite)" % type)
 		_check(readable_tints.has(StringName(type))
-			and (inst.get("sprite_tint") as Color).is_equal_approx(readable_tints[StringName(type)])
-			and (inst.get("sprite_tint") as Color) != Color.WHITE,
-			"%s carries a readable non-default sprite_tint" % type)
-		var tint: Color = inst.get("sprite_tint")
+				and (inst.get("sprite_tint") as Color) != Color.WHITE,
+			"%s carries a readable non-white sprite_tint" % type)
+		var sprite_img := _sprite_image(spr)
 		var offenders: Array[String] = []
 		for zone_id: String in (READABLE_SPAWN_ZONES.get(StringName(type), []) as Array):
-			for floor_c: Color in (zone_floors[zone_id] as Array):
-				if _hue_separation_deg(tint, floor_c) < 45.0 \
-						and _wcag_contrast(tint, floor_c) < 3.0:
-					offenders.append("%s %s (hue %.0f deg, %.2f:1)"
-						% [zone_id, floor_c.to_html(false),
-							_hue_separation_deg(tint, floor_c), _wcag_contrast(tint, floor_c)])
+			var zr: Dictionary = zone_readability[zone_id]
+			var tint: Color = enemy_cls.call("readable_body_tint",
+				StringName(type), zr["scalar"] as Color)
+			for floor_key: String in ["grass", "dirt"]:
+				var floor_c: Color = (zr["floors"] as Dictionary)[floor_key]
+				var res := _silhouette_separation(sprite_img, tint, zr["outline"] as Color, floor_c)
+				if float(res["outline_contrast"]) < 3.0:
+					offenders.append("%s/%s outline %.2f:1" % [zone_id, floor_key, res["outline_contrast"]])
+				if float(res["separated"]) < 0.90:
+					offenders.append("%s/%s separated %.0f%%" % [zone_id, floor_key, 100.0 * res["separated"]])
+				if float(res["direct"]) < 0.50:
+					offenders.append("%s/%s direct %.0f%%" % [zone_id, floor_key, 100.0 * res["direct"]])
+				# The body itself, not its ring, must separate from the floor: at
+				# least half the sprite's OWN opaque pixels clear 3:1 against it.
+				# This is the clause a bright outline cannot satisfy on its own —
+				# a body identical to the floor scores interior_direct 0 however
+				# bright its ring is, so "a bright outline around nothing" fails.
+				if float(res["interior_direct"]) < 0.50:
+					offenders.append("%s/%s interior %.0f%%" % [zone_id, floor_key, 100.0 * res["interior_direct"]])
 		_check(offenders.is_empty(),
-			"%s body colour sits outside the floor family of every zone it spawns in (%s)"
+			"%s silhouette separates from the floor of every zone it spawns in (%s)"
 				% [type, ", ".join(offenders)])
 		inst.queue_free()
 	_clear_enemies()

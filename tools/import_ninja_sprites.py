@@ -478,14 +478,19 @@ SOURCES = {
 # grass RGB(173,188,58) measured 65%/79%/39%/92% of the sampled floor in
 # forest/ruins/dungeon/fortress. --zone-variants derives four atlases from the
 # shipped tiles.png with deterministic integer shifts (no source pack needed)
-# and adds a fixed 16-step luminance dither to the two flat floor cells so no
-# single RGB value can dominate a zone's floor sample.
+# and adds a fixed 16-step luminance dither to all three floor cells (grass,
+# dirt and stone) so no single RGB value can dominate a zone's floor sample.
+# Stone is dithered too because a wall-heavy zone (the dungeon) shows mostly
+# masonry on screen, and a flat stone tile there was the single most common
+# rendered pixel (CRITIC-P1-01: dungeon dominant 30.55%).
 #
 # The shifts put each zone in its own luminance band so every pair of zone
-# floors clears 1.5:1 WCAG contrast: forest keeps the original green (L~0.45),
-# ruins becomes a desaturated warm stone-grey (L~0.23), fortress a deep warm
-# brown-grey (L~0.12), dungeon a cold dark blue-grey (L~0.06). Luminance is
-# computed with the WCAG sRGB transfer function, not the Rec.601 luma above.
+# floors clears 1.5:1 WCAG contrast on both the mean and the dominant pixel:
+# forest keeps the original green (grass L~0.45), ruins a desaturated warm
+# stone-grey (grass L~0.24), fortress a deep warm brown-grey (grass L~0.10),
+# dungeon a cold dark blue-grey (stone L~0.03, its dominant on screen).
+# Luminance is computed with the WCAG sRGB transfer function, not the Rec.601
+# luma above.
 ZONE_SHIFTS = ("forest", "ruins", "dungeon", "fortress")
 
 
@@ -496,25 +501,25 @@ def shift_forest(rgb):
 def shift_ruins(rgb):
     r, g, b = rgb
     gray = (r * 30 + g * 59 + b * 11) // 100
-    return (min(255, gray * 200 // 256 + 8),
-            min(255, gray * 192 // 256 + 5),
-            min(255, gray * 172 // 256 + 4))
+    return (min(255, gray * 200 // 256 + 13),
+            min(255, gray * 188 // 256 + 10),
+            min(255, gray * 166 // 256 + 8))
 
 
 def shift_dungeon(rgb):
     r, g, b = rgb
     gray = (r * 30 + g * 59 + b * 11) // 100
-    return (min(255, gray * 44 // 256 + 28),
-            min(255, gray * 56 // 256 + 30),
-            min(255, gray * 88 // 256 + 40))
+    return (min(255, gray * 40 // 256 + 16),
+            min(255, gray * 52 // 256 + 18),
+            min(255, gray * 84 // 256 + 26))
 
 
 def shift_fortress(rgb):
     r, g, b = rgb
     gray = (r * 30 + g * 59 + b * 11) // 100
-    return (min(255, gray * 128 // 256 + 32),
-            min(255, gray * 104 // 256 + 28),
-            min(255, gray * 72 // 256 + 22))
+    return (min(255, gray * 150 // 256 + 11),
+            min(255, gray * 122 // 256 + 5),
+            min(255, gray * 78 // 256 + 6))
 
 
 ZONE_SHIFT_FNS = {
@@ -556,69 +561,110 @@ def wcag_contrast(a, b):
 
 
 def zone_variant_grid(base, shift_fn):
-    """One 64x16 per-zone atlas: shift every cell, dither the two floor cells."""
+    """One 64x16 per-zone atlas: shift every cell, dither all four cells.
+
+    Grass, dirt, stone AND tree are dithered. Stone was previously left flat,
+    which is what let the dungeon read as 30.55% of one colour on screen: the
+    undercroft is mostly masonry, so the flat stone tile — not the dithered
+    grass — was the single most common pixel in the rendered frame (CRITIC-P1-01).
+    The tree tile is dithered for the same reason: a flat dark bush spikes to
+    ~5% of a forest frame and can out-count grass as that zone's dominant pixel,
+    which then reads as forest sharing the dungeon's dark band. Dithering is
+    mean-preserving, so the tree-vs-grass luminance gap the importer asserts on
+    is untouched; only the single-value spike is spread across 16 shades so no
+    RGB can dominate a zone's floor sample however the map weights the cells.
+    """
     out = blank(64, 16)
     for y in range(16):
         for x in range(64):
             r, g, b, a = base[y][x]
             rgb = shift_fn((r, g, b))
-            if x < 32:  # grass and dirt are the flat floor cells
-                rgb = dither(rgb, x, y)
+            rgb = dither(rgb, x, y)
             out[y][x] = (rgb[0], rgb[1], rgb[2], a)
     return out
 
 
 def zone_floor_stats(grid):
-    """(grass_mean, dirt_mean, max_single_rgb_share) over the floor cells."""
+    """(grass_mean, dirt_mean, stone_mean, max_single_rgb_share) over the floor.
+
+    The share is measured across all three floor cells (grass, dirt, stone —
+    x < 48), not just the two walkable ones, because the walls are part of the
+    floor the eye samples and the colour the CRITIC-P1-01 dominant-value test
+    actually hits in a wall-heavy zone like the dungeon.
+    """
     from collections import Counter  # local: the tool stays import-light
     counts = Counter()
     gsum = [0, 0, 0]
     dsum = [0, 0, 0]
+    ssum = [0, 0, 0]
     for y in range(16):
-        for x in range(32):
+        for x in range(48):
             rgb = grid[y][x][:3]
             counts[rgb] += 1
-            target = gsum if x < 16 else dsum
+            target = gsum if x < 16 else (dsum if x < 32 else ssum)
             for i in range(3):
                 target[i] += rgb[i]
     total = sum(counts.values())
     gm = tuple(v // 256 for v in gsum)
     dm = tuple(v // 256 for v in dsum)
-    return gm, dm, max(counts.values()) / float(total)
+    sm = tuple(v // 256 for v in ssum)
+    return gm, dm, sm, max(counts.values()) / float(total)
+
+
+def zone_dominant_floor(grid):
+    """The single most common RGB across the three floor cells (x < 48)."""
+    from collections import Counter
+    counts = Counter(grid[y][x][:3] for y in range(16) for x in range(48))
+    return counts.most_common(1)[0][0]
 
 
 def generate_zone_variants(outdir):
     """Derive the four per-zone atlases from the shipped tiles.png and verify
-    the CRITIC-P1-01 closing conditions: no RGB above 20% of a zone's floor
-    sample, and pairwise zone floor contrast at or above 1.5:1."""
+    the CRITIC-P1-01 closing conditions over all three floor cells (grass, dirt,
+    stone): no RGB above 20% of a zone's floor sample, and pairwise zone floor
+    contrast at or above 1.5:1 on both the mean floor colour and the single
+    dominant floor pixel (the metric the CRITIC measured on the rendered frame).
+    """
     src = os.path.join(outdir, "tiles.png")
     if not os.path.isfile(src):
         raise SystemExit("ERROR: --zone-variants needs %s to exist first" % src)
     w, h, base = load_rgba(src)
     assert (w, h) == (64, 16), "unexpected tiles.png size %dx%d" % (w, h)
     means = {}
+    doms = {}
     print("backend: %s" % ("PIL" if HAVE_PIL else "pure-Python"))
     for zone in ZONE_SHIFTS:
         grid = zone_variant_grid(base, ZONE_SHIFT_FNS[zone])
         name = "tiles_%s.png" % zone
         save_rgba(os.path.join(outdir, name), 64, 16, grid)
-        gm, dm, share = zone_floor_stats(grid)
-        means[zone] = (gm, dm)
+        gm, dm, sm, share = zone_floor_stats(grid)
+        means[zone] = gm
+        doms[zone] = zone_dominant_floor(grid)
         print("  wrote %-19s grass mean %s (L %.3f)  dirt mean %s (L %.3f)  "
-              "max rgb share %.1f%%" % (name, gm, wcag_lum(gm), dm,
-                                        wcag_lum(dm), share * 100))
+              "stone mean %s (L %.3f)  dominant %s (L %.3f)  max rgb share %.1f%%"
+              % (name, gm, wcag_lum(gm), dm, wcag_lum(dm), sm, wcag_lum(sm),
+                 doms[zone], wcag_lum(doms[zone]), share * 100))
         assert share <= 0.20, "%s: one RGB holds %.1f%% of the floor sample" \
             % (zone, share * 100)
-    worst = None
+    worst_mean = None
+    worst_dom = None
     for i, za in enumerate(ZONE_SHIFTS):
         for zb in ZONE_SHIFTS[i + 1:]:
-            c = wcag_contrast(means[za][0], means[zb][0])
-            print("  floor contrast %-8s vs %-8s: %.2f" % (za, zb, c))
-            assert c >= 1.5, "%s/%s floor contrast %.2f below 1.5" % (za, zb, c)
-            if worst is None or c < worst[0]:
-                worst = (c, za, zb)
-    print("  weakest pair: %s/%s at %.2f (>= 1.5 required)" % (worst[1],
-                                                                worst[2], worst[0]))
+            cm = wcag_contrast(means[za], means[zb])
+            cd = wcag_contrast(doms[za], doms[zb])
+            print("  floor contrast %-8s vs %-8s: mean %.2f  dominant %.2f"
+                  % (za, zb, cm, cd))
+            assert cm >= 1.5, "%s/%s mean floor contrast %.2f below 1.5" % (za, zb, cm)
+            assert cd >= 1.5, "%s/%s dominant-pixel floor contrast %.2f below 1.5" \
+                % (za, zb, cd)
+            if worst_mean is None or cm < worst_mean[0]:
+                worst_mean = (cm, za, zb)
+            if worst_dom is None or cd < worst_dom[0]:
+                worst_dom = (cd, za, zb)
+    print("  weakest mean pair:      %s/%s at %.2f (>= 1.5 required)"
+          % (worst_mean[1], worst_mean[2], worst_mean[0]))
+    print("  weakest dominant pair:  %s/%s at %.2f (>= 1.5 required)"
+          % (worst_dom[1], worst_dom[2], worst_dom[0]))
 
 
 def resolve(srcdir, rel):
