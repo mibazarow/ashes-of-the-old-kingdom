@@ -226,11 +226,19 @@ func _spacer(height: float) -> Control:
 	return spacer
 
 
+## The menu theme (CRITIC-P1-04). The menu builds its own `Theme` rather than
+## inheriting the HUD's, so the raster settings that keep text hard-edged on the
+## native 480x270 buffer have to be repeated here: without them the menu alone
+## kept drawing anti-aliased, sub-pixel-shifted OS glyphs over pixel art while the
+## in-world HUD next to it did not. Kept in lockstep with `hud.gd::_make_theme()`
+## by the `main_menu` test group, which reads the live theme of both.
 func _make_theme() -> Theme:
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray([
 		"Helvetica Neue", "Arial Unicode MS", "Arial", "DejaVu Sans", "sans-serif"
 	])
+	font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
+	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
 	var theme := Theme.new()
 	theme.default_font = font
 	theme.default_font_size = 8

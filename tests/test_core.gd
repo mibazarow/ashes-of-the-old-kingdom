@@ -2424,6 +2424,40 @@ func _test_map_panel() -> void:
 		await process_frame
 		_check(int(hud.call("current_font_size")) == 8, "the HUD font returns to 8 px after reset")
 
+	# --- how the theme font is rasterised (CRITIC-P1-04) ---------------------
+	# No pixel font in the local asset packs covers Cyrillic — measured, not
+	# assumed: `NormalFont.ttf`, `font8x8.png` and `font24x30.png` from the Ninja
+	# Adventure pack carry 0 of the 66 Cyrillic code points this UI draws (see
+	# `docs/ASSET_CREDITS.md`). Shipping one would replace every Russian string with
+	# missing-glyph boxes, so the theme deliberately keeps the OS face and turns the
+	# text server's smoothing off instead. Those two properties are the whole of the
+	# fix, so they are read back off the live theme rather than trusted from source.
+	var hud_font: Font = hud.call("theme_font") as Font
+	_check(hud_font != null, "the HUD theme carries a default font")
+	if hud_font != null:
+		_check(int(hud_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_NONE),
+			"the HUD font is rasterised without anti-aliasing (got %d)"
+			% int(hud_font.antialiasing))
+		_check(int(hud_font.subpixel_positioning)
+			== int(TextServer.SUBPIXEL_POSITIONING_DISABLED),
+			"the HUD font is snapped to whole pixels (got %d)"
+			% int(hud_font.subpixel_positioning))
+		# The theme reads no font file at all, so a missing asset cannot crash it and
+		# there is no half-loaded state to fall out of. What still has to hold is that
+		# the face it does resolve paints Russian: a zero-width string or a missing
+		# code point here means the HUD draws boxes where the player reads text.
+		var cyrillic_width: float = hud_font.get_string_size("Зона: Подземелье",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 8).x
+		_check(cyrillic_width > 0.0,
+			"the HUD font paints Cyrillic at 8 px instead of empty boxes (width %.1f)"
+			% cyrillic_width)
+		var uncovered := 0
+		for cp in [1040, 1044, 1046, 1051, 1057, 1072, 1076, 1078, 1085, 1105]:
+			if not hud_font.has_char(cp):
+				uncovered += 1
+		_check(uncovered == 0,
+			"the HUD font covers the sampled Cyrillic letters (missing %d)" % uncovered)
+
 	# Colour-blind mode must change the rarity colour, so the mode does something
 	# real rather than being a dead toggle (CRITIC-P2-15: rarity was hue-only).
 	if acc != null:
@@ -2568,6 +2602,20 @@ func _test_world_chests() -> void:
 				or String(world.call("cell_at", spear_lm.get("tile", Vector2i(-1, -1)))) == ","),
 		"the spear landmark tile is walkable")
 
+	# --- what each find actually draws ----------------------------------------
+	# `scenes/items/pickup.tscn` is authored with potion.png because the oldest find
+	# in the forest is a potion, so every other pickup has to name its own art or it
+	# lies about what is lying in the grass. The coin is the case that matters: a
+	# purse of gold drawn as a red flask reads as a drink, and a test that only
+	# counts pickups or checks the loot cannot see it.
+	var coin_path := _pickup_sprite_path("PickupCoin")
+	_check(coin_path == "res://assets/sprites/coin.png",
+		"the coin pickup draws coin.png (got '%s')" % coin_path)
+	_check(coin_path != "res://assets/sprites/potion.png",
+		"the coin pickup does not fall back to the scene's potion sprite")
+	_check(_pickup_sprite_path("PickupFlask") == "res://assets/sprites/potion.png",
+		"the flask pickup still draws the potion it hands out")
+
 	# --- opening the spear chest: one spear, no gold, only its own flag --------
 	gs.reset()
 	var gold_before: int = gs.gold
@@ -2626,6 +2674,21 @@ func _find_pickups() -> Array[Node]:
 	for node in get_nodes_in_group("pickup"):
 		out.append(node)
 	return out
+
+
+## The texture one ground find draws, "" when it draws nothing at all. What a
+## pickup looks like is the only information a player gets before walking into it,
+## and a wrong picture is invisible to a test that checks the loot, so it is read
+## back off the live sprite.
+func _pickup_sprite_path(pickup_name: String) -> String:
+	for node in _find_pickups():
+		if String(node.name) != pickup_name:
+			continue
+		var sprite := node.get_node_or_null("Sprite2D") as Sprite2D
+		if sprite != null and sprite.texture != null:
+			return String(sprite.texture.resource_path)
+		return ""
+	return ""
 
 
 ## Tile a world node occupies, using the same 16 px grid the Forest exposes.
@@ -5822,6 +5885,53 @@ func _test_inventory_equip() -> void:
 	await _tap_key(KEY_S)
 	_check(int(hud.call("inventory_selection")) == 9, "move_down at the bottom stays clamped at the last row")
 
+	# --- what the rows draw, and whether the panel still fits ------------------
+	# A row that carries an item icon is a 16 px row instead of one 10 px text line,
+	# so eight of them plus the stats, detail and quick-slot lines measure past the
+	# bottom of a 270 px viewport when the panel hangs from its authored -70 offset.
+	# The invariant the player cares about is not the offset but that the panel is
+	# entirely on screen and sits on the vertical middle.
+	var panel_top: float = inv_panel.global_position.y
+	var vp_h: float = hud.get_viewport().get_visible_rect().size.y
+	# The height is read the way `hud.gd` reads it when it places the panel: from the
+	# container's minimum. A headless run never resizes the window, so the anchored
+	# `size.y` is still settling and measured 216 px against the 189 px the rows
+	# actually need.
+	var panel_h := float(inv_panel.get_combined_minimum_size().y)
+	var panel_bottom: float = panel_top + panel_h
+	_check(panel_h > 0.0 and panel_h <= vp_h,
+		"the panel needs less than the viewport (needs %.1f of %.0f)" % [panel_h, vp_h])
+	_check(panel_top >= -0.01 and panel_bottom <= vp_h + 0.01,
+		"the full inventory panel stays inside the viewport (y %.1f..%.1f of %.0f)"
+		% [panel_top, panel_bottom, vp_h])
+	_check(absf((panel_top + panel_bottom) * 0.5 - vp_h * 0.5) < 1.0,
+		"a panel that fits is centred vertically (centre %.1f vs viewport %.1f)"
+		% [(panel_top + panel_bottom) * 0.5, vp_h * 0.5])
+	# The scrolled window holds the five stacks from leather_armor down to
+	# rusted_seal plus the three synthetic ids that are not in the item table at
+	# all, which is exactly the split the row builder has to get right: a known
+	# item draws its bitmap, an unknown one falls back to text rather than to a
+	# broken or borrowed picture.
+	var row_icons: PackedStringArray = hud.call("inventory_row_icon_paths")
+	_check(row_icons.size() == rows.size(),
+		"every visible row reports its icon slot (%d icons vs %d rows)"
+		% [row_icons.size(), rows.size()])
+	var icon_broken := ""
+	var drawn := 0
+	var bare := 0
+	for i in range(row_icons.size()):
+		var icon_path := row_icons[i]
+		if icon_path == "":
+			bare += 1
+			continue
+		drawn += 1
+		if not ResourceLoader.exists(icon_path):
+			icon_broken = "row %d draws a missing texture '%s'" % [i, icon_path]
+	_check(icon_broken == "", "every drawn inventory icon resolves to a file (%s)" % icon_broken)
+	_check(drawn == 5 and bare == 3,
+		"five known items draw icons and the three unknown stacks draw none (got %d drawn, %d bare)"
+		% [drawn, bare])
+
 	# --- leave no residue for later groups -----------------------------------
 	await _tap_key(KEY_I)   # close
 	gs.ui_blocking = false
@@ -6201,6 +6311,41 @@ func _test_item_rarity() -> void:
 			bad_ids.append(item_id)
 	_check(not all.is_empty(), "the item table is not empty")
 	_check(described_ok, "every item has a non-empty valid rarity, icon and source (bad: %s)" % ", ".join(bad_ids))
+
+	# --- every item also names an inventory icon that exists on disk -----------
+	# The `icon` field above is a text glyph; the inventory row additionally draws a
+	# 16x16 bitmap, and a path in the data that points at nothing is silent: the row
+	# simply loses its picture and only a screenshot would notice. So the declared
+	# paths are resolved here, and every resolved one is measured, because the HUD
+	# reserves exactly `hud.gd::ICON_SIZE_PX` for the cell.
+	var icon_paths_ok := true
+	var icon_bad: PackedStringArray = []
+	var icon_missing: PackedStringArray = []
+	var icon_wrong_size: PackedStringArray = []
+	for item_id: String in all.keys():
+		var def: Dictionary = all[item_id]
+		var declared := String(def.get("icon_texture", ""))
+		if declared == "":
+			icon_paths_ok = false
+			icon_missing.append(item_id)
+			continue
+		if not ResourceLoader.exists(declared):
+			icon_paths_ok = false
+			icon_bad.append(item_id)
+			continue
+		if ItemDB.icon_texture(item_id) != declared:
+			icon_paths_ok = false
+			icon_bad.append(item_id)
+		var tex := load(declared) as Texture2D
+		if tex == null or tex.get_size() != Vector2(16, 16):
+			icon_wrong_size.append(item_id)
+	_check(icon_paths_ok,
+		"every item names an icon_texture that resolves (missing: %s | broken: %s)"
+		% [", ".join(icon_missing), ", ".join(icon_bad)])
+	_check(icon_wrong_size.is_empty(),
+		"every inventory icon is a 16x16 texture (bad: %s)" % ", ".join(icon_wrong_size))
+	_check(ItemDB.icon_texture("no_such_item") == "",
+		"an unknown item resolves to no icon rather than a broken path")
 
 	# --- the assigned rarities match the spec ---------------------------------
 	_check(ItemDB.rarity("iron_sword") == "uncommon", "iron_sword is uncommon")
@@ -11004,6 +11149,27 @@ func _test_main_menu() -> void:
 	_check(not bool(menu.call("bypass_requested")),
 		"a plain test process is neither a bot nor a screenshot probe")
 	menu.set_process(false)
+
+	# --- the menu theme rasterises text the same way the HUD does (CRITIC-P1-04) --
+	# The menu builds its own `Theme` instead of inheriting the HUD's, and that
+	# duplication is exactly where this finding was only half closed the first time:
+	# `hud.gd` turned the text server's smoothing off and `main_menu.gd` did not, so
+	# the boot screen kept drawing blurred, sub-pixel-shifted OS glyphs over pixel
+	# art. Both properties are asserted on the live theme of the real menu instance,
+	# so the two themes cannot drift apart again unnoticed.
+	var menu_theme: Theme = menu.get("theme") as Theme
+	_check(menu_theme != null, "the menu sets its own theme")
+	if menu_theme != null:
+		var menu_font := menu_theme.default_font as Font
+		_check(menu_font != null, "the menu theme carries a default font")
+		if menu_font != null:
+			_check(int(menu_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_NONE),
+					"the menu font is rasterised without anti-aliasing, like the HUD font (got %d)"
+					% int(menu_font.antialiasing))
+			_check(int(menu_font.subpixel_positioning)
+					== int(TextServer.SUBPIXEL_POSITIONING_DISABLED),
+					"the menu font is snapped to whole pixels, like the HUD font (got %d)"
+					% int(menu_font.subpixel_positioning))
 
 	# --- the six entries of §16.1, in order ------------------------------------
 	var items: Array = menu.menu_items()

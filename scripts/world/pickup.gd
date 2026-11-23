@@ -10,6 +10,12 @@ extends Area2D
 ## on the ground again each time the player walks back in. An empty flag — every
 ## ordinary ground loot — keeps the old behaviour: the find respawns with the zone.
 @export var taken_flag: String = ""
+## The sprite this find draws, as a resource path. Empty — every ordinary ground
+## find — leaves the texture the scene ships (the potion, because every item find
+## in this slice has been a potion). A purse of coins has nothing to drink, so the
+## zone hands it the coin sprite through this field rather than letting it draw a
+## flask it does not contain.
+@export var texture_path: String = ""
 
 var _taken := false
 
@@ -22,8 +28,28 @@ func _ready() -> void:
 	if taken_flag != "" and bool(_game_state().get_flag(taken_flag, false)):
 		queue_free()
 		return
+	_apply_texture()
 	add_to_group("pickup")
 	body_entered.connect(_on_body_entered)
+
+
+## Swaps the scene's sprite for the one this find names, before the first frame is
+## drawn. A path that does not resolve is a data bug, not a look: the find would
+## silently draw a potion it is not, so it is reported instead of swallowed. The
+## node is looked up by name rather than cached `@onready` so a pickup built in
+## code (the way a zone builds its finds) with no sprite child fails the same way
+## instead of crashing on a null.
+func _apply_texture() -> void:
+	if texture_path == "":
+		return
+	if not ResourceLoader.exists(texture_path):
+		push_error("Pickup: texture not found: %s" % texture_path)
+		return
+	var sprite := get_node_or_null("Sprite2D") as Sprite2D
+	if sprite == null:
+		push_error("Pickup: no Sprite2D child to texture: %s" % texture_path)
+		return
+	sprite.texture = load(texture_path)
 
 
 func _on_body_entered(body: Node) -> void:

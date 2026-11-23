@@ -14,6 +14,12 @@ const POLLED_ACTIONS := [&"map", &"pause", &"character", &"skills", &"journal",
 ## At most this many inventory rows are rendered at once, so the panel can never
 ## grow past the 480x270 viewport; the cursor scrolls a window over the rest.
 const MAX_VISIBLE_ROWS := 8
+## The item icon is drawn at the native size every icon in `assets/sprites/` is
+## cut at, so the sprite reaches the screen without resampling. A row is as tall
+## as this, which is why `_center_inventory_panel` also places the panel
+## vertically: eight of these rows no longer fit under the fixed offset the panel
+## is built with.
+const ICON_SIZE_PX := 16.0
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
 const COLOR_HINT := Color(0.6, 0.62, 0.6)
@@ -718,6 +724,16 @@ func current_font_size() -> int:
 	return _root.theme.default_font_size
 
 
+## The theme's default font object, so a test can assert how text is actually
+## rasterised rather than trusting the code that built it (CRITIC-P1-04): the two
+## properties that matter to the player are `antialiasing` and
+## `subpixel_positioning`, and both have to be read back off the live theme.
+func theme_font() -> Font:
+	if _root == null or _root.theme == null:
+		return null
+	return _root.theme.default_font as Font
+
+
 ## The rarity colour as actually painted in the inventory list. Normally the item's
 ## own tier colour; in colour-blind mode a luminance-graded variant so the tiers
 ## separate by lightness, not hue alone (CRITIC-P1-11 / P2-15: rarity was colour-
@@ -843,8 +859,12 @@ func _build_inventory_panel() -> void:
 	# exact. With PRESET_CENTER the position is an offset from the viewport centre, so
 	# centring a panel of width W needs offset.x = -W/2. The minimum width is 168, so
 	# the offset was -90 where it should be -84. `_center_inventory_panel` re-derives
-	# it from the laid-out width on open, so it stays centred even if a long item name
-	# grows the panel past its minimum.
+	# both axes from the panel's own size on open, so it stays centred even if a long
+	# item name grows the panel past its minimum. It is also driven by `resized`:
+	# the container keeps growing the panel for a frame or two after the deferred
+	# placement runs (a headless run measured 189 px at that moment against 216 px
+	# later), and re-placing on every resize is what keeps the last row on screen.
+	_inventory_panel.resized.connect(_center_inventory_panel)
 	_inventory_panel.position = Vector2(-84, -70)
 	_inventory_panel.custom_minimum_size = Vector2(168, 0)
 	_inventory_panel.visible = false
@@ -858,6 +878,13 @@ func _build_inventory_panel() -> void:
 
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 3)
+	# `resized` alone is not enough: the panel's height depends on how the row labels
+	# wrap, and a re-wrap changes the container's minimum without resizing the panel,
+	# so a placement driven by `resized` is derived from the height measured before
+	# the wrap (measured 189 px against the 182 px the rows ended up needing).
+	# `sort_children` fires after the container has laid its children out, which is
+	# the first moment the height is the one being drawn.
+	box.sort_children.connect(_center_inventory_panel)
 	margin.add_child(box)
 
 	box.add_child(_make_text("Инвентарь  [I] закрыть", Color(0.96, 0.86, 0.5)))
@@ -955,8 +982,12 @@ func _build_pause_panel() -> void:
 ## crisp instead of smearing an anti-aliased bitmap. The size is an integer
 ## multiple of the pixel grid (see `_hud_font_size`). The limitation is recorded in
 ## `docs/ARCHITECTURE.md`: this is still a proportional OS font, so glyph metrics
-## remain platform-dependent — a shipped bitmap font is the only full fix, and that
-## needs an asset we deliberately do not download here.
+## remain platform-dependent. The three pixel fonts that do ship locally were
+## measured, not assumed, and all three are unusable here — see
+## `docs/ASSET_CREDITS.md` («Шрифты»): `NormalFont.ttf`, `font8x8.png` and
+## `font24x30.png` from the Ninja Adventure pack cover 0 of the 66 Cyrillic code
+## points this UI draws, so shipping one would replace every Russian string with
+## missing-glyph boxes. A Cyrillic pixel font stays an external asset.
 func _make_theme() -> Theme:
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray([
@@ -1183,9 +1214,36 @@ func _refresh_inventory() -> void:
 		var row_color := rarity_display_color(ItemDB.rarity(id))
 		if selected:
 			row_color = row_color.lightened(0.35)
-		_inventory_list.add_child(_make_text(label, row_color))
+		_inventory_list.add_child(_make_inventory_row(label, row_color, ItemDB.icon_texture(id)))
 	# The detail line always describes the row the cursor is on, whatever rarity.
 	_set_inventory_detail(String(GameState.inventory[_inventory_selection]["id"]))
+
+
+## One inventory row: the item's icon, then the text line. An item whose data
+## names no icon — a material the pack has no art for, or a stack id that is not
+## in data/items.json at all — gets the text line alone, exactly the row this
+## panel drew before icons existed, so the glyph fallback stays on screen instead
+## of turning into an empty frame. The icon is a `TextureRect` at the sprite's
+## native 16 px, centred in its own box, and never intercepts input: the panel is
+## navigated by keys, and a row that ate the click would swallow the panel's own.
+func _make_inventory_row(text: String, color: Color, texture_path: String) -> Control:
+	var label := _make_text(text, color)
+	if texture_path == "":
+		return label
+	var row := HBoxContainer.new()
+	row.name = "Row"
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_theme_constant_override("separation", 3)
+	var icon := TextureRect.new()
+	icon.name = "Icon"
+	icon.texture = load(texture_path) as Texture2D
+	icon.custom_minimum_size = Vector2(ICON_SIZE_PX, ICON_SIZE_PX)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_CENTERED
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(icon)
+	row.add_child(label)
+	return row
 
 
 ## Fills the selected-row detail line (rarity + source) and the requirement
@@ -1309,15 +1367,44 @@ func visible_inventory_row_count() -> int:
 
 ## Text of the currently visible inventory rows, in order, so a test (or a
 ## screenshot probe) can read the cursor marker and the [надето] tag without
-## reaching into the panel's private node tree.
+## reaching into the panel's private node tree. A row is either a bare Label (no
+## icon) or an HBox holding the icon and the Label, and both read the same way.
 func inventory_row_texts() -> PackedStringArray:
 	var out: PackedStringArray = []
 	if _inventory_list == null:
 		return out
 	for child in _inventory_list.get_children():
-		if child is Label:
-			out.append((child as Label).text)
+		var label := _row_label(child)
+		if label != null:
+			out.append(label.text)
 	return out
+
+
+## The icon path each visible row actually draws, "" where the row carries no icon
+## node. Same contract as `inventory_row_texts`: a test reads what the player sees
+## rather than walking the HUD's private tree.
+func inventory_row_icon_paths() -> PackedStringArray:
+	var out: PackedStringArray = []
+	if _inventory_list == null:
+		return out
+	for child in _inventory_list.get_children():
+		var icon := child.get_node_or_null("Icon") as TextureRect
+		var path := ""
+		if icon != null and icon.texture != null:
+			path = icon.texture.resource_path
+		out.append(path)
+	return out
+
+
+## The text line of one inventory row, whether the row is a bare Label or the
+## HBox of a row that carries an icon.
+func _row_label(row: Node) -> Label:
+	if row is Label:
+		return row as Label
+	for child in row.get_children():
+		if child is Label:
+			return child as Label
+	return null
 
 
 ## C opens the character screen over everything else: the modal panels it could
@@ -2304,8 +2391,15 @@ func open_inventory_for_shot() -> void:
 ## `-84` only looks centred because it is authored while `_root` is still zero-sized and
 ## then anchor-resizes into place; re-deriving here, after the container has sized the
 ## panel to its rows, is what keeps it centred when a long item name grows it past the
-## 168 px minimum — CRITIC-P2-13.) Vertical placement is left as authored to match the
-## rest of the centred-panel family; only the horizontal off-centre is corrected.
+## 168 px minimum — CRITIC-P2-13.)
+##
+## Vertical placement is derived the same way now that a row can be taller than a
+## text line: an item with an icon is a 16 px row, so eight visible rows plus the
+## stats, detail and quick-slot lines measure past the bottom of a 270 px viewport
+## when the panel hangs from the authored -70 offset. Centring on the viewport's
+## vertical middle leaves a short list almost exactly where that offset used to put
+## it (62 px against 65) and lets a full one grow upward as well as downward, so
+## the last row stays on screen instead of running off the bottom edge.
 func _center_inventory_panel() -> void:
 	if _inventory_panel == null or not _inventory_panel.visible:
 		return
@@ -2316,6 +2410,17 @@ func _center_inventory_panel() -> void:
 	if vp == Vector2.ZERO or _inventory_panel.size.x <= 0.0:
 		return
 	_inventory_panel.position.x = (vp.x - _inventory_panel.size.x) * 0.5
+	# The height comes from the container's minimum rather than from `size.y`: this
+	# runs deferred, while the anchored panel is still being resized by its own
+	# container, and a headless run measured 189 px at this moment against 216 px a
+	# few frames later. The minimum is what the rows actually need, and in a drawn
+	# window it is the height the panel is painted at (145 px both ways, two icon
+	# rows). A panel that needs more than the viewport is left on its authored
+	# offset: centring it would push content off the top and the bottom at once.
+	var height := _inventory_panel.get_combined_minimum_size().y
+	if height <= 0.0 or height > vp.y:
+		return
+	_inventory_panel.position.y = (vp.y - height) * 0.5
 
 
 func is_journal_open() -> bool:

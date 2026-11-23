@@ -105,6 +105,19 @@ static func icon(item_id: String) -> String:
 	return value if value != "" else "?"
 
 
+## The inventory icon texture of an item, as a resource path, or "" when the item
+## names none. A path that does not resolve also reads as "": the caller then
+## falls back to `icon()`, so a typo in the data costs the player a real glyph
+## instead of an empty square where the art should be. Checked through
+## `ResourceLoader` rather than `FileAccess` because a shipped build carries the
+## texture as an imported resource, not as a loose file.
+static func icon_texture(item_id: String) -> String:
+	var value := String(get_item(item_id).get("icon_texture", ""))
+	if value == "":
+		return ""
+	return value if ResourceLoader.exists(value) else ""
+
+
 ## Attribute requirements to wear an item (spec §7.3): a Dictionary of
 ## attribute name -> required value. Empty when the item names none (and for any
 ## non-equipment item, which never has requirements). A non-Dictionary value is

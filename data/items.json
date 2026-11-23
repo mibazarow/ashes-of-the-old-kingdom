@@ -5,6 +5,7 @@
       "type": "consumable",
       "rarity": "common",
       "icon": "♥",
+      "icon_texture": "res://assets/sprites/icon_health_potion.png",
       "source": "подножка на земле",
       "heal": 40,
       "price": 25,
@@ -15,6 +16,7 @@
       "type": "consumable",
       "rarity": "common",
       "icon": "♦",
+      "icon_texture": "res://assets/sprites/icon_mana_potion.png",
       "source": "подножка на земле",
       "mana": 30,
       "price": 20,
@@ -25,6 +27,7 @@
       "type": "equipment",
       "rarity": "uncommon",
       "icon": "†",
+      "icon_texture": "res://assets/sprites/icon_iron_sword.png",
       "source": "сундук у опушки",
       "slot": "weapon",
       "requires": {
@@ -66,6 +69,7 @@
       "type": "equipment",
       "rarity": "uncommon",
       "icon": "‡",
+      "icon_texture": "res://assets/sprites/icon_iron_spear.png",
       "source": "сундук в юго-западной чаще",
       "slot": "weapon",
       "requires": {
@@ -99,6 +103,7 @@
       "type": "equipment",
       "rarity": "common",
       "icon": "■",
+      "icon_texture": "res://assets/sprites/icon_leather_armor.png",
       "source": "торговец",
       "slot": "armor",
       "requires": {
@@ -113,6 +118,7 @@
       "type": "equipment",
       "rarity": "common",
       "icon": "●",
+      "icon_texture": "res://assets/sprites/icon_wooden_shield.png",
       "source": "торговец",
       "slot": "secondary",
       "requires": {
@@ -127,6 +133,7 @@
       "type": "equipment",
       "rarity": "common",
       "icon": "≡",
+      "icon_texture": "res://assets/sprites/icon_leather_boots.png",
       "source": "торговец",
       "slot": "boots",
       "requires": {
@@ -142,6 +149,7 @@
       "type": "equipment",
       "rarity": "rare",
       "icon": "○",
+      "icon_texture": "res://assets/sprites/icon_swift_ring.png",
       "source": "ремесло",
       "slot": "accessory",
       "requires": {
@@ -157,6 +165,7 @@
       "type": "equipment",
       "rarity": "rare",
       "icon": "◆",
+      "icon_texture": "res://assets/sprites/icon_echo_amulet.png",
       "source": "ремесло",
       "slot": "accessory",
       "requires": {
@@ -172,6 +181,7 @@
       "type": "material",
       "rarity": "common",
       "icon": "▼",
+      "icon_texture": "res://assets/sprites/icon_wolf_fang.png",
       "source": "пепельный волк",
       "price": 8,
       "description": "Материал для ремесла."
@@ -181,6 +191,7 @@
       "type": "quest",
       "rarity": "common",
       "icon": "★",
+      "icon_texture": "res://assets/sprites/icon_rusted_seal.png",
       "source": "награда за задание",
       "price": 0,
       "description": "Обломок королевской печати. Не продаётся."
@@ -190,6 +201,7 @@
       "type": "quest",
       "rarity": "rare",
       "icon": "⚷",
+      "icon_texture": "res://assets/sprites/icon_ruin_key.png",
       "source": "руины",
       "price": 0,
       "description": "Отпирает каменную дверь в глубине руин. Не продаётся."
@@ -199,6 +211,7 @@
       "type": "material",
       "rarity": "common",
       "icon": "☠",
+      "icon_texture": "res://assets/sprites/icon_bone_shard.png",
       "source": "скелет",
       "price": 6,
       "description": "Материал для ремесла."
@@ -208,6 +221,7 @@
       "type": "material",
       "rarity": "common",
       "icon": "▲",
+      "icon_texture": "res://assets/sprites/icon_boar_tusk.png",
       "source": "кабан",
       "price": 7,
       "description": "Материал для ремесла."

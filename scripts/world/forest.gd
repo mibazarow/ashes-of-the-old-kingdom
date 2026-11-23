@@ -28,6 +28,10 @@ const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 const PICKUP_SCENE := "res://scenes/items/pickup.tscn"
+## The purse of gold draws the coin sprite, not the potion the pickup scene ships
+## with: the scene's texture is the one every item find wants, and a find that
+## carries only gold has no reason to draw a flask.
+const COIN_TEXTURE := "res://assets/sprites/coin.png"
 const BREAKABLE_SCENE := "res://scenes/world/breakable.tscn"
 
 ## Map is generated once from a fixed seed so every run and every test sees the
@@ -570,7 +574,7 @@ func _spawn_actors() -> void:
 	_spawn_pickup("PickupHerb", _find_walkable_near(PICKUP_HERB_ANCHOR, FIND_SCAN_RADIUS),
 		"wolf_fang", 2, 0)
 	_spawn_pickup("PickupCoin", _find_walkable_near(PICKUP_COIN_ANCHOR, FIND_SCAN_RADIUS),
-		"", 0, 35)
+		"", 0, 35, COIN_TEXTURE)
 	_spawn_pickup("PickupFlask", _find_walkable_near(PICKUP_FLASK_TILE, 0),
 		"health_potion", 1, 0)
 
@@ -758,8 +762,11 @@ func _tile_of_node(node: Node2D) -> Vector2i:
 ## Places one `Pickup` on a tile this function is handed, with its payload set
 ## before `add_child` so the pickup's own `_ready` reads this instance's values.
 ## `item_id = ""` is a valid find: the pickup then carries gold only, which is
-## how the coin purse works.
-func _spawn_pickup(node_name: String, tile: Vector2i, item: String, count: int, coins: int) -> void:
+## how the coin purse works. `texture` is the sprite the find draws; empty keeps
+## the scene's own potion, which is right for every item find and wrong for a
+## purse of gold — `PickupCoin` therefore names `COIN_TEXTURE` explicitly.
+func _spawn_pickup(node_name: String, tile: Vector2i, item: String, count: int, coins: int,
+		texture: String = "") -> void:
 	var packed: PackedScene = load(PICKUP_SCENE)
 	if packed == null:
 		push_error("Forest: cannot load %s" % PICKUP_SCENE)
@@ -770,6 +777,7 @@ func _spawn_pickup(node_name: String, tile: Vector2i, item: String, count: int, 
 	pickup.set("item_id", item)
 	pickup.set("amount", count)
 	pickup.set("gold", coins)
+	pickup.set("texture_path", texture)
 	add_child(pickup)
 
 
