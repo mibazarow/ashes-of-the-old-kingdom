@@ -50,7 +50,7 @@ var _dot_accum: Dictionary = {}
 var _tick_counter := 0
 
 
-func _process(delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	tick(delta)
 
 

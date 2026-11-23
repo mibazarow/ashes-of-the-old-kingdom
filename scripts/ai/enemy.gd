@@ -1044,7 +1044,7 @@ class DeathPool:
 		_area.add_child(collision)
 		add_child(_area)
 
-	func _process(delta: float) -> void:
+	func _physics_process(delta: float) -> void:
 		_life += delta
 		if _life >= lifetime:
 			queue_free()
