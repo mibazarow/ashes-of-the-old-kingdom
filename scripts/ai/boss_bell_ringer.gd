@@ -159,6 +159,9 @@ class BellWave:
 	func _draw() -> void:
 		var t := clampf(_elapsed / telegraph_time, 0.0, 1.0) if telegraph_time > 0.0 else 1.0
 		draw_circle(Vector2.ZERO, radius, Color(0.72, 0.86, 1.0, 0.12 + 0.34 * t))
+		# The CRITIC-P1-09 rule for drawn hazard shapes too: the translucent fill
+		# carries the pulse, a hard dark ring carries the edge on any floor.
+		draw_arc(Vector2.ZERO, radius, 0.0, TAU, 64, Color(0.02, 0.03, 0.05, 1.0), 1.0)
 
 
 ## A stationary hazard circle: telegraphed, then dangerous for `lifetime` seconds,
@@ -230,3 +233,4 @@ class HazardCircle:
 			draw_circle(Vector2.ZERO, radius, Color(0.55, 0.85, 0.5, 0.12 + 0.3 * t))
 		else:
 			draw_circle(Vector2.ZERO, radius, Color(0.4, 0.7, 0.35, 0.4))
+		draw_arc(Vector2.ZERO, radius, 0.0, TAU, 64, Color(0.02, 0.03, 0.05, 1.0), 1.0)

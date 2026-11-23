@@ -242,6 +242,11 @@ const PILGRIM_SCAN_RADIUS := 2
 const PILGRIM_CLEAR_FROM_ENTRY := 6
 
 
+## The forest keeps the green palette the original atlas was cut from.
+func tile_atlas_path() -> String:
+	return "res://assets/sprites/tiles_forest.png"
+
+
 func zone_id() -> String:
 	return "forest"
 

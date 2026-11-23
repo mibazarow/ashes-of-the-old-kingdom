@@ -1391,18 +1391,135 @@ func _test_melee_enemy_telegraphs() -> void:
 
 	var saw_telegraph := false
 	var hitbox_while_visible := 0
+	var outline_mismatches := 0
 	for i in range(180):
 		await physics_frame
 		var telegraph: ColorRect = wolf.get_node_or_null("Telegraph")
 		var shape: CollisionShape2D = wolf.get_node_or_null("AttackHitbox/CollisionShape2D")
+		var outline_node: ColorRect = wolf.get_node_or_null("TelegraphOutline")
 		if telegraph != null and telegraph.visible:
 			saw_telegraph = true
 		if shape != null and not shape.disabled and telegraph != null and not telegraph.visible:
 			hitbox_while_visible += 1
+		if outline_node != null and telegraph != null \
+				and outline_node.visible != telegraph.visible:
+			outline_mismatches += 1
 	_check(saw_telegraph, "melee enemy shows a telegraph")
 	# A single frame of overlap during the active window is legitimate, but the
 	# hitbox must never open before the telegraph has been shown at all.
 	_check(hitbox_while_visible < 180, "hitbox is not permanently open")
+	_check(outline_mismatches == 0,
+		"the outline travels with the fill on every frame of the swing (%d mismatches)" % outline_mismatches)
+
+	# --- telegraph readability (CRITIC-P1-09) ---------------------------------
+	# The old shape was a bare warm rect at an effective 0.12..0.42 alpha,
+	# measured 1.02..1.58:1 on every floor. The rule now: cool saturated fill,
+	# hard opaque outline, and a ramp whose first frame already clears 3:1 on
+	# the darkest floor by fill alone while the outline clears 3:1 on the
+	# lightest — so the shape separates on all four zones from frame one.
+	# The constants are read through runtime-loaded scripts on purpose: naming
+	# `Enemy` or `SpikeTrap` as compile-time identifiers drags their autoload
+	# references into the suite's own compilation (see the note in the enemy
+	# variants group), which breaks the whole run.
+	var enemy_cls: GDScript = load("res://scripts/ai/enemy.gd")
+	var telegraph_fill: Color = enemy_cls.get("TELEGRAPH_FILL")
+	var telegraph_outline_color: Color = enemy_cls.get("TELEGRAPH_OUTLINE_COLOR")
+	var ramp_start: float = enemy_cls.get("TELEGRAPH_ALPHA_START")
+	var ramp_peak: float = enemy_cls.get("TELEGRAPH_ALPHA_PEAK")
+	var telegraph_rect := wolf.get_node_or_null("Telegraph") as ColorRect
+	var outline_rect := wolf.get_node_or_null("TelegraphOutline") as ColorRect
+	_check(outline_rect != null, "the telegraph carries a hard outline node")
+	if outline_rect != null and telegraph_rect != null:
+		_check(outline_rect.color.a >= 0.99 and _wcag_lum(outline_rect.color) < 0.02,
+			"the outline is a fully opaque near-black")
+		_check(outline_rect.z_index < telegraph_rect.z_index, "the outline sits behind the fill")
+		_check(is_equal_approx(outline_rect.offset_left, telegraph_rect.offset_left - 1.0)
+			and is_equal_approx(outline_rect.offset_right, telegraph_rect.offset_right + 1.0)
+			and is_equal_approx(outline_rect.offset_top, telegraph_rect.offset_top - 1.0)
+			and is_equal_approx(outline_rect.offset_bottom, telegraph_rect.offset_bottom + 1.0),
+			"the outline frames the fill with a hard 1px border")
+	_check(telegraph_rect != null
+		and Color(telegraph_rect.color.r, telegraph_rect.color.g, telegraph_rect.color.b)
+			.is_equal_approx(telegraph_fill)
+		and telegraph_rect.color.a >= 0.99,
+		"the fill is the cool warning colour at full colour alpha (the ramp rides on modulate)")
+	_check(is_equal_approx(ramp_start, 0.70) and is_equal_approx(ramp_peak, 0.95),
+		"the warning alpha ramp runs 0.70 to 0.95 (the old effective range was 0.12 to 0.42)")
+	var dungeon_floors := _atlas_floor_colors("res://assets/sprites/tiles_dungeon.png")
+	var forest_floors := _atlas_floor_colors("res://assets/sprites/tiles_forest.png")
+	_check(not dungeon_floors.is_empty() and not forest_floors.is_empty(),
+		"the readability floors decode from the per-zone atlases")
+	if not dungeon_floors.is_empty() and not forest_floors.is_empty():
+		for key: String in ["grass", "dirt"]:
+			var dark: Color = dungeon_floors[key]
+			var fill_start := telegraph_fill
+			fill_start.a = ramp_start
+			var fill_peak := telegraph_fill
+			fill_peak.a = ramp_peak
+			_check(_wcag_contrast(_blend_over(fill_start, dark), dark) >= 3.0,
+				"the fill at the ramp start clears 3:1 over dungeon %s (%.2f:1)"
+					% [key, _wcag_contrast(_blend_over(fill_start, dark), dark)])
+			_check(_wcag_contrast(_blend_over(fill_peak, dark), dark) >= 3.0,
+				"the fill at the ramp peak clears 3:1 over dungeon %s (%.2f:1)"
+					% [key, _wcag_contrast(_blend_over(fill_peak, dark), dark)])
+			var light: Color = forest_floors[key]
+			_check(_wcag_contrast(telegraph_outline_color, light) >= 3.0,
+				"the opaque outline clears 3:1 against forest %s (%.2f:1)"
+					% [key, _wcag_contrast(telegraph_outline_color, light)])
+
+	# --- the spike trap follows the same rule (CRITIC-P1-10) -------------------
+	var spike_cls: GDScript = load("res://scripts/world/spike_trap.gd")
+	var trap_idle_alpha: float = spike_cls.get("IDLE_ALPHA")
+	var trap_warning_fill: Color = spike_cls.get("WARNING_FILL")
+	var trap_warning_start: float = spike_cls.get("WARNING_ALPHA_START")
+	var trap_warning_peak: float = spike_cls.get("WARNING_ALPHA_PEAK")
+	var trap_active_fill: Color = spike_cls.get("ACTIVE_FILL")
+	var trap_outline_color: Color = spike_cls.get("OUTLINE_COLOR")
+	var trap := (load("res://scenes/interactables/spike_trap.tscn") as PackedScene) \
+		.instantiate() as Node2D
+	trap.position = Vector2(300, 0)
+	arena.add_child(trap)
+	var trap_visual := trap.get_node("Visual") as ColorRect
+	var trap_outline := trap_visual.get_node_or_null("Outline") as ColorRect
+	_check(trap_outline != null, "the trap plate carries a hard outline node")
+	if trap_outline != null:
+		_check(trap_outline.color.a >= 0.99 and _wcag_lum(trap_outline.color) < 0.02
+			and trap_outline.show_behind_parent,
+			"the plate outline is an opaque near-black drawn behind the plate")
+	var saw_idle := false
+	var saw_warning_rgb := false
+	var saw_active_rgb := false
+	for i in range(150):
+		if absf(trap_visual.color.a - trap_idle_alpha) < 0.01:
+			saw_idle = true
+		if trap_visual.color.a > trap_idle_alpha + 0.05:
+			var plate_rgb := Color(trap_visual.color.r, trap_visual.color.g, trap_visual.color.b)
+			if plate_rgb.is_equal_approx(trap_warning_fill):
+				saw_warning_rgb = true
+			if plate_rgb.is_equal_approx(trap_active_fill):
+				saw_active_rgb = true
+		await physics_frame
+	_check(saw_idle, "the trap plate idles at the declared cool slate alpha")
+	_check(saw_warning_rgb, "the plate warning ramp runs on the shared cool warning colour")
+	_check(saw_active_rgb and trap_active_fill != trap_warning_fill,
+		"the open spikes switch the plate to the distinct heavy colour")
+	_check(trap_idle_alpha <= 0.5,
+		"the idle plate stays at or under the 0.5 alpha the debug bots read as a running warning")
+	_check(trap_warning_start >= 0.6 and trap_warning_peak >= 0.9,
+		"the plate warning ramps %.2f to %.2f, not the old 0.25 to 0.75"
+			% [trap_warning_start, trap_warning_peak])
+	if not dungeon_floors.is_empty() and not forest_floors.is_empty():
+		for key: String in ["grass", "dirt"]:
+			var dark: Color = dungeon_floors[key]
+			var plate_start := trap_warning_fill
+			plate_start.a = trap_warning_start
+			_check(_wcag_contrast(_blend_over(plate_start, dark), dark) >= 3.0,
+				"the plate warning clears 3:1 on its first frame over dungeon %s (%.2f:1)"
+					% [key, _wcag_contrast(_blend_over(plate_start, dark), dark)])
+			var light: Color = forest_floors[key]
+			_check(_wcag_contrast(trap_outline_color, light) >= 3.0,
+				"the plate outline clears 3:1 against forest %s (%.2f:1)"
+					% [key, _wcag_contrast(trap_outline_color, light)])
 	arena.queue_free()
 	await process_frame
 	completed["melee"] = true
@@ -1971,9 +2088,18 @@ func _check_original_enemy_defaults(who: String, node: Node) -> void:
 	_check(absf(float(node.get("windup_multiplier")) - 1.0) < 0.0001,
 		"%s keeps windup_multiplier 1.0" % who)
 	_check(not bool(node.get("charge_on_sight")), "%s keeps charge_on_sight false" % who)
-	_check((node.get("sprite_tint") as Color) == Color.WHITE, "%s keeps a white tint" % who)
+	# The white tint is gone on purpose (CRITIC-P1-18): every roster type now
+	# carries the readable tint the Enemy script applies in _ready, so the
+	# original pair is checked against that contract instead of against white.
+	var enemy_cls: GDScript = load("res://scripts/ai/enemy.gd")
+	var readable_tints: Dictionary = enemy_cls.get("READABLE_TINTS")
+	var readable: Color = readable_tints[node.get("enemy_type")]
+	_check(readable != Color.WHITE, "%s readable roster tint is not the old white" % who)
+	_check((node.get("sprite_tint") as Color).is_equal_approx(readable),
+		"%s carries its readable roster tint" % who)
 	var spr := node.get_node_or_null("Sprite2D") as Sprite2D
-	_check(spr != null and spr.modulate == Color.WHITE, "%s sprite is untinted" % who)
+	_check(spr != null and spr.modulate.is_equal_approx(readable),
+		"%s sprite wears the readable tint" % who)
 
 
 ## Zone map on M: explored-only tiles, fog, landmarks, and input blocking.
@@ -8978,6 +9104,84 @@ func _test_zone_registry() -> void:
 			"ZoneManager reads the fortress entry tile from the table")
 		_check(String(manager_class.call("zone_display_name", "fortress")) == "Древняя крепость",
 			"ZoneManager reads the fortress display name from the table")
+
+	# --- per-zone floor palettes (CRITIC-P1-01) --------------------------------
+	# All four zones used to paint from one byte-identical tiles.png, so the
+	# forest grass RGB(173,188,58) measured 65%/79%/39%/92% of the sampled
+	# floor in forest/ruins/dungeon/fortress. Closing conditions: every zone
+	# declares its own atlas, the four files are distinct by content hash, no
+	# single RGB holds more than 20% of a zone's floor sample, and every pair
+	# of zone floors clears 1.5:1 — all measured from the PNG bytes themselves.
+	var expected_atlases := {
+		"forest": "res://assets/sprites/tiles_forest.png",
+		"ruins": "res://assets/sprites/tiles_ruins.png",
+		"dungeon": "res://assets/sprites/tiles_dungeon.png",
+		"fortress": "res://assets/sprites/tiles_fortress.png",
+	}
+	var zone_scripts := {
+		"forest": "res://scripts/world/forest.gd",
+		"ruins": "res://scripts/world/ruins.gd",
+		"dungeon": "res://scripts/world/dungeon.gd",
+		"fortress": "res://scripts/world/fortress.gd",
+	}
+	var base_zone: Node2D = (load("res://scripts/world/zone_base.gd") as GDScript).new()
+	_check(String(base_zone.call("tile_atlas_path")) == String(expected_atlases["forest"]),
+		"ZoneBase defaults to the forest palette")
+	base_zone.free()
+	var atlas_hashes := {}
+	var grass_means := {}
+	var floor_means := {}
+	for zone_id: String in expected_atlases:
+		var atlas_path := String(expected_atlases[zone_id])
+		var zone_script := load(String(zone_scripts[zone_id])) as GDScript
+		_check(zone_script != null, "the %s zone script loads for the atlas check" % zone_id)
+		if zone_script != null:
+			var zone_inst = zone_script.new()
+			var declared := String(zone_inst.call("tile_atlas_path"))
+			zone_inst.free()
+			_check(declared == atlas_path,
+				"zone '%s' declares its own atlas %s (got %s)" % [zone_id, atlas_path, declared])
+		_check(FileAccess.file_exists(atlas_path),
+			"the %s floor atlas exists on disk" % zone_id)
+		var ctx := HashingContext.new()
+		ctx.start(HashingContext.HASH_SHA256)
+		ctx.update(FileAccess.get_file_as_bytes(atlas_path))
+		atlas_hashes[zone_id] = ctx.finish().hex_encode()
+		var share := _atlas_floor_max_share(atlas_path)
+		_check(share <= 0.20,
+			"no single RGB exceeds 20%% of the %s floor sample (worst %.1f%%)"
+				% [zone_id, share * 100.0])
+		var floors: Dictionary = _atlas_floor_colors(atlas_path)
+		if floors.is_empty():
+			_check(false, "the %s floor atlas decodes as a PNG" % zone_id)
+			continue
+		var grass_c: Color = floors["grass"]
+		var dirt_c: Color = floors["dirt"]
+		grass_means[zone_id] = grass_c
+		floor_means[zone_id] = Color((grass_c.r + dirt_c.r) * 0.5,
+			(grass_c.g + dirt_c.g) * 0.5, (grass_c.b + dirt_c.b) * 0.5)
+	var distinct_zones := {}
+	for zone_id: String in atlas_hashes.keys():
+		distinct_zones[atlas_hashes[zone_id]] = String(zone_id)
+	_check(distinct_zones.size() == 4,
+		"the four zone atlases are four distinct files by content hash (got %d)"
+			% distinct_zones.size())
+	var zone_ids: Array = expected_atlases.keys()
+	zone_ids.sort()
+	for i in range(zone_ids.size()):
+		for j in range(i + 1, zone_ids.size()):
+			var za := String(zone_ids[i])
+			var zb := String(zone_ids[j])
+			if not grass_means.has(za) or not grass_means.has(zb):
+				continue
+			var grass_pair := _wcag_contrast(grass_means[za], grass_means[zb])
+			var floor_pair := _wcag_contrast(floor_means[za], floor_means[zb])
+			_check(grass_pair >= 1.5 and floor_pair >= 1.5,
+				"floor contrast %s vs %s: grass %.2f:1, floor mean %.2f:1 (>= 1.5)"
+					% [za, zb, grass_pair, floor_pair])
+			print("    floor %-8s %s  vs  %-8s %s  ->  %.2f:1" % [
+				za, str((grass_means[za] as Color) * 255.0).substr(1, 20),
+				zb, str((grass_means[zb] as Color) * 255.0).substr(1, 20), grass_pair])
 	completed["zone_registry"] = true
 
 
@@ -10979,6 +11183,134 @@ func _clear_death_pools() -> void:
 			node.queue_free()
 
 
+# --- readability measurement helpers (CRITIC-P1-01/-09/-10/-18) ----------------
+# The critic measured with the WCAG sRGB transfer function, so the suite
+# re-derives the same numbers here instead of trusting the shipped constants:
+# floors are decoded from the per-zone atlases' PNG bytes (exact pixels, no
+# import-time compression), and every contrast below is computed the way the
+# critic's /tmp/pngtool.py computed it.
+
+func _wcag_lin(c: float) -> float:
+	if c <= 0.04045:
+		return c / 12.92
+	return pow((c + 0.055) / 1.055, 2.4)
+
+
+func _wcag_lum(c: Color) -> float:
+	return 0.2126 * _wcag_lin(c.r) + 0.7152 * _wcag_lin(c.g) + 0.0722 * _wcag_lin(c.b)
+
+
+func _wcag_contrast(a: Color, b: Color) -> float:
+	var la := _wcag_lum(a)
+	var lb := _wcag_lum(b)
+	if la < lb:
+		var t := la
+		la = lb
+		lb = t
+	return (la + 0.05) / (lb + 0.05)
+
+
+## Source-over blend in sRGB, which is where the 2D renderer composites the
+## telegraph over the floor.
+func _blend_over(fill: Color, floor: Color) -> Color:
+	return Color(fill.r * fill.a + floor.r * (1.0 - fill.a),
+		fill.g * fill.a + floor.g * (1.0 - fill.a),
+		fill.b * fill.a + floor.b * (1.0 - fill.a))
+
+
+## The atlas decoded from its own PNG bytes, so the measurement reads the pixels
+## the generator wrote rather than whatever the import pipeline stored.
+func _atlas_image(path: String) -> Image:
+	var bytes := FileAccess.get_file_as_bytes(path)
+	var img := Image.new()
+	if bytes.is_empty() or img.load_png_from_buffer(bytes) != OK:
+		return null
+	return img
+
+
+## The two walkable floor colours of a zone atlas: the mean of the grass cell
+## (x 0..15) and the mean of the dirt cell (x 16..31).
+func _atlas_floor_colors(path: String) -> Dictionary:
+	var img := _atlas_image(path)
+	if img == null or img.get_width() < 32 or img.get_height() < 16:
+		return {}
+	var sums := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+	for y in range(16):
+		for x in range(32):
+			var c := img.get_pixel(x, y)
+			var half := 0 if x < 16 else 3
+			sums[half] += c.r
+			sums[half + 1] += c.g
+			sums[half + 2] += c.b
+	return {
+		"grass": Color(sums[0] / 256.0, sums[1] / 256.0, sums[2] / 256.0),
+		"dirt": Color(sums[3] / 256.0, sums[4] / 256.0, sums[5] / 256.0),
+	}
+
+
+## Largest share of any single RGB value inside a zone's floor sample (the two
+## walkable cells, 512 px). CRITIC-P1-01 closes at 20%.
+func _atlas_floor_max_share(path: String) -> float:
+	var img := _atlas_image(path)
+	if img == null or img.get_width() < 32 or img.get_height() < 16:
+		return 1.0
+	var shares := {}
+	for y in range(16):
+		for x in range(32):
+			var c := img.get_pixel(x, y)
+			var key := "%d,%d,%d" % [int(round(c.r * 255.0)), int(round(c.g * 255.0)), int(round(c.b * 255.0))]
+			shares[key] = int(shares.get(key, 0)) + 1
+	var best := 0
+	for key: String in shares.keys():
+		best = maxi(best, int(shares[key]))
+	return float(best) / 512.0
+
+
+## Shortest hue distance in degrees between two colours, the way "outside the
+## floor's colour family" is measured: a tint at least this far from every
+## floor hue of its zones cannot read as more floor.
+func _hue_separation_deg(a: Color, b: Color) -> float:
+	var d := absf(a.h - b.h)
+	return minf(d, 1.0 - d) * 360.0
+
+
+## Where each roster type actually spawns, read off the zone scripts' scene
+## constants (wider than ROSTER_ZONES, which only lists the types that group
+## was written to pin). A tint is judged against every floor it can be seen on.
+const READABLE_SPAWN_ZONES: Dictionary = {
+	&"ash_wolf": ["forest"],
+	&"ash_archer": ["forest"],
+	&"ash_boar": ["forest", "fortress"],
+	&"ash_wisp": ["forest", "dungeon", "fortress"],
+	&"spider": ["forest"],
+	&"slime": ["forest"],
+	&"tick": ["forest"],
+	&"lumberjack": ["forest"],
+	&"root_beast": ["forest"],
+	&"ruin_skeleton": ["ruins", "dungeon", "fortress"],
+	&"ruin_skeleton_archer": ["ruins", "dungeon", "fortress"],
+	&"shieldbearer": ["ruins", "fortress"],
+	&"cultist_caster": ["ruins", "fortress"],
+	&"grave_hound": ["ruins", "fortress"],
+	&"royal_guard": ["ruins"],
+	&"bone_crawler": ["dungeon", "fortress"],
+	&"plague_bearer": ["dungeon"],
+	&"ash_knight": ["fortress"],
+	&"forest_warden": ["forest"],
+	&"root_mother": ["forest"],
+	&"captain_of_the_guard": ["ruins"],
+	&"bell_ringer": ["dungeon"],
+	&"king_without_crown": ["fortress"],
+}
+
+const READABLE_ATLASES: Dictionary = {
+	"forest": "res://assets/sprites/tiles_forest.png",
+	"ruins": "res://assets/sprites/tiles_ruins.png",
+	"dungeon": "res://assets/sprites/tiles_dungeon.png",
+	"fortress": "res://assets/sprites/tiles_fortress.png",
+}
+
+
 ## A stand-in zone for the blink wall test: every tile at column >= 3 is solid, so
 ## a hop steered to the right must be rejected. It answers `cell_at` exactly like a
 ## real zone, which is the only contract `Enemy._tile_is_solid` relies on.
@@ -11185,6 +11517,61 @@ func _test_enemy_roster() -> void:
 
 	var arena := Node2D.new()
 	root.add_child(arena)
+	await process_frame
+
+	# --- 2b. readability: no enemy camouflages into its own zone (CRITIC-P1-18) -
+	# Every scene in scenes/enemies, run through _ready in the tree, must come
+	# out with (a) the shared 1px dark silhouette material on its sprite, (b) a
+	# non-default readable tint, and (c) a body hue that is either 45 degrees or
+	# more away from every floor colour of every zone it spawns in, or clears
+	# 3:1 against those floors outright. The floors are decoded from the four
+	# per-zone atlases, so this measures the shipped palette, not a copy.
+	var enemy_cls: GDScript = load("res://scripts/ai/enemy.gd")
+	var readable_tints: Dictionary = enemy_cls.get("READABLE_TINTS")
+	var zone_floors := {}
+	for zone_id: String in READABLE_ATLASES.keys():
+		var floors: Dictionary = _atlas_floor_colors(String(READABLE_ATLASES[zone_id]))
+		zone_floors[zone_id] = [floors["grass"], floors["dirt"]]
+	var readability_dir := DirAccess.open("res://scenes/enemies")
+	var readability_files: Array[String] = []
+	if readability_dir != null:
+		for found in readability_dir.get_files():
+			var file_name := String(found).get_file()
+			if file_name.ends_with(".tscn"):
+				readability_files.append(file_name)
+	readability_files.sort()
+	for file_name: String in readability_files:
+		var packed: PackedScene = load("res://scenes/enemies/" + file_name)
+		var inst: Node2D = null if packed == null else packed.instantiate() as Node2D
+		if inst == null:
+			continue
+		arena.add_child(inst)
+		await physics_frame
+		var type := String(inst.get("enemy_type"))
+		var spr := inst.get_node_or_null("Sprite2D") as Sprite2D
+		# NB: this build names CanvasItem's local material `material`, not
+		# `material_override` (see the note in Enemy._ready).
+		var mat := (spr.material if spr != null else null) as ShaderMaterial
+		_check(mat != null and mat.shader != null,
+			"%s draws the 1px dark silhouette (outline shader on the sprite)" % type)
+		_check(readable_tints.has(StringName(type))
+			and (inst.get("sprite_tint") as Color).is_equal_approx(readable_tints[StringName(type)])
+			and (inst.get("sprite_tint") as Color) != Color.WHITE,
+			"%s carries a readable non-default sprite_tint" % type)
+		var tint: Color = inst.get("sprite_tint")
+		var offenders: Array[String] = []
+		for zone_id: String in (READABLE_SPAWN_ZONES.get(StringName(type), []) as Array):
+			for floor_c: Color in (zone_floors[zone_id] as Array):
+				if _hue_separation_deg(tint, floor_c) < 45.0 \
+						and _wcag_contrast(tint, floor_c) < 3.0:
+					offenders.append("%s %s (hue %.0f deg, %.2f:1)"
+						% [zone_id, floor_c.to_html(false),
+							_hue_separation_deg(tint, floor_c), _wcag_contrast(tint, floor_c)])
+		_check(offenders.is_empty(),
+			"%s body colour sits outside the floor family of every zone it spawns in (%s)"
+				% [type, ", ".join(offenders)])
+		inst.queue_free()
+	_clear_enemies()
 	await process_frame
 
 	# --- 3a. frontal_block: the shieldbearer soaks the side it faces -----------
@@ -13060,8 +13447,12 @@ func _test_three_bosses() -> void:
 	await process_frame
 	_check(int(cap.call("current_phase")) == 2, "the Captain is in phase 2")
 	_check(is_equal_approx(float(cap.get("frontal_block")), 0.0), "phase 2 drops the shield for good")
-	_check((cap.get("_base_telegraph_color") as Color).is_equal_approx(Color(0.55, 0.78, 1.0, 0.85)),
-		"phase 2 recolours the telegraph to the colder phase-two promise")
+	var captain_cls: GDScript = load("res://scripts/ai/boss_captain.gd")
+	var phase2_color: Color = captain_cls.get("PHASE2_TELEGRAPH_COLOR")
+	_check((cap.get("_base_telegraph_color") as Color).is_equal_approx(phase2_color),
+		"phase 2 recolours the telegraph to the saturated violet phase-two promise")
+	_check(phase2_color.a >= 0.99,
+		"the phase-two promise carries its alpha in the ramp, not baked into the colour")
 	# phase-2 heavy cadence: every second swing, probed through the real seam.
 	var cap_cadence: Array[bool] = []
 	for probe in range(1, 8):

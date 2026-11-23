@@ -230,6 +230,12 @@ var _tablet_node: Node2D
 var _captain_node: Node2D
 
 
+## Desaturated warm stone-grey: the ruins read as pale dead masonry, not
+## as grass (CRITIC-P1-01).
+func tile_atlas_path() -> String:
+	return "res://assets/sprites/tiles_ruins.png"
+
+
 func zone_id() -> String:
 	return "ruins"
 

@@ -269,6 +269,8 @@ class AshWave:
 	func _draw() -> void:
 		var t := clampf(_elapsed / telegraph_time, 0.0, 1.0) if telegraph_time > 0.0 else 1.0
 		draw_circle(Vector2.ZERO, radius, Color(0.95, 0.7, 0.4, 0.12 + 0.34 * t))
+		# Hard dark edge on every hazard ring (CRITIC-P1-09 rule).
+		draw_arc(Vector2.ZERO, radius, 0.0, TAU, 64, Color(0.02, 0.03, 0.05, 1.0), 1.0)
 
 
 ## A stationary ash pillar: telegraphed, then dangerous for `lifetime` seconds, paying
@@ -340,3 +342,4 @@ class AshPillar:
 			draw_circle(Vector2.ZERO, radius, Color(0.85, 0.6, 0.35, 0.12 + 0.3 * t))
 		else:
 			draw_circle(Vector2.ZERO, radius, Color(0.7, 0.45, 0.25, 0.4))
+		draw_arc(Vector2.ZERO, radius, 0.0, TAU, 64, Color(0.02, 0.03, 0.05, 1.0), 1.0)

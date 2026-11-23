@@ -235,6 +235,12 @@ var _trap_b_node: Node2D
 var _bell_ringer_node: Node2D
 
 
+## Cold dark blue-grey: the undercroft is the darkest floor band in the game
+## (CRITIC-P1-01).
+func tile_atlas_path() -> String:
+	return "res://assets/sprites/tiles_dungeon.png"
+
+
 func zone_id() -> String:
 	return "dungeon"
 

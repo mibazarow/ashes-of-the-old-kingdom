@@ -36,6 +36,12 @@ labelled comparison PNG of grass, bush-over-grass, A, B and C.
 
 Uses PIL when it is installed; otherwise falls back to a pure-Python PNG
 codec (zlib + struct). Deterministic, idempotent, no randomness.
+
+--zone-variants is a separate mode that needs no source pack: it derives the
+four per-zone floor atlases (tiles_forest/ruins/dungeon/fortress.png) from the
+shipped tiles.png so each zone gets its own floor palette (CRITIC-P1-01). See
+the "per-zone floor palettes" section below for the shifts and the measured
+closing conditions it asserts on every run.
 """
 import argparse
 import os
@@ -467,6 +473,154 @@ SOURCES = {
 }
 
 
+# --- per-zone floor palettes (CRITIC-P1-01) ----------------------------------
+# All four zones used to paint from one byte-identical tiles.png, so the forest
+# grass RGB(173,188,58) measured 65%/79%/39%/92% of the sampled floor in
+# forest/ruins/dungeon/fortress. --zone-variants derives four atlases from the
+# shipped tiles.png with deterministic integer shifts (no source pack needed)
+# and adds a fixed 16-step luminance dither to the two flat floor cells so no
+# single RGB value can dominate a zone's floor sample.
+#
+# The shifts put each zone in its own luminance band so every pair of zone
+# floors clears 1.5:1 WCAG contrast: forest keeps the original green (L~0.45),
+# ruins becomes a desaturated warm stone-grey (L~0.23), fortress a deep warm
+# brown-grey (L~0.12), dungeon a cold dark blue-grey (L~0.06). Luminance is
+# computed with the WCAG sRGB transfer function, not the Rec.601 luma above.
+ZONE_SHIFTS = ("forest", "ruins", "dungeon", "fortress")
+
+
+def shift_forest(rgb):
+    return rgb
+
+
+def shift_ruins(rgb):
+    r, g, b = rgb
+    gray = (r * 30 + g * 59 + b * 11) // 100
+    return (min(255, gray * 200 // 256 + 8),
+            min(255, gray * 192 // 256 + 5),
+            min(255, gray * 172 // 256 + 4))
+
+
+def shift_dungeon(rgb):
+    r, g, b = rgb
+    gray = (r * 30 + g * 59 + b * 11) // 100
+    return (min(255, gray * 44 // 256 + 28),
+            min(255, gray * 56 // 256 + 30),
+            min(255, gray * 88 // 256 + 40))
+
+
+def shift_fortress(rgb):
+    r, g, b = rgb
+    gray = (r * 30 + g * 59 + b * 11) // 100
+    return (min(255, gray * 128 // 256 + 32),
+            min(255, gray * 104 // 256 + 28),
+            min(255, gray * 72 // 256 + 22))
+
+
+ZONE_SHIFT_FNS = {
+    "forest": shift_forest,
+    "ruins": shift_ruins,
+    "dungeon": shift_dungeon,
+    "fortress": shift_fortress,
+}
+
+# 16 distinct deltas summing to zero: the mean floor colour is exactly the
+# shifted base, while each individual pixel carries one of 16 shades. Assigned
+# by (x%4, y%4) through this spread order so neighbouring cells never share a
+# shade and the dither reads as texture, not as a 4x4 checkerboard.
+ZONE_DITHER = (-8, 5, -3, 7, 2, -6, 8, -1, -7, 4, -2, 6, 1, -5, 3, -4)
+
+
+def dither(rgb, x, y):
+    d = ZONE_DITHER[(x % 4) * 4 + (y % 4)]
+    return (max(0, min(255, rgb[0] + d)),
+            max(0, min(255, rgb[1] + d)),
+            max(0, min(255, rgb[2] + d)))
+
+
+def wcag_lin(c):
+    c = c / 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def wcag_lum(rgb):
+    return (0.2126 * wcag_lin(rgb[0]) + 0.7152 * wcag_lin(rgb[1])
+            + 0.0722 * wcag_lin(rgb[2]))
+
+
+def wcag_contrast(a, b):
+    la, lb = wcag_lum(a), wcag_lum(b)
+    if la < lb:
+        la, lb = lb, la
+    return (la + 0.05) / (lb + 0.05)
+
+
+def zone_variant_grid(base, shift_fn):
+    """One 64x16 per-zone atlas: shift every cell, dither the two floor cells."""
+    out = blank(64, 16)
+    for y in range(16):
+        for x in range(64):
+            r, g, b, a = base[y][x]
+            rgb = shift_fn((r, g, b))
+            if x < 32:  # grass and dirt are the flat floor cells
+                rgb = dither(rgb, x, y)
+            out[y][x] = (rgb[0], rgb[1], rgb[2], a)
+    return out
+
+
+def zone_floor_stats(grid):
+    """(grass_mean, dirt_mean, max_single_rgb_share) over the floor cells."""
+    from collections import Counter  # local: the tool stays import-light
+    counts = Counter()
+    gsum = [0, 0, 0]
+    dsum = [0, 0, 0]
+    for y in range(16):
+        for x in range(32):
+            rgb = grid[y][x][:3]
+            counts[rgb] += 1
+            target = gsum if x < 16 else dsum
+            for i in range(3):
+                target[i] += rgb[i]
+    total = sum(counts.values())
+    gm = tuple(v // 256 for v in gsum)
+    dm = tuple(v // 256 for v in dsum)
+    return gm, dm, max(counts.values()) / float(total)
+
+
+def generate_zone_variants(outdir):
+    """Derive the four per-zone atlases from the shipped tiles.png and verify
+    the CRITIC-P1-01 closing conditions: no RGB above 20% of a zone's floor
+    sample, and pairwise zone floor contrast at or above 1.5:1."""
+    src = os.path.join(outdir, "tiles.png")
+    if not os.path.isfile(src):
+        raise SystemExit("ERROR: --zone-variants needs %s to exist first" % src)
+    w, h, base = load_rgba(src)
+    assert (w, h) == (64, 16), "unexpected tiles.png size %dx%d" % (w, h)
+    means = {}
+    print("backend: %s" % ("PIL" if HAVE_PIL else "pure-Python"))
+    for zone in ZONE_SHIFTS:
+        grid = zone_variant_grid(base, ZONE_SHIFT_FNS[zone])
+        name = "tiles_%s.png" % zone
+        save_rgba(os.path.join(outdir, name), 64, 16, grid)
+        gm, dm, share = zone_floor_stats(grid)
+        means[zone] = (gm, dm)
+        print("  wrote %-19s grass mean %s (L %.3f)  dirt mean %s (L %.3f)  "
+              "max rgb share %.1f%%" % (name, gm, wcag_lum(gm), dm,
+                                        wcag_lum(dm), share * 100))
+        assert share <= 0.20, "%s: one RGB holds %.1f%% of the floor sample" \
+            % (zone, share * 100)
+    worst = None
+    for i, za in enumerate(ZONE_SHIFTS):
+        for zb in ZONE_SHIFTS[i + 1:]:
+            c = wcag_contrast(means[za][0], means[zb][0])
+            print("  floor contrast %-8s vs %-8s: %.2f" % (za, zb, c))
+            assert c >= 1.5, "%s/%s floor contrast %.2f below 1.5" % (za, zb, c)
+            if worst is None or c < worst[0]:
+                worst = (c, za, zb)
+    print("  weakest pair: %s/%s at %.2f (>= 1.5 required)" % (worst[1],
+                                                                worst[2], worst[0]))
+
+
 def resolve(srcdir, rel):
     cands = [os.path.join(srcdir, PACK_PREFIX, rel), os.path.join(srcdir, rel)]
     for c in cands:
@@ -496,7 +650,17 @@ def main():
     ap.add_argument("--sheet", default="",
                     help="also write an 8x labelled comparison sheet "
                          "(grass, bush-over-grass, A, B, C) to this PNG path")
+    ap.add_argument("--zone-variants", action="store_true",
+                    help="skip the source pack entirely: derive "
+                         "tiles_forest/ruins/dungeon/fortress.png from the "
+                         "tiles.png already in --out by the deterministic "
+                         "per-zone shifts + floor dither documented above, "
+                         "and verify the CRITIC-P1-01 closing conditions")
     args = ap.parse_args()
+
+    if args.zone_variants:
+        generate_zone_variants(args.out)
+        return
 
     if not os.path.isdir(args.src):
         raise SystemExit("ERROR: source dir does not exist: %s" % args.src)

@@ -20,9 +20,12 @@ extends Boss
 
 ## Phase two lands the heavy swing on every second swing instead of the base three.
 const HEAVY_EVERY_PHASE_TWO := 2
-## A colder, harder telegraph for phase two, so a player who read the amber heavy
-## wind-up in phase one now reads a different promise on every swing.
-const PHASE2_TELEGRAPH_COLOR := Color(0.55, 0.78, 1.0, 0.85)
+## A saturated violet for phase two, so a player who read the cyan ordinary and
+## magenta heavy promises in phase one now reads a third, different one on every
+## swing. Violet, not the old pale ice blue: the ruins floor it is read against
+## separates from a dark outline at 5.3:1, and violet keeps that outline-plus-
+## saturated-fill rule the Captain's swings now follow (CRITIC-P1-09).
+const PHASE2_TELEGRAPH_COLOR := Color(0.55, 0.30, 1.0, 1.0)
 
 
 func _enter_phase_two() -> void:

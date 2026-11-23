@@ -70,6 +70,89 @@ const PACK_BONUS_CAP := 0.4
 ## count is refreshed a few times a second and read from a cache every frame.
 const PACK_REFRESH_INTERVAL := 0.25
 
+## --- warning readability (CRITIC-P1-09, P1-10, P1-18) -------------------------
+## The old telegraph was a bare warm ColorRect whose effective alpha (scene 0.5
+## times modulate 0.25..0.7) measured 1.02..1.58:1 against every floor in the
+## game — invisible at exactly the frame the player needs it. The rule now:
+## a saturated cool fill (outside the warm family of all four zone floors) over
+## a hard 1px near-black outline that stays fully opaque through the whole ramp.
+## The outline alone is 9.5:1 on the lightest floor (forest grass) and the fill
+## alone at the ramp start is 4.0:1 on the darkest (dungeon grass), so the shape
+## clears 3:1 on every floor from the first warning frame, whichever channel
+## the floor lets through. Timing is untouched: same wind-up, same ramp clock.
+const TELEGRAPH_FILL := Color(0.0, 0.90, 1.0)
+const TELEGRAPH_OUTLINE_COLOR := Color(0.02, 0.03, 0.05, 1.0)
+const TELEGRAPH_ALPHA_START := 0.70
+const TELEGRAPH_ALPHA_PEAK := 0.95
+
+## Per-type readable body tints (CRITIC-P1-18: 51% of one enemy's pixels sat
+## under 1.5:1 against its own spawn floor, a head at 1.03:1). Every entry is
+## either 45 degrees or more away in hue from every floor its types spawn on,
+## or clears 3:1 against those floors outright — the roster test re-derives the
+## floors from the zone atlases themselves. Applied in _ready over whatever the
+## scene authored, so all 23 enemy and boss scenes get it from one place.
+const READABLE_TINTS: Dictionary = {
+	&"ash_wolf": Color(0.32, 0.35, 0.45),
+	&"ash_archer": Color(0.25, 0.40, 0.45),
+	&"ash_boar": Color(0.42, 0.45, 0.58),
+	&"ash_wisp": Color(0.65, 0.85, 1.0),
+	&"spider": Color(0.45, 0.80, 0.75),
+	&"slime": Color(0.72, 0.55, 0.90),
+	&"tick": Color(0.55, 0.10, 0.25),
+	&"lumberjack": Color(0.35, 0.55, 0.60),
+	&"root_beast": Color(0.35, 0.60, 0.55),
+	&"ruin_skeleton": Color(0.92, 0.94, 0.98),
+	&"ruin_skeleton_archer": Color(0.80, 0.86, 0.95),
+	&"shieldbearer": Color(0.78, 0.82, 0.90),
+	&"cultist_caster": Color(0.75, 0.60, 0.95),
+	&"grave_hound": Color(0.60, 0.62, 0.72),
+	&"royal_guard": Color(0.60, 0.70, 0.85),
+	&"bone_crawler": Color(0.90, 0.92, 0.88),
+	&"plague_bearer": Color(0.55, 0.78, 0.50),
+	&"ash_knight": Color(0.70, 0.68, 0.75),
+	&"forest_warden": Color(0.55, 0.85, 0.60),
+	&"root_mother": Color(0.60, 0.40, 0.75),
+	&"captain_of_the_guard": Color(0.62, 0.66, 0.78),
+	&"bell_ringer": Color(0.72, 0.70, 0.86),
+	&"king_without_crown": Color(0.90, 0.78, 0.45),
+}
+
+## A 1px dark silhouette expanded from the sprite's own alpha, so no enemy can
+## camouflage into its zone floor even where the tint only separates by hue.
+## One shared ShaderMaterial for all 23 scenes: five extra taps per pixel of a
+## 16x16 sprite, one shader program for the whole roster.
+const OUTLINE_SHADER_CODE := "
+shader_type canvas_item;
+uniform vec4 outline_color : source_color = vec4(0.043, 0.051, 0.067, 1.0);
+void fragment() {
+	vec2 px = TEXTURE_PIXEL_SIZE;
+	vec4 tex = texture(TEXTURE, UV);
+	float ring = texture(TEXTURE, UV + vec2(px.x, 0.0)).a;
+	ring = max(ring, texture(TEXTURE, UV - vec2(px.x, 0.0)).a);
+	ring = max(ring, texture(TEXTURE, UV + vec2(0.0, px.y)).a);
+	ring = max(ring, texture(TEXTURE, UV - vec2(0.0, px.y)).a);
+	if (tex.a < 0.5 && ring >= 0.5) {
+		COLOR = vec4(outline_color.rgb, outline_color.a * COLOR.a);
+	} else {
+		COLOR = tex * COLOR;
+	}
+}
+"
+
+static var _outline_material: ShaderMaterial = null
+
+
+## The one silhouette material every enemy sprite shares. Built on first use so
+## a headless test that never draws an enemy pays nothing for it.
+static func outline_material() -> ShaderMaterial:
+	if _outline_material == null:
+		var shader := Shader.new()
+		shader.code = OUTLINE_SHADER_CODE
+		var material := ShaderMaterial.new()
+		material.shader = shader
+		_outline_material = material
+	return _outline_material
+
 @export var kind: Kind = Kind.MELEE
 @export var enemy_type: StringName = &"ash_wolf"
 @export var display_name: String = "Пепельный волк"
@@ -220,7 +303,21 @@ func _ready() -> void:
 	# ships the shape open gets it closed on the next step instead of mid-flush.
 	_hitbox_open = not attack_shape.disabled
 	_set_hitbox(false)
-	telegraph.visible = false
+	# Readability pass (CRITIC-P1-18): the scene's authored tint is replaced by
+	# the roster's readable tint when one exists, and every sprite gets the
+	# shared 1px dark silhouette so its outline separates on any floor.
+	if READABLE_TINTS.has(enemy_type):
+		sprite_tint = READABLE_TINTS[enemy_type]
+	# NB: this engine build exposes CanvasItem's local material as `material`
+	# (with `use_parent_material`), not 4.x `material_override` — verified
+	# against the live property list; assigning the latter fails at runtime
+	# with "Invalid assignment of property or key 'material_override'".
+	sprite.material = outline_material()
+	# The warning shape: cool saturated fill over a hard dark outline (the
+	# outline is a sibling so the telegraph's own alpha ramp never fades it).
+	telegraph.color = TELEGRAPH_FILL
+	_ensure_telegraph_outline()
+	_set_telegraph_shown(false)
 	sprite.modulate = sprite_tint
 	_attack_cooldown_left = randf_range(0.2, 0.9)
 	_wander_timer = randf_range(1.0, 3.0)
@@ -415,6 +512,36 @@ func _combination_stagger_bonus(info: Dictionary) -> float:
 	return maxf(0.0, float((combination as Dictionary).get("extra_stagger", 0.0)))
 
 
+## Builds the telegraph's dark outline once: a 1px-larger ColorRect sitting one
+## z step behind the fill, hidden and shown with it. A sibling rather than a
+## child because the fill's alpha ramp rides on its `modulate`, and a child
+## would inherit that fade — the outline has to stay fully opaque for the whole
+## warning to keep its 9.5:1 edge on the lightest floor.
+func _ensure_telegraph_outline() -> void:
+	if get_node_or_null("TelegraphOutline") != null:
+		return
+	var outline := ColorRect.new()
+	outline.name = "TelegraphOutline"
+	outline.color = TELEGRAPH_OUTLINE_COLOR
+	outline.offset_left = telegraph.offset_left - 1.0
+	outline.offset_top = telegraph.offset_top - 1.0
+	outline.offset_right = telegraph.offset_right + 1.0
+	outline.offset_bottom = telegraph.offset_bottom + 1.0
+	outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	outline.z_index = telegraph.z_index - 1
+	outline.visible = false
+	add_child(outline)
+
+
+## The only writer of the telegraph's visibility in this class: the fill and its
+## outline always travel together, so no swing can show one without the other.
+func _set_telegraph_shown(shown: bool) -> void:
+	telegraph.visible = shown
+	var outline := get_node_or_null("TelegraphOutline")
+	if outline != null:
+		outline.visible = shown
+
+
 func _on_damaged(_amount: int, _info: Dictionary) -> void:
 	_flash_timer = 0.1
 	# The flash brightens this enemy's own tint instead of replacing it, so a
@@ -431,7 +558,7 @@ func _on_died(_info: Dictionary) -> void:
 	if dead_sc != null:
 		dead_sc.clear_all()
 	_set_hitbox(false)
-	telegraph.visible = false
+	_set_telegraph_shown(false)
 	collision_layer = 0
 	collision_mask = 0
 	GameState.add_xp(xp_reward)
@@ -531,7 +658,7 @@ func _enter(next: State) -> void:
 		State.IDLE:
 			velocity = Vector2.ZERO
 		State.STAGGER:
-			telegraph.visible = false
+			_set_telegraph_shown(false)
 			_set_hitbox(false)
 			# The stagger clock for this hit: the base time plus whatever the
 			# combination on the incoming hit asked for, then the bonus is dropped so
@@ -893,8 +1020,8 @@ func _start_attack() -> void:
 	var p := _player_ref()
 	if p != null:
 		_face(global_position.direction_to(p.global_position))
-	telegraph.visible = true
-	telegraph.modulate = Color(1.0, 0.35, 0.25, 0.55)
+	_set_telegraph_shown(true)
+	telegraph.modulate = Color(1.0, 1.0, 1.0, TELEGRAPH_ALPHA_START)
 
 
 func _process_attack(delta: float) -> void:
@@ -903,7 +1030,7 @@ func _process_attack(delta: float) -> void:
 	var swing_sc := _status()
 	if swing_sc != null and swing_sc.attack_multiplier() == 0.0:
 		_set_hitbox(false)
-		telegraph.visible = false
+		_set_telegraph_shown(false)
 		_enter(State.CHASE)
 		return
 
@@ -915,10 +1042,10 @@ func _process_attack(delta: float) -> void:
 	var windup := WINDUP * windup_multiplier
 	if _state_time < windup:
 		var t := _state_time / windup
-		telegraph.modulate.a = 0.25 + 0.45 * t
+		telegraph.modulate.a = TELEGRAPH_ALPHA_START + (TELEGRAPH_ALPHA_PEAK - TELEGRAPH_ALPHA_START) * t
 		return
 
-	telegraph.visible = false
+	_set_telegraph_shown(false)
 
 	if _state_time < windup + ACTIVE:
 		if kind == Kind.MELEE:

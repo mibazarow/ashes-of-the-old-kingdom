@@ -37,10 +37,13 @@ const HEAVY_SWING_EVERY := 3
 const HEAVY_DAMAGE_MULTIPLIER := 1.8
 const HEAVY_WINDUP_MULTIPLIER := 1.6
 
-## Heavy telegraph: same red as an ordinary swing, but brighter, thicker and
-## amber-shifted, so the difference is readable at a glance instead of resting on
-## a 15 % alpha change.
-const HEAVY_TELEGRAPH_COLOR := Color(1.0, 0.62, 0.12, 0.85)
+## Heavy telegraph: a saturated magenta against the ordinary swing's cyan, so
+## the difference is a hue change readable at a glance (CRITIC-P1-09 rule: cool
+## saturated fills, the dark outline doing the separation). Magenta was chosen
+## because it is the one saturated hue that still clears 3:1 on fill alone at
+## the ramp start against the darkest floor in the game (the dungeon's, 3.5:1),
+## where the old warm amber sat at ~1.1:1.
+const HEAVY_TELEGRAPH_COLOR := Color(1.0, 0.35, 0.95, 1.0)
 
 @export var phase_two_health_fraction: float = 0.5
 @export var enraged_speed_multiplier: float = 1.3
@@ -53,7 +56,7 @@ var _heavy_swing := false
 ## The scene's own wind-up and telegraph colour, captured before this script ever
 ## boosts them, so a heavy swing can hand both back exactly as they were.
 var _base_windup_multiplier := 1.0
-var _base_telegraph_color := Color(1.0, 0.35, 0.25, 0.5)
+var _base_telegraph_color := Enemy.TELEGRAPH_FILL
 
 
 func _ready() -> void:

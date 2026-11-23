@@ -282,6 +282,12 @@ var _king_node: Node2D
 var _altar_node: Node2D
 
 
+## Deep brown-grey: the old fortress sits between the pale ruins and the dark
+## undercroft in its own warm-dark band (CRITIC-P1-01).
+func tile_atlas_path() -> String:
+	return "res://assets/sprites/tiles_fortress.png"
+
+
 func zone_id() -> String:
 	return "fortress"
 
