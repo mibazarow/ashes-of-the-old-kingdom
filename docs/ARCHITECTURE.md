@@ -989,8 +989,18 @@ user://saves/slot_N.json    актуальный слот
 | `quest_economy.jsonl` | транзакционный: события квеста и экономики с `EventBus` плюс золото на момент события |
 | `performance.csv` | CSV с заголовком `elapsed_ms,physics_frames,fps,process_ms,node_count,orphan_nodes,object_count`, раз в секунду |
 | `replay/seed.txt`, `replay/commands.jsonl` | семя прогона и последовательность гранов ввода |
+| `screenshots/` | каталог ТЗ §20.1 под захваченные кадры (FATAL / смерть / софтлок); создаётся пустым на старте прогона, чтобы раскладка каталога была полной |
 | `errors.log` | ошибки движка через `OS.add_logger` |
 | `summary.md` | блок ТЗ §20.5: `RUN`, `BUILD`, `GODOT`, `SCENARIO`, `PROFILE`, `SEED`/`SEED_SOURCE`, `WORLD_SEED`, `RESULT`, `DURATION`, `ZONES`, `GOALS`, `DEATHS`, `STUCK`, `WARNINGS`, `ERRORS`, `FATAL`, `FIRST ANOMALY`, `REPRO`, `EVIDENCE`, `NEXT ACTION` |
+
+Каталог `screenshots/` заводит `Telemetry._make_screenshots_dir()` в самом начале
+прогона и оставляет его пустым: сам захват кадра (`get_viewport().get_texture()`)
+делает рендерер, а headless-прогон его не имеет, поэтому каталог provision-ится
+заранее, а не в момент аномалии. Кадр, когда его возьмут, ляжет в
+`screenshots/<clock>.png` (например `screenshots/00-03-12.png`). `summary.md`
+носит строку `SCREENSHOTS: screenshots/` — указатель, на который опирается поле
+`EVIDENCE`: ссылка на скриншот проверяема только тогда, когда видно, в каком
+каталоге его искать.
 
 Список обязательных полей вердикта лежит в одной константе `SUMMARY_KEYS`, а
 сам блок собирает чистая функция `build_summary(result, extra)`: счётчики

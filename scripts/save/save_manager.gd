@@ -77,17 +77,31 @@ func load_game(slot: int) -> Dictionary:
 	if slot < 1 or slot > SLOT_COUNT:
 		return {"ok": false, "error": "bad_slot"}
 	var path := slot_path(slot)
-	if not FileAccess.file_exists(path):
-		return {"ok": false, "error": "empty_slot"}
-
-	var text := FileAccess.get_file_as_string(path)
-	var parsed: Variant = _parse_json(text)
+	var from_backup := false
+	var parsed: Variant = null
+	if FileAccess.file_exists(path):
+		parsed = _parse_json(FileAccess.get_file_as_string(path))
+		if not parsed is Dictionary:
+			Telemetry.error("SaveManager: corrupt slot %d, trying backup" % slot)
+	else:
+		# A missing primary with a backup on disk is the crash window between
+		# `rename(final -> bak)` and `rename(tmp -> final)` in `save_game`: the good
+		# copy survives as `.bak` while the slot itself reads empty. `slot_zone`
+		# already falls back to the backup here, so `load_game` must agree with it or
+		# a save that is physically present is reported as nothing.
+		Telemetry.error("SaveManager: primary slot %d missing, trying backup" % slot)
 	if not parsed is Dictionary:
-		Telemetry.error("SaveManager: corrupt slot %d, trying backup" % slot)
 		var recovered := _try_backup(slot)
 		if recovered.is_empty():
+			# Nothing usable to recover. Distinguish a genuinely empty slot (neither
+			# file exists) from a primary that is present but corrupt with no valid
+			# backup, so `empty_slot` is reported only when the slot really is empty
+			# and `corrupt_and_no_backup` when a broken save was written over it.
+			if not FileAccess.file_exists(path) and not FileAccess.file_exists(slot_backup_path(slot)):
+				return {"ok": false, "error": "empty_slot"}
 			return {"ok": false, "error": "corrupt_and_no_backup"}
 		parsed = recovered
+		from_backup = true
 
 	var data: Dictionary = parsed
 	var migrated := _migrate(data)
@@ -119,6 +133,10 @@ func load_game(slot: int) -> Dictionary:
 		"zone": GameState.zone,
 		"player_position": payload.get("player_position", []),
 		"saved_at": payload.get("saved_at", ""),
+		# True when the primary was absent or unreadable and the slot was restored
+		# from `.bak`. A caller that tells the player what happened can say the save
+		# came back from the backup rather than silently pretending the primary read.
+		"recovered_from_backup": from_backup,
 	}
 
 

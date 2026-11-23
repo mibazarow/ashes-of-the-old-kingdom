@@ -38,6 +38,14 @@ const SUMMARY_CONSUMED: Array[String] = ["RUN_ID", "BUILD_ID", "ENGINE", "SCENAR
 ## question twice and settles it never.
 const BOT_DEFAULT_SEED := 20261122
 
+## The subdirectory of a run directory that §20.1 reserves for captured frames
+## (FATAL, death, softlock). It is created empty at run start so the on-disk layout
+## is complete whether or not anything was ever grabbed: a `screenshots/` that is
+## absent reads as "this build never writes evidence frames", which is exactly the
+## ambiguity §20.1 closes. A frame, when one is taken, lands at
+## `screenshots/<clock>.png` under this directory.
+const SCREENSHOTS_DIR := "screenshots"
+
 var run_id: String = ""
 var run_dir: String = ""
 var build_id: String = "dev"
@@ -90,6 +98,7 @@ func _ready() -> void:
 	run_id = _make_run_id()
 	run_dir = "user://debug_runs/%s" % run_id
 	DirAccess.make_dir_recursive_absolute(run_dir)
+	_make_screenshots_dir()
 	_events = _open("events.jsonl")
 	_combat = _open("combat.jsonl")
 	_errors = _open("errors.log")
@@ -126,6 +135,16 @@ func _write_replay_seed() -> void:
 	f.store_line("build_id=%s" % build_id)
 	f.store_line("engine=%s" % Engine.get_version_info().get("string", ""))
 	f.close()
+
+
+## Creates the §20.1 `screenshots/` directory at run start, empty. The grab itself
+## (a viewport texture written on FATAL/death/softlock) is a renderer-bound action
+## that a headless run cannot perform, so the directory is provisioned up front and
+## left empty rather than omitted: the layout a reviewer expects to find is always
+## there, and a future capture path has a named home (`screenshots/<clock>.png`)
+## instead of having to invent one at the moment of the anomaly.
+func _make_screenshots_dir() -> void:
+	DirAccess.make_dir_recursive_absolute(run_dir.path_join(SCREENSHOTS_DIR))
 
 
 func _write_performance_header() -> void:
@@ -538,6 +557,12 @@ func build_summary(result: String, extra: Dictionary = {}) -> PackedStringArray:
 		next_action = "-" if String(extra.get("result", result)).to_upper() != "FAIL" \
 				else "re-run with --seed=%d and read FIRST ANOMALY" % int(extra.get("seed", seed_value))
 	lines.append("NEXT ACTION: %s" % next_action)
+	# Where a captured frame would be found. Not a §20.5 verdict field (the spec's
+	# list is fixed) but a pointer the EVIDENCE line leans on: an `EVIDENCE:` that
+	# cites a screenshot is only checkable if the summary also says which directory
+	# holds it. The directory is created empty at run start, so this path is real on
+	# every run, headless or not, even when nothing was ever grabbed.
+	lines.append("SCREENSHOTS: %s/" % SCREENSHOTS_DIR)
 	for k in extra:
 		var key := String(k).to_upper()
 		if key in SUMMARY_KEYS or key in SUMMARY_CONSUMED:

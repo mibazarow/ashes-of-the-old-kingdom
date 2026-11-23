@@ -930,6 +930,38 @@ func _test_slot_isolation() -> void:
 	_check(not bool(refused.get("ok", false)), "isolation: corrupt primary without a backup is refused")
 	_check(String(refused.get("error", "")) == "corrupt_and_no_backup",
 		"isolation: refusal is corrupt_and_no_backup, not empty_slot")
+
+	# G3 (save safety): a *missing* primary with a valid backup recovers, the way
+	# slot_zone already reads it. This is the crash window between rename(final->bak)
+	# and rename(tmp->final): the good copy survives as .bak while slot_N.json is
+	# gone, and load_game used to report that slot empty instead of recovering.
+	_clear_slot(3)
+	_check(bool(sm.save_game(3).get("ok", false)), "missing-primary: first save into slot 3 ok")
+	_check(bool(sm.save_game(3).get("ok", false)), "missing-primary: rewrite into slot 3 ok")
+	_check(FileAccess.file_exists(sm.slot_backup_path(3)),
+		"missing-primary: the rewrite left a valid backup on disk")
+	DirAccess.remove_absolute(String(sm.slot_path(3)))
+	_check(not FileAccess.file_exists(sm.slot_path(3)),
+		"missing-primary: the primary is gone before the load")
+	_check(FileAccess.file_exists(sm.slot_backup_path(3)),
+		"missing-primary: the backup is still on disk before the load")
+	var recovered_missing: Dictionary = sm.load_game(3)
+	_check(bool(recovered_missing.get("ok", false)),
+		"missing-primary: load recovers from the backup and reports ok")
+	_check(bool(recovered_missing.get("recovered_from_backup", false)),
+		"missing-primary: the ok result states it came from the backup")
+
+	# An empty slot with neither file present is still empty_slot, not a recovery
+	# attempt and not corrupt_and_no_backup: there is nothing there to recover.
+	_clear_slot(3)
+	_check(not FileAccess.file_exists(sm.slot_path(3))
+			and not FileAccess.file_exists(sm.slot_backup_path(3)),
+		"empty-slot: neither primary nor backup exists")
+	var empty: Dictionary = sm.load_game(3)
+	_check(not bool(empty.get("ok", false)), "empty-slot: load is refused")
+	_check(String(empty.get("error", "")) == "empty_slot",
+		"empty-slot: the refusal is empty_slot (got '%s')" % String(empty.get("error", "")))
+
 	_clear_slot(3)
 	completed["slot_isolation"] = true
 
@@ -3641,6 +3673,12 @@ func _test_bot_extended() -> void:
 				"quest_economy.jsonl", "replay/seed.txt", "replay/commands.jsonl"]:
 			_check(FileAccess.file_exists(run_path.path_join(file_name)),
 					"the run directory carries %s" % file_name)
+		# §20.1 reserves a screenshots/ directory for captured frames. It is created
+		# empty at run start so the layout is complete even on a headless run that can
+		# never grab a frame; its absence is what let an EVIDENCE line cite a
+		# screenshot that was never taken.
+		_check(DirAccess.dir_exists_absolute(run_path.path_join("screenshots")),
+				"the run directory carries the §20.1 screenshots/ subdirectory")
 		var perf := FileAccess.get_file_as_string(run_path.path_join("performance.csv"))
 		_check(perf.begins_with("elapsed_ms,physics_frames,fps"),
 				"performance.csv is a header plus samples, not a jsonl (got %s)"
@@ -3778,6 +3816,36 @@ func _test_bot_extended() -> void:
 		"the kill scenario is bounded by physics frames, so its result depends only on the seed")
 	_check(not kill_block.contains("Time.get_ticks_msec() < deadline"),
 		"and no longer by how busy the machine was")
+	# G2 (reproducibility, the critic's P1): every scenario deadline is now a physics
+	# frame budget, so a recorded seed reproduces on a loaded machine. The watchdog
+	# and the control-lock watch now keep their own clocks in physics frames too, so
+	# even their diagnostic notes (no_progress_ms, max_control_ms) are a pure
+	# function of the seed. The only wall-clock read left is the run-start stamp
+	# (`_start_ms`), which measures the run's real duration for the summary and gates
+	# nothing. Assert no `get_ticks_msec` is used as a deadline: never compared
+	# against a bound, never turned into a millisecond budget (`* 1000.0`) or a delta
+	# (`- started`) that bounds a loop.
+	var deadline_lines: Array[String] = []
+	var measurement_lines := 0
+	for line: String in source.split("\n"):
+		if not line.contains("get_ticks_msec"):
+			continue
+		var is_deadline := line.contains("get_ticks_msec() <") \
+				or line.contains("get_ticks_msec() >") \
+				or line.contains("get_ticks_msec() -") \
+				or line.contains("Time.get_ticks_msec() +") \
+				or line.contains("Time.get_ticks_msec() -") \
+				or line.contains("* 1000.0")
+		if is_deadline:
+			deadline_lines.append(line.strip_edges())
+		else:
+			measurement_lines += 1
+	_check(deadline_lines.is_empty(),
+			"no wall-clock deadline remains in bot.gd (found %d: %s)"
+					% [deadline_lines.size(), " || ".join(deadline_lines)])
+	_check(measurement_lines >= 1,
+			"the surviving get_ticks_msec reads are duration measurements, not deadlines (got %d)"
+					% measurement_lines)
 	_check(_extract_gdscript_func(source, "_silence_audio_rng").contains("park_for_bot"),
 		"a bot run parks the audio layer, whose pitch rolls share the simulation's RNG")
 	# The parking has to release the voices, not just drop the dictionary: the old

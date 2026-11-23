@@ -423,7 +423,7 @@ var _zone_path: Array[String] = []
 var _goals_total := 0
 var _goals_done := 0
 
-## Watchdog state. The reference position and its timestamp are re-armed by any
+## Watchdog state. The reference position and its frame are re-armed by any
 ## movement greater than `WATCHDOG_STUCK_PX`, so a stuck report is an episode and not
 ## a per-frame scream; the token is the world's own progress (zone, kills, gold, HP,
 ## level, tile, quest state), and a token that has not moved is the only thing that
@@ -431,13 +431,13 @@ var _goals_done := 0
 var _wd_enabled := false
 var _wd_goal := ""
 var _wd_ref_pos := Vector2.ZERO
-var _wd_ref_ms := 0
+var _wd_ref_frame := 0
 var _wd_token := ""
-var _wd_token_ms := 0
+var _wd_token_frame := 0
 var _wd_action := ""
-var _wd_action_ms := 0
+var _wd_action_frame := 0
 var _wd_repeat := 0
-var _wd_sample_ms := 0
+var _wd_sample_frame := 0
 var _wd_stuck := 0
 var _wd_cycles := 0
 var _wd_zero_progress := 0
@@ -459,7 +459,14 @@ func _physics_process(_delta: float) -> void:
 ## `decisions.jsonl` with the evidence a human needs to tell a wall from a fight, and
 ## counted into the verdict's STUCK field.
 func _watchdog_tick() -> void:
-	var now := Time.get_ticks_msec()
+	# The watchdog keeps its own clock in physics frames, not on the wall clock, so
+	# the stall notes it writes are a pure function of the seed: the same launch
+	# fires the same stuck / cycle / zero_progress lines at the same frames on any
+	# box, loaded or idle. The ms thresholds stay the tuning surface (and the test
+	# reads them back as ms) and are converted to frames here. This still never
+	# bounds a scenario loop's action count and never gates the verdict — it only
+	# decides what gets logged and counted in STUCK.
+	var now := Engine.get_physics_frames()
 	var pos := _player_pos()
 	var token := _wd_progress_token()
 	if token != _wd_token:
@@ -467,27 +474,29 @@ func _watchdog_tick() -> void:
 		# single fact retires every stall timer at once, which is what keeps a hero
 		# trading blows (HP down, position down, enemy dead) from reading as stuck.
 		_wd_token = token
-		_wd_token_ms = now
+		_wd_token_frame = now
 		_wd_ref_pos = pos
-		_wd_ref_ms = now
+		_wd_ref_frame = now
 		_wd_repeat = 0
 		_wd_action = ""
 	elif pos.distance_to(_wd_ref_pos) > WATCHDOG_STUCK_PX:
 		_wd_ref_pos = pos
-		_wd_ref_ms = now
-	elif _wd_movement_held() and now - _wd_ref_ms >= WATCHDOG_STUCK_MS:
+		_wd_ref_frame = now
+	elif _wd_movement_held() \
+			and now - _wd_ref_frame >= _frames(WATCHDOG_STUCK_MS / 1000.0):
 		_wd_stuck += 1
-		_report_watchdog("stuck", now - _wd_ref_ms)
+		_report_watchdog("stuck", _ms_of_frames(now - _wd_ref_frame))
 		# Re-arm from this instant: the episode is over, the next one is a fresh
 		# three seconds of pressing into something. Without the re-arm a single
 		# corner would write one line per frame for the rest of the run.
-		_wd_ref_ms = now
-	if _wd_goal != "" and now - _wd_token_ms >= WATCHDOG_ZERO_PROGRESS_MS:
+		_wd_ref_frame = now
+	if _wd_goal != "" \
+			and now - _wd_token_frame >= _frames(WATCHDOG_ZERO_PROGRESS_MS / 1000.0):
 		_wd_zero_progress += 1
-		_report_watchdog("zero_progress", now - _wd_token_ms)
-		_wd_token_ms = now
-	if now - _wd_sample_ms >= WATCHDOG_SAMPLE_MS:
-		_wd_sample_ms = now
+		_report_watchdog("zero_progress", _ms_of_frames(now - _wd_token_frame))
+		_wd_token_frame = now
+	if now - _wd_sample_frame >= _frames(WATCHDOG_SAMPLE_MS / 1000.0):
+		_wd_sample_frame = now
 		_write_observation()
 
 
@@ -519,17 +528,19 @@ func _wd_movement_held() -> bool:
 func _wd_note_action(action: String) -> void:
 	if not _wd_enabled:
 		return
-	var now := Time.get_ticks_msec()
+	# The cycle detector's clock is physics frames too, so a cycle note lands on the
+	# same frame every run. The ms threshold is the tuning surface, converted here.
+	var now := Engine.get_physics_frames()
 	if action == _wd_action:
 		_wd_repeat += 1
 	else:
 		_wd_action = action
 		_wd_repeat = 1
-		_wd_action_ms = now
+		_wd_action_frame = now
 	if _wd_repeat > WATCHDOG_CYCLE_REPEATS \
-			and now - _wd_action_ms >= WATCHDOG_CYCLE_MIN_MS:
+			and now - _wd_action_frame >= _frames(WATCHDOG_CYCLE_MIN_MS / 1000.0):
 		_wd_cycles += 1
-		_report_watchdog("cycle", now - _wd_token_ms)
+		_report_watchdog("cycle", _ms_of_frames(now - _wd_token_frame))
 		_wd_repeat = 0
 		_wd_action = ""
 
@@ -594,11 +605,14 @@ func _write_observation() -> void:
 ## StatusComponent's public `effects`, the same dictionary the movement multiplier
 ## is computed from, so a root counts exactly as much as a stun does.
 func _track_control_lock() -> void:
-	var now := Time.get_ticks_msec()
+	# The control-lock clock is physics frames too, so the max_control_ms the arena
+	# verdict reports is a pure function of the seed, not of how fast the machine
+	# ran the frames the hero spent stunned. Converted to ms only for the report.
+	var now := Engine.get_physics_frames()
 	if _player_is_controlled():
 		if _a_control_since < 0:
 			_a_control_since = now
-		_a_max_control_ms = maxi(_a_max_control_ms, now - _a_control_since)
+		_a_max_control_ms = maxi(_a_max_control_ms, _ms_of_frames(now - _a_control_since))
 	else:
 		_a_control_since = -1
 
@@ -616,12 +630,14 @@ func _set_control_watch(on: bool) -> void:
 func _set_watchdog(on: bool) -> void:
 	_wd_enabled = on
 	if on:
-		var now := Time.get_ticks_msec()
+		# Seeds the watchdog's frame baselines so its first thresholds are measured
+		# from the moment it is armed, on the same clock it ticks on.
+		var now := Engine.get_physics_frames()
 		_wd_ref_pos = _player_pos()
-		_wd_ref_ms = now
+		_wd_ref_frame = now
 		_wd_token = _wd_progress_token()
-		_wd_token_ms = now
-		_wd_sample_ms = now
+		_wd_token_frame = now
+		_wd_sample_frame = now
 		_wd_action = ""
 		_wd_repeat = 0
 	set_physics_process(on or _a_watch)
@@ -695,6 +711,8 @@ func start_from_cmdline() -> void:
 	_profile = PROFILES.get(profile, PROFILES["normal"])
 	_world = get_parent().get_node_or_null("World")
 	_running = true
+	# Run-start wall clock, kept only so a duration can be reported if ever read; it
+	# is not a deadline and bounds no scenario loop.
 	_start_ms = Time.get_ticks_msec()
 	InputSource.set_override(bot_input)
 	# The watchdog is on for every scenario, not only for the ones that ask for it.
@@ -1343,9 +1361,9 @@ func _soak_has_potion() -> bool:
 func _soak_retreat(threat: Vector2, budget: float) -> float:
 	var away := _player_pos() - threat
 	away = away.normalized() if away != Vector2.ZERO else Vector2.UP
-	var cap_ms := int(minf(SOAK_RETREAT_TIME, maxf(budget, 0.0)) * 1000.0)
-	var started := Time.get_ticks_msec()
-	while Time.get_ticks_msec() - started < cap_ms:
+	var cap_frames := _frames(minf(SOAK_RETREAT_TIME, maxf(budget, 0.0)))
+	var started := Engine.get_physics_frames()
+	while Engine.get_physics_frames() - started < cap_frames:
 		bot_input.hold(&"move_right", away.x > 0.35)
 		bot_input.hold(&"move_left", away.x < -0.35)
 		bot_input.hold(&"move_down", away.y > 0.35)
@@ -1354,19 +1372,19 @@ func _soak_retreat(threat: Vector2, budget: float) -> float:
 		bot_input.set_aim(threat)
 		await get_tree().physics_frame
 	bot_input.release_all()
-	return float(Time.get_ticks_msec() - started) / 1000.0
+	return float(Engine.get_physics_frames() - started) / 60.0
 
 
 func _scenario_take_damage() -> void:
 	# Deliberately walk into a wolf and never attack: the enemy must be able to
 	# hurt the player, and the damage must be visible in the combat log.
 	var start_hp: int = GameState.hp
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(SCENARIO_TIMEOUT)
 	var enemy := _nearest_enemy()
 	if enemy == null:
 		_notes.append("no_enemy")
 		return
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < deadline:
 		if GameState.hp < start_hp:
 			break
 		enemy = _nearest_enemy()
@@ -1415,7 +1433,7 @@ func _scenario_arena() -> void:
 	_a_last_target = -1
 	_a_broken = false
 	_a_pick_spell()
-	var deadline := Time.get_ticks_msec() + int(ARENA_TIMEOUT * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(ARENA_TIMEOUT)
 	var forest_rally := _player_spawn()
 
 	# Leg 0 — supply. This is a two-zone march now, and the ruins hold no finds at
@@ -1618,7 +1636,7 @@ func _arena_prep(deadline: int) -> void:
 	# The finds worth a walk: the potion nine tiles east of the spawn, and
 	# nothing that belongs to a boss's yard.
 	var guard := 0
-	while guard < 2 and Time.get_ticks_msec() < deadline:
+	while guard < 2 and Engine.get_physics_frames() < deadline:
 		guard += 1
 		var loot := _nearest_pickup()
 		if loot == null or loot.global_position.distance_to(spawn) > 240.0 \
@@ -1630,8 +1648,8 @@ func _arena_prep(deadline: int) -> void:
 	# chases prey out of the spawn's own quarter, because a prep that wanders off
 	# is a march that starts from the wrong end of the map.
 	var kills_at_start := _kill_total()
-	var hunt_until := mini(Time.get_ticks_msec() + 70000, deadline)
-	while Time.get_ticks_msec() < hunt_until:
+	var hunt_until := mini(Engine.get_physics_frames() + _frames(70.0), deadline)
+	while Engine.get_physics_frames() < hunt_until:
 		var ready := QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY
 		var kills := _kill_total() - kills_at_start
 		if kills >= (4 if ready else 7):
@@ -1724,7 +1742,7 @@ func _arena_kind_engaged(kinds: Array[String]) -> bool:
 func _arena_fight_toward(hunt: Array[String], dest: Vector2, arrive: float,
 		deadline: int, rally: Vector2) -> void:
 	await _wait_for_alive(10.0)
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < deadline:
 		if GameState.hp <= 0:
 			bot_input.release_all()
 			return
@@ -1736,7 +1754,7 @@ func _arena_fight_toward(hunt: Array[String], dest: Vector2, arrive: float,
 		if foe == null:
 			if _player_pos().distance_to(dest) <= arrive:
 				break
-			var left := float(deadline - Time.get_ticks_msec()) / 1000.0
+			var left := float(deadline - Engine.get_physics_frames()) / 60.0
 			var chunk := minf(ARENA_CHUNK, left)
 			if chunk <= 1.0:
 				break
@@ -1753,13 +1771,13 @@ func _arena_fight_toward(hunt: Array[String], dest: Vector2, arrive: float,
 func _arena_pin_kind(kinds: Array[String], budget: float, deadline: int,
 		rally: Vector2, min_exchanges := 3) -> void:
 	await _wait_for_alive(10.0)
-	var until := Time.get_ticks_msec() + int(budget * 1000.0)
+	var until := Engine.get_physics_frames() + _frames(budget)
 	until = mini(until, deadline)
 	var saw := 0
 	var exchanges := 0
 	var best_d := INF
 	var since_gain := 0
-	while Time.get_ticks_msec() < until:
+	while Engine.get_physics_frames() < until:
 		if GameState.hp <= 0:
 			break
 		# The leg is not finished just because somebody has already bled for this
@@ -1906,16 +1924,16 @@ func _arena_strike(foe: Node2D) -> void:
 ## true while the break is running, so the caller skips its own attack step.
 func _arena_break_step(rally: Vector2) -> bool:
 	if not _a_broken:
-		if Time.get_ticks_msec() < _a_break_cooldown_until:
+		if Engine.get_physics_frames() < _a_break_cooldown_until:
 			return false
 		if GameState.hp > int(GameState.max_hp * 0.40) and not _crowded():
 			return false
 		_a_broken = true
-		_a_break_started = Time.get_ticks_msec()
+		_a_break_started = Engine.get_physics_frames()
 	if GameState.hp >= int(GameState.max_hp * 0.70):
 		_end_arena_break("recovered")
 		return false
-	if Time.get_ticks_msec() - _a_break_started > int(ARENA_BREAK_BUDGET * 1000.0):
+	if Engine.get_physics_frames() - _a_break_started > _frames(ARENA_BREAK_BUDGET):
 		# No medicine and no recovery in sight, and a leg still to walk. Standing
 		# still while an archer spends the whole map on the hero is the slower of
 		# the two deaths, so the break is given up and the lane walked again.
@@ -1938,8 +1956,8 @@ func _arena_break_step(rally: Vector2) -> bool:
 func _wait_for_alive(seconds: float) -> void:
 	if GameState.hp > 0:
 		return
-	var until := Time.get_ticks_msec() + int(seconds * 1000.0)
-	while GameState.hp <= 0 and Time.get_ticks_msec() < until:
+	var until := Engine.get_physics_frames() + _frames(seconds)
+	while GameState.hp <= 0 and Engine.get_physics_frames() < until:
 		await _wait(0.25)
 	_a_broken = false
 	_notes.append("respawned hp=%d at=%s" % [GameState.hp, str(_tile_of(_player_pos()))])
@@ -1947,7 +1965,7 @@ func _wait_for_alive(seconds: float) -> void:
 
 func _end_arena_break(reason: String) -> void:
 	_a_broken = false
-	_a_break_cooldown_until = Time.get_ticks_msec() + int(ARENA_BREAK_COOLDOWN * 1000.0)
+	_a_break_cooldown_until = Engine.get_physics_frames() + _frames(ARENA_BREAK_COOLDOWN)
 	_notes.append("break_%s hp=%d" % [reason, GameState.hp])
 
 
@@ -1970,7 +1988,7 @@ func _arena_enter_ruins(deadline: int) -> bool:
 		# a break-off two tiles from the gate, came back at full health, and the
 		# deadline check refused it the one key press that would have finished the
 		# scenario — a bot out of time still knocks before it leaves.
-		if Time.get_ticks_msec() >= deadline and attempt > 0:
+		if Engine.get_physics_frames() >= deadline and attempt > 0:
 			break
 		# Stand on the gate's own tile rather than near it: the exit sits on a
 		# tile the zone already called walkable, and the interact reaches 26 px,
@@ -2022,7 +2040,7 @@ func _arena_open_ruins_door(deadline: int, rally: Vector2) -> bool:
 		if bool(GameState.get_flag("ruin_door_open", false)):
 			_notes.append("ruin_door_open")
 			return true
-		if Time.get_ticks_msec() >= deadline:
+		if Engine.get_physics_frames() >= deadline:
 			break
 		if _walkable(lever_tile + Vector2i(-1, 0)):
 			await _travel_to(stand, 8.0, 20.0)
@@ -2156,7 +2174,7 @@ func _zone_travel(gate_name: String, target_zone: String, deadline: int, rally: 
 		if _walkable(_tile_of(nudged), true):
 			knock_point = nudged
 	var unsticks := 0
-	while Time.get_ticks_msec() < deadline and String(GameState.zone) != target_zone:
+	while Engine.get_physics_frames() < deadline and String(GameState.zone) != target_zone:
 		if GameState.hp <= 0:
 			await _wait_for_alive(12.0)
 			bot_input.release_all()
@@ -2175,7 +2193,7 @@ func _zone_travel(gate_name: String, target_zone: String, deadline: int, rally: 
 		# to spend a run crossing the same corridor.
 		if GameState.hp <= int(GameState.max_hp * 0.40) and await _arena_break_step(rally):
 			continue
-		var left := float(deadline - Time.get_ticks_msec()) / 1000.0
+		var left := float(deadline - Engine.get_physics_frames()) / 60.0
 		if left <= 1.0:
 			break
 		var before := _player_pos()
@@ -2197,7 +2215,7 @@ func _zone_travel(gate_name: String, target_zone: String, deadline: int, rally: 
 		# the leg's own clock has run out: a bot out of time still knocks before it
 		# leaves, and one knock on the right tile is the difference between a zone
 		# entered and a run that walked all this way for nothing.
-		if Time.get_ticks_msec() >= deadline and attempt > 0:
+		if Engine.get_physics_frames() >= deadline and attempt > 0:
 			break
 		# Stand on the exit's own tile rather than near it. The interact reaches 26 px,
 		# which is exactly the distance at which arriving "close" from the wrong side
@@ -2277,7 +2295,7 @@ func _dungeon_engage_distinct(wanted: int, budget_each: float, deadline: int,
 		rally: Vector2) -> int:
 	var engaged := _dungeon_distinct_count()
 	var misses := 0
-	while engaged < wanted and Time.get_ticks_msec() < deadline:
+	while engaged < wanted and Engine.get_physics_frames() < deadline:
 		var kind := _dungeon_unbled_kind()
 		if kind == "":
 			_notes.append("dungeon_no_unbled_kind engaged=%d" % engaged)
@@ -2337,8 +2355,8 @@ func _dungeon_trap_lesson(deadline: int, rally: Vector2) -> Dictionary:
 		out["skipped"] = true
 		return out
 	var telegraph_seen := false
-	var watch_until := mini(Time.get_ticks_msec() + 9000, deadline + 9000)
-	while Time.get_ticks_msec() < watch_until:
+	var watch_until := mini(Engine.get_physics_frames() + _frames(9.0), deadline + _frames(9.0))
+	while Engine.get_physics_frames() < watch_until:
 		var plate: ColorRect = trap.get("visual")
 		if plate != null and plate.color.a > 0.5:
 			telegraph_seen = true
@@ -2423,7 +2441,7 @@ func _fortress_fight_king(deadline: int, rally: Vector2) -> Dictionary:
 	# re-prices it the moment one of them steps, which reads as a change of mind and
 	# costs the run its budget two tiles at a time. The fight itself is the arena's
 	# own — heal, break off to the zone's spawn, answer what is in the lane.
-	while Time.get_ticks_msec() < deadline \
+	while Engine.get_physics_frames() < deadline \
 			and _player_pos().distance_to(king.global_position) > 40.0:
 		if GameState.hp <= 0:
 			await _wait_for_alive(12.0)
@@ -2431,7 +2449,7 @@ func _fortress_fight_king(deadline: int, rally: Vector2) -> Dictionary:
 			break
 		if await _heal_if_hurt(ARENA_HEAL_AT):
 			_a_heals += 1
-		var march_left := float(deadline - Time.get_ticks_msec()) / 1000.0
+		var march_left := float(deadline - Engine.get_physics_frames()) / 60.0
 		if march_left <= 1.0:
 			break
 		var march_before := _player_pos()
@@ -2439,7 +2457,7 @@ func _fortress_fight_king(deadline: int, rally: Vector2) -> Dictionary:
 		if _player_pos().distance_to(march_before) < 12.0:
 			await _unstick(king.global_position)
 	await _wait_for_alive(12.0)
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < deadline:
 		if _king_phases.has(2) or _king_phases.has(3):
 			break
 		if GameState.hp <= 0:
@@ -2620,9 +2638,9 @@ func _scenario_economy() -> void:
 		break
 	_notes.append("prep_pickups=%d" % collected)
 	var hunt_target := 4 if not bool(_pf("pickup_bias", false)) else 6
-	var hunt_deadline := Time.get_ticks_msec() + 75000
+	var hunt_deadline := Engine.get_physics_frames() + _frames(75.0)
 	var kills_at_start := _kill_total()
-	while Time.get_ticks_msec() < hunt_deadline:
+	while Engine.get_physics_frames() < hunt_deadline:
 		# The job decides when the hunt is over, not a kill count picked in the
 		# abstract: three wolves are what the village asked for, and the purse
 		# wants a couple more on top of them.
@@ -2940,13 +2958,13 @@ func _scenario_quest_chain() -> void:
 		return
 	_notes.append("quest_taken")
 
-	var deadline := Time.get_ticks_msec() + int(SCENARIO_TIMEOUT * 2.2 * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(SCENARIO_TIMEOUT * 2.2)
 	var attacks := 0
 	var abandoned: Dictionary = {}
 	var cur_id := -1
 	var cur_best := INF
 	var stalled := 0
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < deadline:
 		if QuestManager.state_of(QUEST_ID) == QuestManager.STATE_READY:
 			break
 		if await _heal_if_hurt():
@@ -3062,8 +3080,8 @@ func _scenario_traps() -> void:
 			GameState.hp, _find_path(_tile_of(_player_pos()), _tile_of(rubble.global_position)).size()])
 		return
 	var broke := false
-	var swing_deadline := Time.get_ticks_msec() + 45000
-	while Time.get_ticks_msec() < swing_deadline:
+	var swing_deadline := Engine.get_physics_frames() + _frames(45.0)
+	while Engine.get_physics_frames() < swing_deadline:
 		if not is_instance_valid(rubble) or bool(rubble.call("is_broken")):
 			broke = true
 			break
@@ -3106,8 +3124,8 @@ func _scenario_traps() -> void:
 		_notes.append("trap_watch_unreachable")
 		return
 	var telegraph_seen := false
-	var watch_deadline := Time.get_ticks_msec() + 7000
-	while Time.get_ticks_msec() < watch_deadline:
+	var watch_deadline := Engine.get_physics_frames() + _frames(7.0)
+	while Engine.get_physics_frames() < watch_deadline:
 		var plate: ColorRect = trap.get("visual")
 		if plate != null and plate.color.a > 0.5:
 			telegraph_seen = true
@@ -3164,7 +3182,7 @@ func _scenario_dungeon() -> void:
 	_a_last_target = -1
 	_a_broken = false
 	_a_pick_spell()
-	var deadline := Time.get_ticks_msec() + int(DUNGEON_TIMEOUT * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(DUNGEON_TIMEOUT)
 	var forest_rally := _player_spawn()
 
 	# Supply first, for the same reason the arena takes it: the undercroft hands a
@@ -3264,7 +3282,7 @@ func _scenario_fortress() -> void:
 	_a_last_target = -1
 	_a_broken = false
 	_a_pick_spell()
-	var deadline := Time.get_ticks_msec() + int(FORTRESS_TIMEOUT * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(FORTRESS_TIMEOUT)
 	var forest_rally := _player_spawn()
 
 	await _arena_prep(deadline)
@@ -3399,14 +3417,14 @@ func _nearest_boss() -> Node2D:
 ## Returns the seconds actually spent, so the caller can keep the run's ledger.
 func _break_from_boss(rally: Vector2, budget: float) -> float:
 	var cap := minf(BOSS_RETREAT_BURST, maxf(budget, 0.0))
-	var started := Time.get_ticks_msec()
-	var until := started + int(cap * 1000.0)
-	while Time.get_ticks_msec() < until:
+	var started := Engine.get_physics_frames()
+	var until := started + _frames(cap)
+	while Engine.get_physics_frames() < until:
 		if _player_pos().distance_to(rally) <= 40.0:
 			break
 		await _move_step(rally)
 	bot_input.release_all()
-	return float(Time.get_ticks_msec() - started) / 1000.0
+	return float(Engine.get_physics_frames() - started) / 60.0
 
 
 func _find_node(group: String) -> Node2D:
@@ -3494,8 +3512,8 @@ func _heal_if_hurt(threshold: float = -1.0) -> bool:
 func _retreat_burst(threat: Vector2, seconds: float) -> void:
 	var away := _player_pos() - threat
 	away = away.normalized() if away != Vector2.ZERO else Vector2.UP
-	var until := Time.get_ticks_msec() + int(seconds * 1000.0)
-	while Time.get_ticks_msec() < until:
+	var until := Engine.get_physics_frames() + _frames(seconds)
+	while Engine.get_physics_frames() < until:
 		bot_input.hold(&"move_right", away.x > 0.35)
 		bot_input.hold(&"move_left", away.x < -0.35)
 		bot_input.hold(&"move_down", away.y > 0.35)
@@ -3799,7 +3817,7 @@ func _find_path(from_tile: Vector2i, to_tile: Vector2i, ignore_bumped := false,
 ## answer at all, the leg degrades to the old straight-line steering with the
 ## obstacle slide, so a world without `cell_at` is still walkable.
 func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats := true) -> bool:
-	var deadline := Time.get_ticks_msec() + int(timeout * 1000.0)
+	var deadline := Engine.get_physics_frames() + _frames(timeout)
 	var origin := _tile_of(_player_pos())
 	var dest := _tile_of(target)
 	var path := _find_path(origin, dest, false, avoid_threats)
@@ -3837,7 +3855,7 @@ func _travel_to(target: Vector2, arrive: float, timeout: float, avoid_threats :=
 	var swing_target: Node = null
 	var swings := 0
 	var dodged: Dictionary = {}
-	while Time.get_ticks_msec() < deadline:
+	while Engine.get_physics_frames() < deadline:
 		if GameState.hp <= 0:
 			bot_input.release_all()
 			return false
@@ -4352,3 +4370,23 @@ func _wait(seconds: float) -> void:
 func _park_to_frame(frame: int) -> void:
 	while Engine.get_physics_frames() < frame:
 		await get_tree().physics_frame
+
+
+## Convert a nominal wall-clock duration in seconds to a count of physics frames at
+## the project's fixed 60 Hz physics tick. Every scenario budget is expressed in
+## seconds for readability (`SCENARIO_TIMEOUT`, `ARENA_TIMEOUT`, …) and turned into
+## a frame count here, so a deadline is a number of simulation steps rather than a
+## reading off the wall clock. A wall-clock deadline makes the number of actions a
+## scenario lands a function of how loaded the machine was, so a recorded seed need
+## not reproduce on a slower box; a frame budget makes the run a pure function of the
+## seed while keeping the same nominal seconds at 60 Hz.
+func _frames(seconds: float) -> int:
+	return int(seconds * 60.0)
+
+
+## The inverse of `_frames`, for reporting a frame-measured duration back in the
+## milliseconds the watchdog's log fields and the arena's max_control_ms verdict
+## have always carried. Quantised to the frame, so the reported number is a pure
+## function of the seed and identical across two launches on the same seed.
+func _ms_of_frames(frames: int) -> int:
+	return int(frames * 1000.0 / 60.0)
