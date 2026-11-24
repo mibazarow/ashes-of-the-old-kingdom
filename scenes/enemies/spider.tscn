@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/wolf.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_spider.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -25,7 +25,7 @@ gold_reward = 4
 loot_item = "wolf_fang"
 loot_chance = 0.6
 speed_multiplier = 1.25
-sprite_tint = Color(0.62, 0.86, 0.5, 1)
+sprite_tint = Color(0.82, 1.00, 0.84, 1.00)
 web_on_hit = 1.2
 
 [node name="Sprite2D" type="Sprite2D" parent="."]

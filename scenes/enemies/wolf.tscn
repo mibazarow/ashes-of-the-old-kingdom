@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/wolf.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ash_wolf.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -17,6 +17,7 @@ motion_mode = 1
 script = ExtResource("1_enemy")
 kind = 0
 enemy_type = &"ash_wolf"
+sprite_tint = Color(0.85, 0.89, 1.00, 1.00)
 display_name = "Пепельный волк"
 max_health = 26
 attack_damage = 8

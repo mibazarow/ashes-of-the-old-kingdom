@@ -1,7 +1,7 @@
 [gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/archer.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_cultist_caster.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 [ext_resource type="PackedScene" path="res://scenes/items/projectile.tscn" id="4_proj"]
 
@@ -25,7 +25,7 @@ xp_reward = 24
 gold_reward = 12
 loot_item = "mana_potion"
 loot_chance = 0.5
-sprite_tint = Color(0.75, 0.6, 0.95, 1)
+sprite_tint = Color(0.91, 0.80, 1.00, 1.00)
 aura_heal_per_second = 3
 projectile_scene = ExtResource("4_proj")
 

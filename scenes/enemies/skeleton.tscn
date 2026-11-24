@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/wolf.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ruin_skeleton.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -26,7 +26,7 @@ loot_item = "bone_shard"
 loot_chance = 0.5
 speed_multiplier = 0.95
 windup_multiplier = 1.2
-sprite_tint = Color(0.88, 0.9, 0.82, 1)
+sprite_tint = Color(0.92, 0.95, 1.00, 1.00)
 
 [node name="Sprite2D" type="Sprite2D" parent="."]
 texture = ExtResource("2_tex")

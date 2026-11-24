@@ -1,7 +1,7 @@
 [gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/archer.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ash_archer.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 [ext_resource type="PackedScene" path="res://scenes/items/projectile.tscn" id="4_proj"]
 
@@ -18,6 +18,7 @@ motion_mode = 1
 script = ExtResource("1_enemy")
 kind = 1
 enemy_type = &"ash_archer"
+sprite_tint = Color(0.85, 1.00, 0.96, 1.00)
 display_name = "Пепельный культист"
 max_health = 22
 attack_damage = 7

@@ -1,7 +1,7 @@
 [gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/archer.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ash_wisp.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 [ext_resource type="PackedScene" path="res://scenes/items/projectile.tscn" id="4_proj"]
 
@@ -29,7 +29,7 @@ speed_multiplier = 1.5
 attack_cooldown_multiplier = 0.7
 windup_multiplier = 0.7
 charge_on_sight = false
-sprite_tint = Color(0.65, 0.85, 1, 1)
+sprite_tint = Color(0.75, 0.92, 1.00, 1.00)
 projectile_scene = ExtResource("4_proj")
 
 [node name="Sprite2D" type="Sprite2D" parent="."]

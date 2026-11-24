@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/wolf.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_plague_bearer.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -24,7 +24,7 @@ xp_reward = 46
 gold_reward = 11
 loot_item = "bone_shard"
 loot_chance = 0.5
-sprite_tint = Color(0.55, 0.78, 0.5, 1)
+sprite_tint = Color(0.86, 1.00, 0.82, 1.00)
 death_pool = "blight"
 death_pool_damage = 5
 

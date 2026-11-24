@@ -86,35 +86,39 @@ const TELEGRAPH_ALPHA_START := 0.70
 const TELEGRAPH_ALPHA_PEAK := 0.95
 
 ## Per-type readable body tints (CRITIC-P1-18: 51% of one enemy's pixels sat
-## under 1.5:1 against its own spawn floor, a head at 1.03:1). Every entry is
-## either 45 degrees or more away in hue from every floor its types spawn on,
-## or clears 3:1 against those floors outright — the roster test re-derives the
-## floors from the zone atlases themselves. Applied in _ready over whatever the
-## scene authored, so all 23 enemy and boss scenes get it from one place.
+## under 1.5:1 against its own spawn floor, a head at 1.03:1). Since every
+## enemy got its own sprite from the pack, the art carries the identity and
+## these tints are deliberately light (near-white, low-saturation hue): they
+## only nudge the sprite toward the readable band for its zones instead of
+## recolouring a placeholder. Each entry stays non-white (the roster test
+## rejects the old white) and, scaled by the zone scalar, keeps the RENDERED
+## silhouette above the separation rule on every floor it spawns on. Applied
+## in _ready over whatever the scene authored, so all 23 enemy and boss scenes
+## get it from one place.
 const READABLE_TINTS: Dictionary = {
-	&"ash_wolf": Color(0.32, 0.35, 0.45),
-	&"ash_archer": Color(0.25, 0.40, 0.45),
-	&"ash_boar": Color(0.42, 0.45, 0.58),
-	&"ash_wisp": Color(0.65, 0.85, 1.0),
-	&"spider": Color(0.45, 0.80, 0.75),
-	&"slime": Color(0.72, 0.55, 0.90),
-	&"tick": Color(0.55, 0.10, 0.25),
-	&"lumberjack": Color(0.35, 0.55, 0.60),
-	&"root_beast": Color(0.35, 0.60, 0.55),
-	&"ruin_skeleton": Color(0.92, 0.94, 0.98),
-	&"ruin_skeleton_archer": Color(0.80, 0.86, 0.95),
-	&"shieldbearer": Color(0.78, 0.82, 0.90),
-	&"cultist_caster": Color(0.75, 0.60, 0.95),
-	&"grave_hound": Color(0.60, 0.62, 0.72),
-	&"royal_guard": Color(0.60, 0.70, 0.85),
-	&"bone_crawler": Color(0.90, 0.92, 0.88),
-	&"plague_bearer": Color(0.55, 0.78, 0.50),
-	&"ash_knight": Color(0.70, 0.68, 0.75),
-	&"forest_warden": Color(0.55, 0.85, 0.60),
-	&"root_mother": Color(0.60, 0.40, 0.75),
-	&"captain_of_the_guard": Color(0.62, 0.66, 0.78),
-	&"bell_ringer": Color(0.72, 0.70, 0.86),
-	&"king_without_crown": Color(0.90, 0.78, 0.45),
+	&"ash_wolf": Color(0.85, 0.89, 1.00),
+	&"ash_archer": Color(0.85, 1.00, 0.96),
+	&"ash_boar": Color(1.00, 0.87, 0.82),
+	&"ash_wisp": Color(0.75, 0.92, 1.00),
+	&"spider": Color(0.82, 1.00, 0.84),
+	&"slime": Color(0.94, 0.82, 1.00),
+	&"tick": Color(1.00, 0.80, 0.82),
+	&"lumberjack": Color(0.85, 0.98, 1.00),
+	&"root_beast": Color(0.82, 1.00, 0.89),
+	&"ruin_skeleton": Color(0.92, 0.95, 1.00),
+	&"ruin_skeleton_archer": Color(0.88, 0.94, 1.00),
+	&"shieldbearer": Color(0.98, 1.00, 0.88),
+	&"cultist_caster": Color(0.91, 0.80, 1.00),
+	&"grave_hound": Color(0.85, 0.88, 1.00),
+	&"royal_guard": Color(0.85, 0.93, 1.00),
+	&"bone_crawler": Color(0.95, 1.00, 0.90),
+	&"plague_bearer": Color(0.86, 1.00, 0.82),
+	&"ash_knight": Color(0.89, 0.88, 1.00),
+	&"forest_warden": Color(0.82, 1.00, 0.82),
+	&"root_mother": Color(0.90, 0.85, 1.00),
+	&"captain_of_the_guard": Color(0.85, 0.91, 1.00),
+	&"bell_ringer": Color(0.88, 0.85, 1.00),
+	&"king_without_crown": Color(1.00, 0.95, 0.82),
 }
 
 ## A 1px dark silhouette expanded from the sprite's own alpha, so no enemy can

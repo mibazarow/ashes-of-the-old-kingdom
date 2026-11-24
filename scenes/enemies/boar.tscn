@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/wolf.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ash_boar.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -28,7 +28,7 @@ speed_multiplier = 1.35
 attack_cooldown_multiplier = 1.25
 windup_multiplier = 1.15
 charge_on_sight = true
-sprite_tint = Color(1, 0.72, 0.55, 1)
+sprite_tint = Color(1.00, 0.87, 0.82, 1.00)
 
 [node name="Sprite2D" type="Sprite2D" parent="."]
 texture = ExtResource("2_tex")

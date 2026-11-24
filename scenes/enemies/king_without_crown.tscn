@@ -1,7 +1,7 @@
 [gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/boss_king.gd" id="1_king"]
-[ext_resource type="Texture2D" path="res://assets/sprites/npc.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_king_without_crown.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 
 [sub_resource type="RectangleShape2D" id="body_shape"]
@@ -25,7 +25,7 @@ gold_reward = 300
 loot_item = "rusted_seal"
 loot_chance = 1.0
 speed_multiplier = 0.85
-sprite_tint = Color(0.9, 0.78, 0.45, 1)
+sprite_tint = Color(1.00, 0.95, 0.82, 1.00)
 phase_two_health_fraction = 0.66
 enraged_speed_multiplier = 1.2
 enraged_cooldown_multiplier = 0.8

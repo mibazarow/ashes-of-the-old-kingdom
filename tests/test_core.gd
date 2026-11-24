@@ -14895,8 +14895,8 @@ func _test_king_and_endings() -> void:
 		_check(int(king_inst.get("xp_reward")) == 600 and int(king_inst.get("gold_reward")) == 300,
 			"the King pays 600 xp and 300 gold (got %d / %d)" % [int(king_inst.get("xp_reward")), int(king_inst.get("gold_reward"))])
 		_check(is_equal_approx(float(king_inst.get("speed_multiplier")), 0.85), "the King base speed is 0.85")
-		_check((king_inst.get("sprite_tint") as Color).is_equal_approx(Color(0.9, 0.78, 0.45, 1)),
-			"the King wears the ash-gold tint")
+		_check((king_inst.get("sprite_tint") as Color).is_equal_approx(Color(1.0, 0.95, 0.82, 1)),
+			"the King wears the light ash-gold tint (the Sultan sprite carries the identity)")
 		_check(int(king_inst.get("kind")) == 0, "the King is a melee boss")
 		_check(is_equal_approx(float(king_inst.get("enraged_speed_multiplier")), 1.2)
 				and is_equal_approx(float(king_inst.get("enraged_cooldown_multiplier")), 0.8),

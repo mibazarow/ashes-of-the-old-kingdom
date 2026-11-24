@@ -1,7 +1,7 @@
 [gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/ai/enemy.gd" id="1_enemy"]
-[ext_resource type="Texture2D" path="res://assets/sprites/archer.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/sprites/enemy_ruin_skeleton_archer.png" id="2_tex"]
 [ext_resource type="Script" path="res://scripts/combat/health_component.gd" id="3_health"]
 [ext_resource type="PackedScene" path="res://scenes/items/projectile.tscn" id="4_proj"]
 
@@ -28,7 +28,7 @@ loot_chance = 0.4
 speed_multiplier = 0.85
 attack_cooldown_multiplier = 1.3
 windup_multiplier = 1.35
-sprite_tint = Color(0.8, 0.86, 0.95, 1)
+sprite_tint = Color(0.88, 0.94, 1.00, 1.00)
 projectile_scene = ExtResource("4_proj")
 
 [node name="Sprite2D" type="Sprite2D" parent="."]

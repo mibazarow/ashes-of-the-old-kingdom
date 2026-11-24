@@ -49,6 +49,17 @@ four per-zone floor atlases (tiles_forest/ruins/dungeon/fortress.png) from the
 shipped tiles.png so each zone gets its own floor palette (CRITIC-P1-01). See
 the "per-zone floor palettes" section below for the shifts and the measured
 closing conditions it asserts on every run.
+
+--enemies is a third mode: it slices the 16x16 down-facing idle cell (0,0) of
+one dedicated sheet per enemy type (ENEMY_SOURCES below) into
+assets/sprites/enemy_<enemy_type>.png, so every enemy on screen is its own
+creature instead of a recoloured wolf/archer placeholder. The same measured
+sheet contract applies: 64x112 character sheets are 4x7 of 16x16 with the
+column order DOWN/UP/LEFT/RIGHT and row0 idle; the 64x64 Monster sheets are
+4x4 with the same first row (idle DOWN at (0,0)); the small Animal sheets are
+side-view strips whose frame0 at (0,0) is the idle pose. The mode fails loudly
+when a source sheet is missing or smaller than 16x16, and is deterministic and
+idempotent: the same pack always yields byte-identical PNGs.
 """
 import argparse
 import os
@@ -534,6 +545,81 @@ SOURCES = {
     "nature": "Backgrounds/Tilesets/TilesetNature.png",
 }
 
+# --- per-enemy dedicated sheets (--enemies mode) ------------------------------
+# enemy_type -> the ONE sheet its sprite is sliced from, chosen as the closest
+# creature the pack offers for each concept (measured inventory of all 192
+# Actor/ sheets: 89 are 64x112 4x7 characters, 40 are 64x64 4x4 monsters, the
+# rest are small side-view animal strips). Every sheet here is used by exactly
+# one enemy, so no two enemies on screen share a silhouette. Where the pack has
+# no true match the closest creature is taken and the gap is documented:
+#   tick            no insect/vermin smaller than a mouse -> Monster/MouseBlack
+#   slime           no slime/blob in the pack             -> Monster/Octopus (soft blob)
+#   lumberjack      no axe humanoid                       -> Character/Caveman (club-wielding bruiser)
+#   root_beast      no treant                             -> Monster/Bamboo (plant creature)
+#   root_mother     no treant                             -> Monster/BambooYellow (plant creature)
+#   shieldbearer    no shield-carrier                     -> Character/RobotGrey (armoured construct guardian)
+#   plague_bearer   no plague humanoid                    -> Monster/Cyclope (bloated brute)
+#   bone_crawler    no crawler                            -> Monster/Skull (tumbling skull vermin)
+ENEMY_SOURCES = {
+    "ash_wolf":             "Animal/Dog/SpriteSheet.png",
+    "ash_archer":           "Character/Hunter/SpriteSheet.png",
+    "ash_boar":             "Animal/WildBoar/SpriteSheetGray.png",
+    "ash_wisp":             "Monster/Spirit2/SpriteSheet.png",
+    "spider":               "Monster/SpiderRed/SpriteSheet.png",
+    "slime":                "Monster/Octopus/SpriteSheet.png",
+    "tick":                 "Monster/MouseBlack/SpriteSheet.png",
+    "lumberjack":           "Character/Caveman/SpriteSheet.png",
+    "root_beast":           "Monster/Bamboo/SpriteSheet.png",
+    "forest_warden":        "Monster/Bear/SpriteSheet.png",
+    "root_mother":          "Monster/BambooYellow/SpriteSheet.png",
+    "ruin_skeleton":        "Character/Skeleton/SpriteSheet.png",
+    "ruin_skeleton_archer": "Character/SkeletonDemon/SpriteSheet.png",
+    "cultist_caster":       "Character/SorcererBlack/SpriteSheet.png",
+    "captain_of_the_guard": "Character/Knight/SpriteSheet.png",
+    "bone_crawler":         "Monster/Skull/SpriteSheet.png",
+    "plague_bearer":        "Monster/Cyclope/SpriteSheet.png",
+    "bell_ringer":          "Monster/LanternRed/SpriteSheet.png",
+    "grave_hound":          "Animal/DogBlack/SpriteSheet.png",
+    "shieldbearer":         "Character/RobotGrey/SpriteSheet.png",
+    "royal_guard":          "Character/Samurai/SpriteSheet.png",
+    "ash_knight":           "Character/KnightGold/SpriteSheet.png",
+    "king_without_crown":   "Character/Sultan/SpriteSheet.png",
+}
+
+
+def generate_enemies(srcdir, outdir):
+    """Slice the down-idle 16x16 cell (0,0) of each mapped sheet into
+    assets/sprites/enemy_<enemy_type>.png. Fails loudly on a missing source."""
+    print("backend: %s" % ("PIL" if HAVE_PIL else "pure-Python"))
+    print("source : %s" % srcdir)
+    print("output : %s" % outdir)
+    os.makedirs(outdir, exist_ok=True)
+    seen_sheets = {}
+    for enemy_type in sorted(ENEMY_SOURCES):
+        rel = ENEMY_SOURCES[enemy_type]
+        if rel in seen_sheets:
+            raise SystemExit("ERROR: sheet %s mapped to both %s and %s"
+                             % (rel, seen_sheets[rel], enemy_type))
+        seen_sheets[rel] = enemy_type
+        path = resolve(srcdir, rel)
+        w, h, grid = load_rgba(path)
+        if w < 16 or h < 16:
+            raise SystemExit("ERROR: %s is %dx%d, too small for a 16x16 idle "
+                             "frame (%s)" % (rel, w, h, enemy_type))
+        cell = blank(16, 16)
+        blit_cell(cell, 0, 0, grid, 0, 0, 16, 16)
+        cov = sum(1 for r in cell for p in r if p[3] > 8) / 256.0
+        if cov <= 0.0:
+            raise SystemExit("ERROR: down-idle frame of %s is empty (%s)"
+                             % (rel, enemy_type))
+        out = os.path.join(outdir, "enemy_%s.png" % enemy_type)
+        save_rgba(out, 16, 16, cell)
+        print("  %-22s %-38s %2dx%-2d -> enemy_%s.png  alpha coverage %.1f%%  "
+              "lum %.1f" % (enemy_type, rel, w, h, enemy_type, cov * 100,
+                            mean_luminance(cell)))
+    print("  %d enemies, %d distinct sheets, all unique"
+          % (len(ENEMY_SOURCES), len(seen_sheets)))
+
 
 # --- per-zone floor palettes (CRITIC-P1-01) ----------------------------------
 # All four zones used to paint from one byte-identical tiles.png, so the forest
@@ -735,6 +821,13 @@ def resolve(srcdir, rel):
         if os.path.isfile(c):
             return c
     base = os.path.basename(rel)
+    parent = os.path.basename(os.path.dirname(rel))
+    for root, _dirs, files in os.walk(srcdir):
+        # the pack reuses "SpriteSheet.png" hundreds of times: match the
+        # parent directory too, or a walk hit on an unrelated folder with the
+        # same file name wins (Hunter once resolved to NinjaGreen this way)
+        if base in files and os.path.basename(root) == parent:
+            return os.path.join(root, base)
     for root, _dirs, files in os.walk(srcdir):
         if base in files:
             return os.path.join(root, base)
@@ -766,7 +859,18 @@ def main():
                          "tiles.png already in --out by the deterministic "
                          "per-zone shifts + floor dither documented above, "
                          "and verify the CRITIC-P1-01 closing conditions")
+    ap.add_argument("--enemies", action="store_true",
+                    help="slice one dedicated 16x16 down-idle sprite per "
+                         "enemy type (ENEMY_SOURCES) into "
+                         "assets/sprites/enemy_<enemy_type>.png; fails loudly "
+                         "if a source sheet is missing")
     args = ap.parse_args()
+
+    if args.enemies:
+        if not os.path.isdir(args.src):
+            raise SystemExit("ERROR: source dir does not exist: %s" % args.src)
+        generate_enemies(args.src, args.out)
+        return
 
     if args.zone_variants:
         generate_zone_variants(args.out)
