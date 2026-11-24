@@ -67,6 +67,16 @@ func _count_toast(message: String) -> void:
 	_last_toast = message
 
 
+## True when any of the captured toasts is the zone announcement. The travel
+## tests assert on the announcement specifically, not on toast traffic in
+## general, so an unrelated toast cannot satisfy them by accident.
+func _zone_toast_present(messages: Array[String]) -> bool:
+	for message: String in messages:
+		if message.begins_with("Зона: "):
+			return true
+	return false
+
+
 func _on_sound_panel_closed() -> void:
 	_sound_panel_closes += 1
 
@@ -242,7 +252,7 @@ func _run() -> void:
 
 	print("== movement and camera ==")
 	await _test_diagonal_is_normalized()
-	_test_camera_limits()
+	await _test_camera_limits()
 
 	print("== scene smoke ==")
 	await _test_scene_loads()
@@ -1888,17 +1898,207 @@ func _test_camera_limits() -> void:
 	root.add_child(inst)
 	var world := inst.get_node_or_null("World")
 	_check(world != null, "world node exists")
-	if world != null:
-		var player := inst.get_node_or_null("World/Player")
-		_check(player != null, "player is a child of World")
-		if player != null:
-			var cam := player.get_node_or_null("Camera2D") as Camera2D
-			_check(cam != null, "player has a Camera2D")
-			if cam != null:
-				_check(cam.limit_right > 0 and cam.limit_bottom > 0, "camera limits cover the map")
-				_check(cam.position_smoothing_enabled, "camera smoothing is on")
+	var player := inst.get_node_or_null("World/Player") as Node2D
+	_check(player != null, "player is a child of World")
+	var cam: Camera2D = player.get_node_or_null("Camera2D") as Camera2D if player != null else null
+	_check(cam != null, "player has a Camera2D")
+	var hud := inst.get_node_or_null("HUD")
+	_check(hud != null, "HUD exists for the plate-band checks")
+	if world == null or player == null or cam == null or hud == null:
+		inst.queue_free()
+		completed["camera"] = true
+		return
+	_check(cam.limit_right > 0 and cam.limit_bottom > 0, "camera limits cover the map")
+	_check(cam.position_smoothing_enabled, "camera smoothing is on")
+
+	# --- the band the HUD plates leave open -----------------------------------
+	# The plates are required (dark backing for HUD text, CRITIC-P1-02 / P1-03)
+	# and anything drawn under one reads as a 14 %-opacity blob — the defect this
+	# block pins. The contract has three parts, every one measured off the LIVE
+	# layout and the LIVE camera rather than off constants copied into this file:
+	#   1. the plates stay inside the band edges `ZoneBase` declares, so the band
+	#      between them is world on every frame;
+	#   2. the camera guard keeps the player inside the band at every spawn, room
+	#      centre and boss arena of every zone, and the tile the player stands on
+	#      is never under a plate from any stance on it (per reachable tile);
+	#   3. enemies and NPCs close to the player — the ones he fights and talks
+	#      to, inside five tiles vertically — measure clear of every plate.
+	# An entity more than five tiles above or below the player can still be
+	# darkened by a corner box or the hint band; no HUD that has plates at all
+	# can promise otherwise, and the guaranteed-clear band is 170 px (10.6
+	# tiles) centred on the player, which covers every engagement range in the
+	# game — melee, ranged shots and NPC interaction all happen well inside it.
+	var band_consts: Dictionary = load("res://scripts/world/zone_base.gd").get_script_constant_map()
+	var band_top := float(band_consts["HUD_BAND_TOP"])
+	var band_bottom := float(band_consts["HUD_BAND_BOTTOM"])
+	var band_limit := float(band_consts["CAMERA_BAND_LIMIT"])
+	_check(band_limit <= 40.0,
+		"the camera guard shift stays at or under 40 px (got %.0f)" % band_limit)
+	# Worst case for the bottom band: tracker and skill rows both carry text, so
+	# the measured hint plate is as tall as it can ever be.
+	(hud.get("_quest_label") as Label).text = "Принеси 3 волчьих клыка Эдрику и отнеси письмо старосте"
+	(hud.get("_skill_label") as Label).text = "Искра · 12 оч. ман"
+	await process_frame
+	await process_frame
+	var status_rect: Rect2 = hud.call("status_plate_rect")
+	var right_rect: Rect2 = hud.call("right_plate_rect")
+	var hint_rect: Rect2 = hud.call("hint_plate_rect")
+	_check(status_rect.size.x > 0.0 and right_rect.size.x > 0.0 and hint_rect.size.x > 0.0,
+		"all three plates have live layout rects")
+	_check(status_rect.end.y <= band_top + 0.001,
+		"the status plate ends at or above the band top (%.1f <= %.1f)" % [status_rect.end.y, band_top])
+	_check(right_rect.end.y <= band_top + 0.001,
+		"the right plate ends at or above the band top (%.1f <= %.1f)" % [right_rect.end.y, band_top])
+	_check(hint_rect.position.y >= band_bottom - 0.001,
+		"the hint plate starts at or below the band bottom with tracker and skill rows filled (%.1f >= %.1f)" % [hint_rect.position.y, band_bottom])
+	_check(status_rect.size.y <= 50.0 and right_rect.size.y <= 36.0 and hint_rect.size.y <= 36.0,
+		"plate heights stay at their worst case (status %.1f, right %.1f, hint %.1f)" % [status_rect.size.y, right_rect.size.y, hint_rect.size.y])
+	_check(status_rect.end.x < right_rect.position.x,
+		"the two top plates leave a world gap between them (%.0f < %.0f)" % [status_rect.end.x, right_rect.position.x])
+	_check(not String(hud.call("hint_text")).contains("\n"),
+		"the controls hint is a single line, so the bottom band cannot grow upward")
+	_check(cam.zoom == Vector2.ONE, "the camera ships at 1:1 zoom, which the guard is written for")
+	_check(cam.anchor_mode == Camera2D.ANCHOR_MODE_DRAG_CENTER,
+		"the camera keeps the drag-centre anchor the guard recenters through")
+	_check(cam.offset.x == 0.0, "the guard never shifts the camera horizontally")
+
+	var manager := inst.get_node_or_null("ZoneManager")
+	_check(manager != null, "ZoneManager exists for the plate sweep")
+	if manager != null:
+		for zone_id in ["forest", "village", "ruins", "dungeon", "fortress"]:
+			if String(world.call("zone_id")) != zone_id:
+				_check(bool(manager.call("travel", zone_id)), "travel to %s for the plate sweep" % zone_id)
+				await process_frame
+				await process_frame
+				world = inst.get_node_or_null("World")
+				player = world.get_node_or_null("Player") as Node2D
+				cam = player.get_node_or_null("Camera2D") as Camera2D if player != null else null
+			if world == null or player == null or cam == null:
+				_check(false, "%s: world, player and camera exist after travel" % zone_id)
+				continue
+			await _check_zone_plate_band(String(zone_id), world, player, cam,
+					status_rect, right_rect, hint_rect)
+			_check_zone_band_coverage(world, player, cam,
+					status_rect, right_rect, hint_rect, band_top, band_bottom, band_limit)
+		if String(gs.zone) != "forest":
+			_check(bool(manager.call("travel", "forest")), "the sweep returns to the forest")
+			await process_frame
+			await process_frame
+	(hud.get("_quest_label") as Label).text = ""
+	(hud.get("_skill_label") as Label).text = ""
+	gs.hp = gs.max_hp
 	inst.queue_free()
+	await process_frame
 	completed["camera"] = true
+
+
+## Viewport rect → world rect through a camera transform (axis-aligned box that
+## encloses the four mapped corners; the shipped camera never rotates or skews).
+func _rect_to_world(inv: Transform2D, r: Rect2) -> Rect2:
+	var a := inv * r.position
+	var b := inv * Vector2(r.end.x, r.position.y)
+	var c := inv * r.end
+	var d := inv * Vector2(r.position.x, r.end.y)
+	var out := Rect2(a, Vector2.ZERO)
+	for p in [b, c, d]:
+		out = out.expand(p)
+	return out
+
+
+## Spawn, every room centre and every boss arena of a live zone, with the camera
+## after the guard has settled: the player's own sprite must sit fully inside the
+## band the plates leave open, and every enemy or NPC within five tiles
+## vertically — inside the guaranteed band, the ones the player actually fights
+## and talks to — must sit clear of every plate rect mapped through the camera's
+## own transform.
+func _check_zone_plate_band(zone_id: String, world: Node, player: Node2D, cam: Camera2D,
+		status_rect: Rect2, right_rect: Rect2, hint_rect: Rect2) -> void:
+	var points: Array[Vector2] = [player.global_position]
+	for lm in world.call("landmarks"):
+		var kind := String(lm.get("kind", ""))
+		if kind == "room" or kind == "boss":
+			var t: Vector2i = lm["tile"]
+			points.append(Vector2(t.x * 16 + 8, t.y * 16 + 8))
+	if zone_id == "fortress":
+		var arena: Rect2i = load("res://scripts/world/fortress.gd").get_script_constant_map()["BOSS_ARENA"]
+		points.append(Vector2(
+				(arena.position.x + arena.size.x * 0.5) * 16.0,
+				(arena.position.y + arena.size.y * 0.5) * 16.0))
+	for p in points:
+		player.global_position = p
+		cam.reset_smoothing()
+		for i in 3:
+			await process_frame
+		var xform := cam.get_canvas_transform()
+		var inv := xform.affine_inverse()
+		var standing: Vector2 = player.global_position
+		var pvp: Vector2 = xform * standing
+		_check(pvp.y >= status_rect.end.y + 8.0 and pvp.y <= hint_rect.position.y - 8.0,
+				"%s at %s: the player sprite (centre vp y %.1f) stays clear of both plate edges (%.1f..%.1f)" % [zone_id, str(_tile_of_pos(standing)), pvp.y, status_rect.end.y + 8.0, hint_rect.position.y - 8.0])
+		var plates: Array[Rect2] = [
+			_rect_to_world(inv, status_rect),
+			_rect_to_world(inv, right_rect),
+			_rect_to_world(inv, hint_rect),
+		]
+		for e in get_nodes_in_group("enemy") + get_nodes_in_group("interactable"):
+			var ent := e as Node2D
+			if ent == null or ent.get_parent() != world:
+				continue
+			if absf(ent.global_position.y - standing.y) > 80.0:
+				continue
+			var evp: Vector2 = xform * ent.global_position
+			var hidden := false
+			for r in plates:
+				if r.has_point(ent.global_position):
+					hidden = true
+			_check(not hidden,
+					"%s at %s: %s within five tiles of the player is not drawn under a plate (vp %s)" % [zone_id, str(_tile_of_pos(standing)), String(ent.name), str(evp.round())])
+
+
+## The tile the player stands on must never sit under a plate, from any stance
+## on it, for EVERY reachable tile of the zone. Evaluated in the guard's steady
+## state (camera position clamped by its limits, offset = clamp(player − camera
+## − 5, ±limit) — the guard converges to exactly this in one frame, band centre
+## sitting 5 px under the viewport centre), probed at the tile corner that pulls
+## the view closest to each plate, because the view only ever moves with the
+## player. A tile failing this would be floor the HUD paints over while the
+## player stands on it — the original defect in its permanent form. Plate edges
+## are the conservative band constants; widths and x positions are the live
+## rects, so a plate growing sideways or a font change is caught too.
+func _check_zone_band_coverage(world: Node, player: Node2D, cam: Camera2D,
+		status_rect: Rect2, right_rect: Rect2, hint_rect: Rect2,
+		band_top: float, band_bottom: float, band_limit: float) -> void:
+	var zone_id := String(world.call("zone_id"))
+	var reach := _bfs_reachable(world, _tile_of_node(player), {})
+	_check(reach.size() > 50,
+			"%s: the coverage sweep has a meaningful reachable set (got %d)" % [zone_id, reach.size()])
+	var status_r := Rect2(status_rect.position.x, 0.0, status_rect.size.x, band_top)
+	var right_r := Rect2(right_rect.position.x, 0.0, right_rect.size.x, band_top)
+	var hint_r := Rect2(hint_rect.position.x, band_bottom, hint_rect.size.x, 270.0 - band_bottom)
+	var lim_right := float(cam.limit_right)
+	var lim_bottom := float(cam.limit_bottom)
+	var first_offender := ""
+	for tilev in reach:
+		var tile: Vector2i = tilev
+		var box := Rect2(tile.x * 16.0, tile.y * 16.0, 16.0, 16.0)
+		for probe in [
+			[Vector2(tile.x * 16.0, tile.y * 16.0), status_r],
+			[Vector2(tile.x * 16.0 + 16.0, tile.y * 16.0), right_r],
+			[Vector2(tile.x * 16.0 + 8.0, tile.y * 16.0 + 16.0), hint_r],
+		]:
+			var pc: Vector2 = probe[0]
+			var plate: Rect2 = probe[1]
+			var camx := clampf(pc.x, 240.0, lim_right - 240.0)
+			var camy := clampf(pc.y, 135.0, lim_bottom - 135.0)
+			var offy := clampf(pc.y - camy - 5.0, -band_limit, band_limit)
+			var view := Vector2(camx - 240.0, camy - 135.0 + offy)
+			if box.intersects(Rect2(plate.position + view, plate.size)):
+				first_offender = "%s%s" % [zone_id, str(tile)]
+				break
+		if first_offender != "":
+			break
+	_check(first_offender == "",
+			"%s: no reachable tile sits under a plate while the player stands on it (first offender %s)" % [zone_id, first_offender])
 
 
 func _test_scene_loads() -> void:
@@ -2677,6 +2877,27 @@ func _test_map_panel() -> void:
 			"a player hit at flash 100 shows the shipped red (modulate %s)" % str(player.modulate))
 		_reset_accessibility_to_defaults(acc)
 		player.modulate = Color.WHITE
+
+	# --- HUD plates: one dark surface, every string readable on it ------------
+	# The plates are what make these strings clear WCAG AA on any floor
+	# (CRITIC-P1-02 / P1-03 / P2-20). The backing measured here is the plate
+	# composited over PURE BLACK: the plate is dark, so black is its worst
+	# possible floor, and a string that clears 4.5:1 there clears it over any
+	# tile the world can draw. Colours come off the LIVE labels, so a palette or
+	# theme change that drops a string below AA fails here, not in play.
+	var plate_styles: Array = [hud.call("status_plate_style"), hud.call("right_plate_style"),
+			hud.call("hint_plate_style")]
+	var plate_ok := true
+	for sb in plate_styles:
+		plate_ok = plate_ok and sb != null and (sb as StyleBoxFlat).bg_color.a >= 0.8
+	_check(plate_ok, "all three HUD plates are the same near-opaque dark surface")
+	var plate_bg: Color = (plate_styles[0] as StyleBoxFlat).bg_color
+	var worst_backing := _blend_over(plate_bg, Color.BLACK)
+	for role in ["hint", "quest", "skill", "zone", "level", "gold", "clock", "bar_caption"]:
+		var ink: Color = hud.call("hud_text_color", role)
+		var ratio := _wcag_contrast(ink, worst_backing)
+		_check(ratio >= 4.5,
+				"HUD text '%s' clears 4.5:1 over the plate on the worst floor (got %.2f:1)" % [role, ratio])
 
 	scene.queue_free()
 	await process_frame
@@ -10014,9 +10235,22 @@ func _test_zone_travel() -> void:
 	gs.reset()
 	var packed: PackedScene = load("res://scenes/main/main.tscn")
 	var scene := packed.instantiate()
+	# The initial zone build must not announce itself: the HUD zone line already
+	# names the zone from the first frame, so a `Зона:` toast on top of it is the
+	# duplicate the owner reported. The listener goes in before the scene enters
+	# the tree, so it catches anything the world's `_ready` path could emit.
+	var startup_toasts: Array[String] = []
+	var startup_listener := func(message: String) -> void:
+		startup_toasts.append(message)
+	bus.toast.connect(startup_listener)
 	root.add_child(scene)
 	await process_frame
 	await process_frame
+	bus.toast.disconnect(startup_listener)
+	_check(startup_toasts.is_empty(),
+		"the initial zone build emits no toast at all (got %s)" % str(startup_toasts))
+	_check(not _zone_toast_present(startup_toasts),
+		"the initial zone build emits no `Зона:` toast (the HUD line already names the zone)")
 
 	var manager := scene.get_node_or_null("ZoneManager")
 	_check(manager != null, "Main owns a ZoneManager")
@@ -10086,10 +10320,13 @@ func _test_zone_travel() -> void:
 	# is checked here, in the zone that creates it.
 	bus.toast.connect(_count_toast)
 	_toast_count = 0
+	_last_toast = ""
 	_check(bool(manager.call("travel", "village")), "travel forest -> village succeeds")
 	await process_frame
 	await process_frame
 	_check(_toast_count == 1, "the travel to the village announced itself with one toast (got %d)" % _toast_count)
+	_check(_last_toast == "Зона: Последняя деревня",
+		"the travel toast names the zone the player arrived in (got '%s')" % _last_toast)
 	var village := scene.get_node_or_null("World")
 	_check(village != null and String(village.call("zone_id")) == "village",
 		"the live world is now the village")
@@ -10142,6 +10379,48 @@ func _test_zone_travel() -> void:
 	_check(hud.call("map_bound_world") == village, "the map panel rebound to the village")
 	_check(village != null and Vector2i(village.call("map_size")) == Vector2i(40, 26),
 		"the village reports its size (got %s)" % str(Vector2i(village.call("map_size")) if village != null else Vector2i.ZERO))
+
+	# --- every village figure wears the zone silhouette outline -----------------
+	# The owner's frame review found NPCs invisible in the dark zones; the same
+	# pass enemies got (CRITIC-P1-18) now covers every NPC sprite in every zone.
+	# The village keeps the ZoneBase dark-outline default on the light forest
+	# clearing it shares, so the claim here is the material identity: each of
+	# the six figures carries exactly the shared cached material for the
+	# village's outline colour.
+	var village_npc_cls: GDScript = load("res://scripts/npc/npc.gd")
+	for npc_name: String in ["Edrik", "Yorek", "Bran", "Mila", "Seris", "Alvena"]:
+		var figure := (village.get_node_or_null(npc_name) as Node) if village != null else null
+		_check(figure != null and _npc_wears_outline(figure, "res://scripts/world/village.gd", village_npc_cls),
+			"%s wears the village silhouette outline" % npc_name)
+
+	# --- the screenshot probe must not carry the travel toast -------------------
+	# Every zone frame the owner reviewed showed a duplicate `Зона: ...` line:
+	# the HUD names the zone permanently, and the capture grabbed its frame
+	# ~20 frames after `travel`, while the toast still had most of its 2.1 s
+	# life left. The fix is a settle wait in the capture path, gated on a flag
+	# the zone branches set — real play keeps toasting (asserted on every travel
+	# above and below). Pinned here without running a capture: the gate, the
+	# lifetime constants, and the flag the gate reads.
+	var main_script: GDScript = load("res://scripts/main/main.gd")
+	var main_consts: Dictionary = main_script.get_script_constant_map()
+	var hold_s := float(main_consts.get("TOAST_HOLD_SECONDS", 0.0))
+	var fade_s := float(main_consts.get("TOAST_FADE_SECONDS", 0.0))
+	var settle_s := float(main_consts.get("ZONE_CAPTURE_SETTLE_SECONDS", 0.0))
+	_check(is_equal_approx(hold_s, 1.6) and is_equal_approx(fade_s, 0.5),
+		"the capture settle mirrors the HUD toast lifetime (hold %.1f + fade %.1f)"
+			% [hold_s, fade_s])
+	_check(settle_s >= hold_s + fade_s,
+		"the zone capture settle outlives the whole toast (settle %.2f s vs lifetime %.2f s)"
+			% [settle_s, hold_s + fade_s])
+	_check(bool(main_script.call("screenshot_must_outlive_toast", true)),
+		"a capture that travelled waits the zone toast out")
+	_check(not bool(main_script.call("screenshot_must_outlive_toast", false)),
+		"a capture that did not travel keeps the plain frame settle (the inventory probe wants its own toast inside the frame)")
+	var main_member_names: Array[String] = []
+	for prop: Dictionary in main_script.get_script_property_list():
+		main_member_names.append(String(prop.get("name", "")))
+	_check(main_member_names.has("_screenshot_zone_travelled"),
+		"the capture path carries the zone-travelled flag the gate reads")
 
 	# --- village -> forest ------------------------------------------------------
 	_toast_count = 0
@@ -12181,6 +12460,29 @@ func _atlas_floor_colors(path: String) -> Dictionary:
 	}
 
 
+## The DARKEST pixel of a zone's WALKABLE floor cells (grass x 0..15, dirt
+## x 16..31) — the tiles an enemy can actually stand on. The stone and tree
+## cells are solid wall and decoration: their near-black canopy pixels are not
+## a floor band, and folding them in would fail a zone on a pixel no enemy can
+## ever be drawn against. The mean floor colour flatters a zone whose bands
+## fall off hard at the edges, so the readability rule measures against this
+## pixel as well as the mean.
+func _atlas_floor_darkest(path: String) -> Color:
+	var img := _atlas_image(path)
+	if img == null or img.get_width() < 32 or img.get_height() < 16:
+		return Color(0.0, 0.0, 0.0)
+	var darkest := Color(1.0, 1.0, 1.0)
+	var darkest_l := 2.0
+	for y in range(16):
+		for x in range(32):
+			var c := img.get_pixel(x, y)
+			var l := _wcag_lum(c)
+			if l < darkest_l:
+				darkest_l = l
+				darkest = c
+	return darkest
+
+
 ## Largest share of any single RGB value inside a zone's floor sample (the two
 ## walkable cells, 512 px). CRITIC-P1-01 closes at 20%.
 func _atlas_floor_max_share(path: String) -> float:
@@ -12318,6 +12620,24 @@ func _silhouette_separation(img: Image, tint: Color, outline: Color, floor: Colo
 	}
 
 
+## True when the NPC's Sprite2D wears exactly the shared outline material for
+## the colours the named zone script chooses — the same cached instance
+## `Npc.outline_material` hands out, not a look-alike built from the same code.
+## The zone script is instantiated unparented, which the hook itself documents
+## as safe (pure data; the heavy work lives in `_ready`, never called here).
+func _npc_wears_outline(npc: Node, zone_script_path: String, npc_cls: GDScript) -> bool:
+	if npc == null:
+		return false
+	var spr := npc.get_node_or_null("Sprite2D") as Sprite2D
+	if spr == null:
+		return false
+	var zone_inst: Node = (load(zone_script_path) as GDScript).new()
+	var outline: Color = zone_inst.call("enemy_outline_color")
+	zone_inst.free()
+	var mat := spr.material as ShaderMaterial
+	return mat != null and mat == npc_cls.call("outline_material", outline)
+
+
 ## Where each roster type actually spawns, read off the zone scripts' scene
 ## constants (wider than ROSTER_ZONES, which only lists the types that group
 ## was written to pin). A tint is judged against every floor it can be seen on.
@@ -12375,6 +12695,59 @@ class FakeWalledWorld:
 		if tile.x >= 3:
 			return "#"
 		return "."
+
+
+## A stand-in zone for the NPC readability pass. It answers the same two hooks
+## a ZoneBase does — `enemy_outline_color` and `enemy_body_tint` — with the real
+## colours read off the real zone script, so an NPC parented under it resolves
+## exactly what it resolves in the shipped world. Requiring BOTH hooks is the
+## same contract `Npc.readability_zone` uses, so a stand-in that only answered
+## one could not be mistaken for a zone that has chosen readability colours.
+class FakeReadabilityZone:
+	extends Node2D
+
+	var outline := Color(0.043, 0.051, 0.067)
+	var scalar := Color(0.5, 0.5, 0.5)
+
+	func enemy_outline_color() -> Color:
+		return outline
+
+	func enemy_body_tint() -> Color:
+		return scalar
+
+
+## Which shipped NPC script stands in which zone (the village holds Edrik, the
+## merchant, the smith and the three herbwives; the pilgrim walks the four wild
+## zones; Nela and Oren are `Villager` figures the undercroft and the fortress
+## spawn with their own authored tints). The outline is one colour per zone, so
+## the >= 3:1 contrast is measured per zone against that zone's darkest
+## walkable floor pixel; the per-NPC claim is that the sprite wears exactly the
+## shared material for that zone's colour.
+const NPC_READABLE_INVENTORY: Dictionary = {
+	"res://scenes/npcs/edrik.tscn": ["village"],
+	"res://scripts/npcs/villager.gd": ["village", "dungeon", "fortress"],
+	"res://scripts/npcs/pilgrim.gd": ["forest", "ruins", "dungeon", "fortress"],
+	"res://scripts/npcs/merchant.gd": ["village"],
+	"res://scripts/npcs/smith.gd": ["village"],
+}
+
+## The tint each NPC script authors for itself (Edrik's scene ships no
+## modulate, so his is white). The zone scalar multiplies exactly this on the
+## first processed frame; a spawning zone script may paint its own figure tint
+## after `add_child` (Nela, Oren, the village herbwives), and the live groups
+## pin those figures against their own authored colours.
+const NPC_AUTHORED_TINTS: Dictionary = {
+	"res://scenes/npcs/edrik.tscn": Color(1.0, 1.0, 1.0),
+	"res://scripts/npcs/villager.gd": Color(0.66, 0.92, 0.62),
+	"res://scripts/npcs/pilgrim.gd": Color(0.62, 0.62, 0.66),
+	"res://scripts/npcs/merchant.gd": Color(0.62, 0.86, 1.0),
+	"res://scripts/npcs/smith.gd": Color(1.0, 0.66, 0.42),
+}
+
+## The village shares the forest palette and the ZoneBase readability defaults
+## on purpose (it is a clearing in the same wood), so its outline and scalar
+## come from village.gd while its floors are measured on the forest atlas.
+const NPC_VILLAGE_ATLAS := "res://assets/sprites/tiles_forest.png"
 
 
 ## The twelve types added to reach the eighteen the spec asks for, with the pool and
@@ -12605,8 +12978,13 @@ func _test_enemy_roster() -> void:
 			"outline": zinst.call("enemy_outline_color"),
 			"scalar": zinst.call("enemy_body_tint"),
 			"floors": _atlas_floor_colors(String(READABLE_ATLASES[zone_id])),
+			"darkest": _atlas_floor_darkest(String(READABLE_ATLASES[zone_id])),
 		}
 		zinst.free()
+	# Worst outline contrast against each zone's darkest floor pixel, filled from
+	# the enemies that actually spawn there below. A zone with no enemies keeps
+	# no entry; every zone in READABLE_ATLASES has a roster, so none is skipped.
+	var worst_outline := {}
 	var readability_dir := DirAccess.open("res://scenes/enemies")
 	var readability_files: Array[String] = []
 	if readability_dir != null:
@@ -12629,6 +13007,16 @@ func _test_enemy_roster() -> void:
 		var mat := (spr.material if spr != null else null) as ShaderMaterial
 		_check(mat != null and mat.shader != null,
 			"%s draws the silhouette outline (outline shader on the sprite)" % type)
+		# The ring branch must take its alpha from the vertex-stage copy of the
+		# modulate, never from the fragment's `COLOR`: this engine hands
+		# `fragment()` a COLOR already multiplied by the texture sample, so at a
+		# transparent ring texel `COLOR.a` is 0 and the old `outline_color.a *
+		# COLOR.a` drew no outline anywhere, on any floor, for any enemy.
+		if mat != null and mat.shader != null:
+			var shader_code := String(mat.shader.code)
+			_check(shader_code.contains("outline_color.a * modulate_alpha")
+					and shader_code.contains("modulate_alpha = COLOR.a"),
+				"%s ring alpha comes from the vertex-stage modulate, not the pre-multiplied fragment COLOR" % type)
 		_check(readable_tints.has(StringName(type))
 				and (inst.get("sprite_tint") as Color) != Color.WHITE,
 			"%s carries a readable non-white sprite_tint" % type)
@@ -12636,6 +13024,12 @@ func _test_enemy_roster() -> void:
 		var offenders: Array[String] = []
 		for zone_id: String in (READABLE_SPAWN_ZONES.get(StringName(type), []) as Array):
 			var zr: Dictionary = zone_readability[zone_id]
+			# The outline is one colour per zone, so every enemy that spawns in
+			# the zone carries the same ring; the worst enemy of the zone is the
+			# one whose outline sits on the zone's darkest floor pixel.
+			var darkest_contrast := _wcag_contrast(zr["outline"] as Color,
+				zr["darkest"] as Color)
+			worst_outline[zone_id] = darkest_contrast
 			var tint: Color = enemy_cls.call("readable_body_tint",
 				StringName(type), zr["scalar"] as Color)
 			for floor_key: String in ["grass", "dirt"]:
@@ -12658,6 +13052,106 @@ func _test_enemy_roster() -> void:
 			"%s silhouette separates from the floor of every zone it spawns in (%s)"
 				% [type, ", ".join(offenders)])
 		inst.queue_free()
+	# The owner's rule, stated per zone rather than per sprite: the worst enemy
+	# outline of a zone must clear 3:1 against the DARKEST floor pixel that
+	# zone's atlas holds, not just against the mean floor colour the band test
+	# above uses. Computed from the atlas bytes, no screenshot involved.
+	for zone_id: String in READABLE_ATLASES.keys():
+		var zr: Dictionary = zone_readability[zone_id]
+		var worst: float = float(worst_outline.get(zone_id, 0.0))
+		_check(worst >= 3.0,
+			"%s worst enemy outline clears 3:1 against its darkest floor pixel (%.2f:1, darkest %s)"
+				% [zone_id, worst, str(zr["darkest"])])
+
+	# --- 2c. NPCs get the same silhouette treatment as enemies ------------------
+	# The owner's frame review: Nela, the pilgrim and Oren rendered as dark brown
+	# blobs on the dark floors — enemies got the outline + zone-scaled body pass
+	# in CRITIC-P1-18 and NPCs got nothing. Every NPC script, run through its own
+	# `_ready` under a stand-in zone carrying the real zone's colours, must come
+	# out wearing the shared outline material for that zone (the same cached
+	# instance `Npc.outline_material` hands out, not a look-alike) with a body
+	# tint equal to its authored tint times that zone's scalar; and every zone's
+	# outline colour must clear 3:1 against the DARKEST walkable floor pixel of
+	# every zone an NPC actually stands in.
+	var npc_cls: GDScript = load("res://scripts/npc/npc.gd")
+	var npc_zone_readability := {}
+	for zone_id: String in ["village", "forest", "ruins", "dungeon", "fortress"]:
+		var zscript_path := "res://scripts/world/village.gd" if zone_id == "village" \
+			else String(READABLE_ZONE_SCRIPTS[zone_id])
+		var zinst: Node = (load(zscript_path) as GDScript).new()
+		var atlas := NPC_VILLAGE_ATLAS if zone_id == "village" \
+			else String(READABLE_ATLASES[zone_id])
+		npc_zone_readability[zone_id] = {
+			"outline": zinst.call("enemy_outline_color"),
+			"scalar": zinst.call("enemy_body_tint"),
+			"darkest": _atlas_floor_darkest(atlas),
+		}
+		zinst.free()
+	for zone_id: String in npc_zone_readability.keys():
+		var zr: Dictionary = npc_zone_readability[zone_id]
+		var contrast := _wcag_contrast(zr["outline"] as Color, zr["darkest"] as Color)
+		_check(contrast >= 3.0,
+			"%s NPC outline clears 3:1 against the darkest walkable floor pixel (%.2f:1, darkest %s)"
+				% [zone_id, contrast, str(zr["darkest"])])
+	for scene_path: String in NPC_READABLE_INVENTORY.keys():
+		for zone_id: String in (NPC_READABLE_INVENTORY[scene_path] as Array):
+			var zr: Dictionary = npc_zone_readability[zone_id]
+			var fake_zone := FakeReadabilityZone.new()
+			fake_zone.outline = zr["outline"] as Color
+			fake_zone.scalar = zr["scalar"] as Color
+			root.add_child(fake_zone)
+			var npc: Node = null
+			if scene_path.ends_with(".tscn"):
+				npc = (load(scene_path) as PackedScene).instantiate()
+			else:
+				npc = (load(scene_path) as GDScript).new()
+			_check(npc != null, "%s instantiates for the readability scan" % scene_path.get_file())
+			if npc == null:
+				fake_zone.free()
+				continue
+			# A bare `Npc` subclass (Villager, Pilgrim) carries no sprite of its
+			# own — every zone that spawns one builds the Sprite2D before
+			# `add_child` so the base `@onready $Sprite2D` resolves on the first
+			# frame, and this scan owes the node the same recipe (a missing
+			# sprite there would print a Node-not-found error on implicit ready).
+			# `Merchant`/`Smith` build their own sprite inside `_ready` instead,
+			# so only an `Npc` subclass gets the pre-built one.
+			var npc_script: GDScript = npc.get_script()
+			var is_npc_subclass := false
+			while npc_script != null:
+				if npc_script == npc_cls:
+					is_npc_subclass = true
+					break
+				npc_script = npc_script.get_base_script()
+			if is_npc_subclass and npc.get_node_or_null("Sprite2D") == null:
+				var pre_spr := Sprite2D.new()
+				pre_spr.name = "Sprite2D"
+				npc.add_child(pre_spr)
+			fake_zone.add_child(npc)
+			# Two frames: the first runs the one-shot body pass (it must land
+			# after the `_ready` tint, exactly as it does in a live zone), the
+			# second lets the assertion read a settled modulate.
+			await process_frame
+			await process_frame
+			var label := "%s in %s" % [scene_path.get_file(), zone_id]
+			var spr := npc.get_node_or_null("Sprite2D") as Sprite2D
+			_check(spr != null, "%s has a sprite to outline" % label)
+			var expected_mat: ShaderMaterial = npc_cls.call("outline_material", zr["outline"] as Color)
+			var mat := (spr.material if spr != null else null) as ShaderMaterial
+			_check(mat != null and mat == expected_mat,
+				"%s wears the shared outline material for its zone" % label)
+			if mat != null and mat.shader != null:
+				_check(String(mat.shader.code).contains("outline_color.a * modulate_alpha")
+						and String(mat.shader.code).contains("modulate_alpha = COLOR.a"),
+					"%s ring alpha comes from the vertex-stage modulate, not the pre-multiplied fragment COLOR" % label)
+			var want: Color = (NPC_AUTHORED_TINTS[scene_path] as Color) * (zr["scalar"] as Color)
+			var got: Color = spr.modulate if spr != null else Color(0.0, 0.0, 0.0)
+			_check(got.is_equal_approx(want),
+				"%s body tint is the authored tint scaled by the zone scalar (want %s, got %s)"
+					% [label, str(want), str(got)])
+			fake_zone.queue_free()
+			await process_frame
+
 	_clear_enemies()
 	await process_frame
 
@@ -14338,6 +14832,33 @@ func _test_new_npc_and_quests() -> void:
 		_check(nela_on_prop.is_empty(),
 			"Nela is not standing on an enemy, a plate or the stair (%s)" % ", ".join(nela_on_prop))
 
+		# Readability (the owner's frame review): Нела rendered as a dark brown
+		# blob on the undercroft floor — the shared NPC sprite is dark brown and
+		# multiplying it by any tint <= 1 only pushed it further into the dark
+		# (her darkest rendered pixels measured 32, 29, 29). She must now wear
+		# the undercroft's light silhouette ring, and her modulate must be the
+		# tint scripts/world/dungeon.gd paints scaled by the zone's brightness
+		# scalar — a light figure, not a silhouette against nothing.
+		var nela_npc_cls: GDScript = load("res://scripts/npc/npc.gd")
+		var nela_zone_inst: Node = (load("res://scripts/world/dungeon.gd") as GDScript).new()
+		var nela_outline: Color = nela_zone_inst.call("enemy_outline_color")
+		var nela_scalar: Color = nela_zone_inst.call("enemy_body_tint")
+		nela_zone_inst.free()
+		var nela_spr := nela.get_node_or_null("Sprite2D") as Sprite2D
+		_check(nela_spr != null
+				and (nela_spr.material as ShaderMaterial)
+					== nela_npc_cls.call("outline_material", nela_outline),
+			"Nela wears the undercroft's light silhouette outline")
+		_check(nela_spr != null
+				and nela_spr.modulate.is_equal_approx(Color(0.70, 0.74, 0.82) * nela_scalar),
+			"Nela's tint is the undercroft grey scaled by the zone scalar (got %s)"
+				% str(nela_spr.modulate if nela_spr != null else Color()))
+		var nela_lum := 0.0
+		if nela_spr != null:
+			nela_lum = _wcag_lum(nela_spr.modulate.clamp(Color(0.0, 0.0, 0.0, 1.0), Color(1.0, 1.0, 1.0, 1.0)))
+		_check(nela_lum >= 0.4,
+			"Nela's modulate is no longer near-black (clamped luminance %.2f)" % nela_lum)
+
 		qm.reset()
 		_satisfy_gates("q11_light_the_way")
 		var nplayer := undercroft.get_node_or_null("Player") as Node2D
@@ -14408,6 +14929,26 @@ func _test_new_npc_and_quests() -> void:
 			oren_on_prop.append("DungeonExit")
 		_check(oren_on_prop.is_empty(),
 			"Oren is not standing on an enemy or the stair (%s)" % ", ".join(oren_on_prop))
+
+		# Readability, same rule as Nela: the garrison ochre the fortress paints
+		# on the shared brown sprite rendered as a dark blob on the dark
+		# fortress floor. The fortress ring is the light one, and the body pass
+		# scales the authored ochre by the fortress scalar (the brightest zone
+		# scalar in the game) so the officer reads against the masonry.
+		var oren_npc_cls: GDScript = load("res://scripts/npc/npc.gd")
+		var oren_zone_inst: Node = (load("res://scripts/world/fortress.gd") as GDScript).new()
+		var oren_outline: Color = oren_zone_inst.call("enemy_outline_color")
+		var oren_scalar: Color = oren_zone_inst.call("enemy_body_tint")
+		oren_zone_inst.free()
+		var oren_spr := oren.get_node_or_null("Sprite2D") as Sprite2D
+		_check(oren_spr != null
+				and (oren_spr.material as ShaderMaterial)
+					== oren_npc_cls.call("outline_material", oren_outline),
+			"Oren wears the fortress's light silhouette outline")
+		_check(oren_spr != null
+				and oren_spr.modulate.is_equal_approx(Color(0.85, 0.72, 0.40) * oren_scalar),
+			"Oren's tint is the garrison ochre scaled by the zone scalar (got %s)"
+				% str(oren_spr.modulate if oren_spr != null else Color()))
 
 		qm.reset()
 		_satisfy_gates("q12_officers_seal")
@@ -15517,12 +16058,21 @@ func _test_pilgrim() -> void:
 			spoken.append(String((lines[0] as Dictionary).get("text", "")))
 	bus.dialogue_requested.connect(on_line)
 
+	# Readability (the owner's frame review): the pilgrim stands in every wild
+	# zone, and in the two dark ones he rendered as a dark grey blob on the dark
+	# floor. Each live pilgrim below must wear exactly the shared outline
+	# material for the zone he actually stands in — dark ring on the light
+	# forest/ruins floors, light ring on the dark undercroft/fortress floors.
+	var pilgrim_npc_cls: GDScript = load("res://scripts/npc/npc.gd")
+
 	# forest (built as the starting World)
 	var forest := scene.get_node_or_null("World")
 	var pf := _find_interactable_named("interactable", "PilgrimForest")
 	_check(forest != null and String(forest.call("zone_id")) == "forest",
 		"the pilgrim group starts in the forest")
 	_check(pf != null and pf.is_in_group("interactable"), "the forest places the pilgrim as an interactable")
+	_check(_npc_wears_outline(pf, "res://scripts/world/forest.gd", pilgrim_npc_cls),
+		"the forest pilgrim wears the forest's dark silhouette outline")
 	# Checked by script path, not `is Pilgrim`: referencing the `Pilgrim` class name
 	# here would make this suite depend on pilgrim.gd, which is compiled before the
 	# autoloads exist and so fails to resolve `GameState`. The path pins the same fact
@@ -15573,6 +16123,8 @@ func _test_pilgrim() -> void:
 	_check(ruins != null and String(ruins.call("zone_id")) == "ruins", "the group stands in the ruins")
 	_check(pr != null and pr.is_in_group("interactable"), "the ruins place the pilgrim as an interactable")
 	_check(pr != null and String(pr.get("zone_id")) == "ruins", "the ruins pilgrim is tagged ruins")
+	_check(_npc_wears_outline(pr, "res://scripts/world/ruins.gd", pilgrim_npc_cls),
+		"the ruins pilgrim wears the ruins' dark silhouette outline")
 	if pr != null and ruins != null:
 		var rproblems := _pilgrim_placement_problems(ruins, pr, Vector2i(3, 8))
 		_check(rproblems.is_empty(), "the ruins pilgrim is placed cleanly (%s)" % ", ".join(rproblems))
@@ -15587,6 +16139,8 @@ func _test_pilgrim() -> void:
 		"the group stands in the undercroft")
 	_check(pd != null and pd.is_in_group("interactable"), "the undercroft places the pilgrim as an interactable")
 	_check(pd != null and String(pd.get("zone_id")) == "dungeon", "the undercroft pilgrim is tagged dungeon")
+	_check(_npc_wears_outline(pd, "res://scripts/world/dungeon.gd", pilgrim_npc_cls),
+		"the undercroft pilgrim wears the undercroft's light silhouette outline")
 	if pd != null and undercroft != null:
 		var dproblems := _pilgrim_placement_problems(undercroft, pd, Vector2i(3, 12))
 		_check(dproblems.is_empty(), "the undercroft pilgrim is placed cleanly (%s)" % ", ".join(dproblems))
@@ -15603,6 +16157,8 @@ func _test_pilgrim() -> void:
 		"the fortress places the pilgrim as an interactable")
 	_check(pft_node != null and String(pft_node.get("zone_id")) == "fortress",
 		"the fortress pilgrim is tagged fortress")
+	_check(_npc_wears_outline(pft_node, "res://scripts/world/fortress.gd", pilgrim_npc_cls),
+		"the fortress pilgrim wears the fortress's light silhouette outline")
 	if pft_node != null and fortress != null:
 		var fproblems := _pilgrim_placement_problems(fortress, pft_node, Vector2i(4, 14))
 		_check(fproblems.is_empty(), "the fortress pilgrim is placed cleanly (%s)" % ", ".join(fproblems))

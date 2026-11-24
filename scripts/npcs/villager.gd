@@ -26,6 +26,11 @@ func _ready() -> void:
 	# A cool herb tint, distinct from the merchant's blue and the smith's forge
 	# orange, so the three code-built villagers read apart on the one shared sprite.
 	# Guarded because a bare `Villager` built without the world's sprite has none.
+	# This is the identity hue only: the zone's brightness scalar is multiplied
+	# into it on the first processed frame by the body pass in `Npc._process`,
+	# and a spawning zone script may still paint its own figure tint here after
+	# `add_child` — that tint gets scaled the same way (Nela's undercroft grey,
+	# Oren's garrison ochre, the village herbwives' per-character pastels).
 	if sprite != null and is_instance_valid(sprite):
 		sprite.modulate = Color(0.66, 0.92, 0.62)
 

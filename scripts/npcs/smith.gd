@@ -15,6 +15,12 @@ extends Area2D
 @export var station: String = "smith"
 
 var _craft: CraftManager
+var _sprite: Sprite2D
+
+## One-shot body scaling through `Npc.scale_npc_body`, on the first processed
+## frame — the same pass and the same timing as in `Npc._process` and
+## `Merchant._process`.
+var _npc_body_scaled := false
 
 
 func _ready() -> void:
@@ -25,12 +31,21 @@ func _ready() -> void:
 	collision_mask = 0
 
 	var sprite := Sprite2D.new()
+	# Named like every other NPC sprite in the project (see the same note in
+	# `Merchant._ready`).
+	sprite.name = "Sprite2D"
+	_sprite = sprite
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
 	# A hot forge tint, deliberately the opposite of the merchant's cool blue, so
 	# the two village NPCs read apart while sharing the one placeholder sprite.
+	# The zone's brightness scalar is multiplied into it on the first processed
+	# frame (see `_process`); the hue authored here is the identity.
 	sprite.modulate = Color(1.0, 0.66, 0.42)
 	add_child(sprite)
+	# Readability pass (mirrors `Enemy._ready` and `Npc._ready`): the zone's
+	# silhouette ring on the sprite.
+	Npc.apply_npc_outline(self, sprite)
 
 	var shape := CollisionShape2D.new()
 	var circle := CircleShape2D.new()
@@ -48,6 +63,16 @@ func _ready() -> void:
 	add_child(tag)
 
 	_craft = CraftManager.new(GameState, station)
+
+
+## Runs exactly once, on the first processed frame, then switches itself off —
+## the same one-shot body pass `Npc._process` runs for its subclasses.
+func _process(_delta: float) -> void:
+	if _npc_body_scaled:
+		return
+	_npc_body_scaled = true
+	set_process(false)
+	Npc.scale_npc_body(self, _sprite)
 
 
 func prompt_text() -> String:

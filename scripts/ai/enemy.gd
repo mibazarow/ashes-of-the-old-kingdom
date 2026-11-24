@@ -125,9 +125,20 @@ const READABLE_TINTS: Dictionary = {
 ## camouflage into its zone floor even where the tint only separates by hue.
 ## One shared ShaderMaterial for all 23 scenes: five extra taps per pixel of a
 ## 16x16 sprite, one shader program for the whole roster.
+##
+## The ring alpha comes from a vertex-stage copy of the modulate, not from the
+## fragment's `COLOR`: this engine hands `fragment()` a `COLOR` already
+## multiplied by the texture sample, so at a transparent ring texel `COLOR.a`
+## is 0 and `outline_color.a * COLOR.a` never drew a single outline pixel.
+## The vertex stage still sees the bare modulate, so `modulate_alpha` keeps
+## the ring opaque in play and still fades it with the death fade.
 const OUTLINE_SHADER_CODE := "
 shader_type canvas_item;
 uniform vec4 outline_color : source_color = vec4(0.043, 0.051, 0.067, 1.0);
+varying float modulate_alpha;
+void vertex() {
+	modulate_alpha = COLOR.a;
+}
 void fragment() {
 	vec2 px = TEXTURE_PIXEL_SIZE;
 	vec4 tex = texture(TEXTURE, UV);
@@ -136,7 +147,7 @@ void fragment() {
 	ring = max(ring, texture(TEXTURE, UV + vec2(0.0, px.y)).a);
 	ring = max(ring, texture(TEXTURE, UV - vec2(0.0, px.y)).a);
 	if (tex.a < 0.5 && ring >= 0.5) {
-		COLOR = vec4(outline_color.rgb, outline_color.a * COLOR.a);
+		COLOR = vec4(outline_color.rgb, outline_color.a * modulate_alpha);
 	} else {
 		COLOR = tex * COLOR;
 	}

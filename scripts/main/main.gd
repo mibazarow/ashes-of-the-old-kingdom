@@ -11,6 +11,33 @@ var world: Node2D:
 @onready var hud: CanvasLayer = $HUD
 @onready var bot: Node = $Bot
 
+## The HUD toast (`hud.gd _on_toast`) holds for TOAST_HOLD_SECONDS and fades
+## over TOAST_FADE_SECONDS, so a zone capture taken right after `travel` carried
+## the `Зона: ...` line a real player only sees for those 2.1 s — on top of the
+## HUD's permanent zone line, which is the duplicate the owner saw in every
+## zone frame. The capture path waits the toast out. Suppression (a flag the
+## toast listeners ignore) was the other candidate, but the only toast listener
+## lives in `hud.gd`, outside this file's reach, and waiting changes nothing in
+## real play: travelling still toasts exactly as before. The `inventory` probe
+## keeps its short toast on purpose — that one is the screen state the frame is
+## meant to show, not a travel announcement.
+const TOAST_HOLD_SECONDS := 1.6
+const TOAST_FADE_SECONDS := 0.5
+
+## The toast lifetime plus a margin, so the captured frame is certainly after
+## the fade has landed on alpha 0.
+const ZONE_CAPTURE_SETTLE_SECONDS := TOAST_HOLD_SECONDS + TOAST_FADE_SECONDS + 0.2
+
+## Set by the zone capture branches below; read by `screenshot_must_outlive_toast`.
+var _screenshot_zone_travelled := false
+
+
+## Pure gate so a test can pin the rule without running a capture: a frame taken
+## after a travel must wait the zone toast out; every other probe captures
+## after the plain frame settle.
+static func screenshot_must_outlive_toast(zone_travelled: bool) -> bool:
+	return zone_travelled
+
 
 func _ready() -> void:
 	_ensure_zone_manager()
@@ -122,6 +149,7 @@ func _maybe_capture_screenshot() -> void:
 		var manager := get_node_or_null("ZoneManager")
 		if manager != null:
 			manager.call("travel", "village")
+			_screenshot_zone_travelled = true
 	elif ui_probe == "ruins":
 		# The second zone, reached the way a player reaches it: through the zone
 		# manager rather than by editing the scene. The capture then shows both the
@@ -129,6 +157,7 @@ func _maybe_capture_screenshot() -> void:
 		var manager := get_node_or_null("ZoneManager")
 		if manager != null:
 			manager.call("travel", "ruins")
+			_screenshot_zone_travelled = true
 	elif ui_probe == "dungeon":
 		# The third zone, reached the way a player reaches it: down through the
 		# ruins. Two travels rather than one, because the undercroft has no door to
@@ -138,6 +167,7 @@ func _maybe_capture_screenshot() -> void:
 		if manager != null:
 			manager.call("travel", "ruins")
 			manager.call("travel", "dungeon")
+			_screenshot_zone_travelled = true
 	elif ui_probe == "fortress":
 		# The fourth zone, reached the way a player reaches it: down through the
 		# ruins, across the undercroft and up through the door at its far end. Three
@@ -149,8 +179,15 @@ func _maybe_capture_screenshot() -> void:
 			manager.call("travel", "ruins")
 			manager.call("travel", "dungeon")
 			manager.call("travel", "fortress")
+			_screenshot_zone_travelled = true
 	for i in range(20):
 		await get_tree().process_frame
+	# The zone toast from the last travel holds 1.6 s and fades over 0.5 s (see
+	# `TOAST_HOLD_SECONDS`); the 20 frames above are a third of a second, so a
+	# zone frame captured without this wait always carried the duplicate
+	# `Зона: ...` line. Wait the toast out, then grab the frame.
+	if screenshot_must_outlive_toast(_screenshot_zone_travelled):
+		await get_tree().create_timer(ZONE_CAPTURE_SETTLE_SECONDS).timeout
 	await RenderingServer.frame_post_draw
 	var image := get_viewport().get_texture().get_image()
 	var err := image.save_png(path)

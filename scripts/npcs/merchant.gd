@@ -13,6 +13,13 @@ extends Area2D
 @export var sprite_texture: Texture2D
 
 var _shop: ShopManager
+var _sprite: Sprite2D
+
+## One-shot body scaling through `Npc.scale_npc_body`, on the first processed
+## frame — the same pass and the same timing as in `Npc._process`, which the
+## `Npc` subclasses inherit. `Merchant` extends `Area2D` directly, so it calls
+## the shared static instead.
+var _npc_body_scaled := false
 
 
 func _ready() -> void:
@@ -23,12 +30,23 @@ func _ready() -> void:
 	collision_mask = 0
 
 	var sprite := Sprite2D.new()
+	# Named like every other NPC sprite in the project (the zone scripts name
+	# theirs "Sprite2D" too): a code-built node otherwise gets an internal
+	# `@Sprite2D@N` name no lookup can reach.
+	sprite.name = "Sprite2D"
+	_sprite = sprite
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
 	# A cool tint keeps the merchant visually distinct from the warm quest-giver
-	# while reusing the one placeholder sprite.
+	# while reusing the one placeholder sprite. The zone's brightness scalar is
+	# multiplied into it on the first processed frame (see `_process`); the hue
+	# authored here is the character's identity and survives the scaling.
 	sprite.modulate = Color(0.62, 0.86, 1.0)
 	add_child(sprite)
+	# Readability pass (mirrors `Enemy._ready` and `Npc._ready`): the zone's
+	# silhouette ring on the sprite, so the counter figure cannot sink into the
+	# floor behind it.
+	Npc.apply_npc_outline(self, sprite)
 
 	var shape := CollisionShape2D.new()
 	var circle := CircleShape2D.new()
@@ -46,6 +64,17 @@ func _ready() -> void:
 	# The injected state is the live GameState autoload; ShopManager reads prices
 	# from ItemDB and never touches an autoload by name itself.
 	_shop = ShopManager.new(GameState)
+
+
+## Runs exactly once, on the first processed frame, then switches itself off —
+## the same one-shot body pass `Npc._process` runs for its subclasses, so the
+## merchant's tint is scaled by the zone scalar like every other figure's.
+func _process(_delta: float) -> void:
+	if _npc_body_scaled:
+		return
+	_npc_body_scaled = true
+	set_process(false)
+	Npc.scale_npc_body(self, _sprite)
 
 
 func prompt_text() -> String:

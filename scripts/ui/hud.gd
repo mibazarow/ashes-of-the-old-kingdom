@@ -23,10 +23,17 @@ const ICON_SIZE_PX := 16.0
 const COLOR_ROW := Color(0.9, 0.92, 0.86)
 const COLOR_WARNING := Color(0.98, 0.66, 0.36)
 const COLOR_HINT := Color(0.6, 0.62, 0.6)
-## The dark, semi-opaque surface behind the HUD status block and the controls band
-## (CRITIC-P1-02 / P1-03 / P2-20). Dark enough that every HUD string clears 4.5:1
-## against it even after compositing over the brightest floor, yet translucent
-## enough to read as a HUD plate rather than a solid panel.
+## The dark, semi-opaque surface behind the HUD status block, the level column and
+## the controls band (CRITIC-P1-02 / P1-03 / P2-20). Dark enough that every HUD
+## string clears 4.5:1 against it even composited over the WORST possible floor
+## (pure black — the plate is dark, so black is its lowest-contrast backing, and
+## the readability test asserts against exactly that), yet translucent enough to
+## read as a HUD plate rather than a solid panel.
+##
+## The plates are corner boxes and a bottom band, never a full-width strip: the
+## world between them is the playfield, and `ZoneBase` keeps the player inside the
+## band they leave open (`ZoneBase.HUD_BAND_TOP` / `HUD_BAND_BOTTOM` are the same
+## numbers the plate-visibility test measures).
 const PLATE_COLOR := Color(0.04, 0.05, 0.07, 0.86)
 ## The always-visible control hint colour, lifted so it clears 4.5:1 on the plate
 ## (the old 0.72,0.74,0.7 was 1.06:1 on grass).
@@ -102,10 +109,12 @@ var _level_label: Label
 var _gold_label: Label
 var _clock_label: Label
 var _zone_label: Label
-## The dark plate behind the top-left status block and the one behind the bottom
-## controls band (CRITIC-P1-02 / P1-03 / P2-20). Kept as fields so a test can read
+## The dark plate behind the top-left status block, the one behind the top-right
+## level/gold/clock column, and the one behind the bottom controls band
+## (CRITIC-P1-02 / P1-03 / P2-20). Kept as fields so a test can read
 ## their style and a bounds check can measure them without walking the tree.
 var _status_plate: PanelContainer
+var _right_plate: PanelContainer
 var _hint_plate: PanelContainer
 var _quest_label: Label
 var _skill_label: Label
@@ -277,19 +286,29 @@ func _build_ui() -> void:
 	column.add_theme_constant_override("separation", 0)
 	margin.add_child(column)
 
-	# --- top row: stats left, level/gold right, on one dark plate --------------
-	# The plate (CRITIC-P1-02 / P2-20) is what makes every string in this row —
+	# --- top row: stats plate left, level/gold/clock plate right ---------------
+	# The plates (CRITIC-P1-02 / P2-20) are what make every string in this row —
 	# the zone line, the gold line, the day clock — readable on any floor: the
-	# text used to sit directly on grass at 1.1–1.2:1. It is a full-width row so
-	# the right-hand column stays in the top-right corner exactly where it was;
-	# the plate only adds a dark surface behind the existing layout, it moves
-	# nothing. The HBox fills the plate, so the expanding spacer still pushes the
-	# level/gold/clock column to the right edge.
+	# text used to sit directly on grass at 1.1–1.2:1. They used to be ONE
+	# full-width strip, and that strip was the defect: it painted the top 50 px
+	# of the playfield at 14 % across the whole 470 px, so any enemy or NPC
+	# standing there became an invisible dark blob. They are two corner boxes now
+	# — the status block left, the level column right — and the world between
+	# them draws at full strength. `ZoneBase` keeps the player inside the band
+	# the plates leave open (its camera guard recenters the view every frame);
+	# the plate bottoms sit at or above `ZoneBase.HUD_BAND_TOP`, which the
+	# plate-visibility test measures off the live layout.
+	var top_row := HBoxContainer.new()
+	top_row.name = "TopRow"
+	top_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_row.add_theme_constant_override("separation", 0)
+	column.add_child(top_row)
+
 	_status_plate = PanelContainer.new()
 	_status_plate.name = "StatusPlate"
 	_status_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_status_plate.add_theme_stylebox_override("panel", _plate_style(PLATE_COLOR))
-	column.add_child(_status_plate)
+	top_row.add_child(_status_plate)
 
 	var top := HBoxContainer.new()
 	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -329,17 +348,29 @@ func _build_ui() -> void:
 	_zone_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	stats.add_child(_zone_label)
 
+	# The gap between the two corner boxes is world, not plate: an entity walking
+	# across the top-centre of the screen stays fully visible.
 	var top_spacer := Control.new()
 	top_spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	top_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	top.add_child(top_spacer)
+	top_row.add_child(top_spacer)
+
+	_right_plate = PanelContainer.new()
+	_right_plate.name = "RightPlate"
+	_right_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Shrink to its own content instead of stretching to the row height the status
+	# plate defines: a plate is a backing for text, and stretching it would paint
+	# world it does not need to cover.
+	_right_plate.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	_right_plate.add_theme_stylebox_override("panel", _plate_style(PLATE_COLOR))
+	top_row.add_child(_right_plate)
 
 	var right := VBoxContainer.new()
 	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	right.alignment = BoxContainer.ALIGNMENT_BEGIN
 	right.custom_minimum_size = Vector2(58, 0)
 	right.add_theme_constant_override("separation", 1)
-	top.add_child(right)
+	_right_plate.add_child(right)
 
 	_level_label = _make_text("Ур. 1", Color(0.92, 0.9, 0.82))
 	_level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -396,7 +427,10 @@ func _build_ui() -> void:
 	# The bottom band used to float on the world too (CRITIC-P1-02: controls line
 	# 1.06:1). One plate behind the tracker, the skill line and the hint puts every
 	# one of them on a dark surface. The interact prompt above stays off the plate:
-	# it is transient and already high-contrast.
+	# it is transient and already high-contrast. The band is a single compact line
+	# tall (plus the tracker and skill rows when they carry text): its worst-case
+	# top edge is `ZoneBase.HUD_BAND_BOTTOM`, the number the camera guard and the
+	# plate-visibility test measure against.
 	_hint_plate = PanelContainer.new()
 	_hint_plate.name = "HintPlate"
 	_hint_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -408,8 +442,12 @@ func _build_ui() -> void:
 	bottom.add_theme_constant_override("separation", 1)
 	_hint_plate.add_child(bottom)
 
+	# One line, ellipsised: a tracker that wrapped to two lines would grow the
+	# plate upward into the band the camera guard keeps clear of the plates.
 	_quest_label = _make_text("", Color(0.86, 0.88, 0.78))
 	_quest_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_quest_label.max_lines_visible = 1
+	_quest_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	bottom.add_child(_quest_label)
 
 	# Selected skill, one compact line under the tracker. Clipped with an
@@ -421,15 +459,21 @@ func _build_ui() -> void:
 	bottom.add_child(_skill_label)
 
 	# The always-visible control hint (CRITIC-P2-05): it used to omit `pause`/Esc
-	# and the four quick slots even though both are rebindable and documented. They
-	# go on a compact second line so the band stays inside 480x270. The colour is
-	# lifted onto the plate's dark surface for a clear ≥4.5:1 (was 1.06:1 on grass).
+	# and the four quick slots even though both are rebindable and documented, and
+	# they are still named here — on ONE line now, because a two-line band ate
+	# 49 px of the playfield and hid anything standing under it. The wording is
+	# the compact form (measured 463 px at the base 8 px font against the 464 px
+	# the plate has); a wider platform font ellipsises instead of growing the
+	# band. The colour is lifted onto the plate's dark surface for a clear
+	# ≥4.5:1 (was 1.06:1 on grass).
 	_hint_label = _make_text(
-		"WASD · ЛКМ удар · ПКМ умение · Space рывок · E действие · I инв · J журнал · M карта · C персонаж · K навыки · F5/F9\nEsc пауза · 1–4 быстрый слот",
+		"WASD·ЛКМ/ПКМ удар/умение·Space рывок·E действие·I инв·J журнал·M карта·C герой·K магия·Esc пауза·F5/F9·1-4 слоты",
 		COLOR_HINT_TEXT
 	)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_hint_label.clip_text = true
+	_hint_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_hint_label.max_lines_visible = 1
 	bottom.add_child(_hint_label)
 
 	_build_dialogue_panel()
@@ -699,13 +743,74 @@ func hint_plate_style() -> StyleBoxFlat:
 	return _hint_plate.get_theme_stylebox("panel") as StyleBoxFlat
 
 
+## The plate behind the top-right level/gold/clock column. Same style as the other
+## two; exposed so the readability test can prove every plate is the same dark
+## surface, not just the two the first critic pass happened to name.
+func right_plate_style() -> StyleBoxFlat:
+	if _right_plate == null:
+		return null
+	return _right_plate.get_theme_stylebox("panel") as StyleBoxFlat
+
+
+# --- plate geometry, as the player actually sees it ----------------------------
+# The live global rects of the three plates, measured after layout rather than
+# recomputed from constants. The plate-visibility test maps these viewport rects
+# through the camera's own transform to find which world area each plate paints
+# over, so what the test measures is what the frame shows.
+
+func status_plate_rect() -> Rect2:
+	return _status_plate.get_global_rect() if _status_plate != null else Rect2()
+
+
+func right_plate_rect() -> Rect2:
+	return _right_plate.get_global_rect() if _right_plate != null else Rect2()
+
+
+func hint_plate_rect() -> Rect2:
+	return _hint_plate.get_global_rect() if _hint_plate != null else Rect2()
+
+
+## The controls-hint string as built. A test asserts it is one line: the band's
+## worst-case height (and with it the camera band the plates leave open) is only
+## stable while the hint cannot wrap.
+func hint_text() -> String:
+	return _hint_label.text if _hint_label != null else ""
+
+
+## The colour a HUD string is actually painted in, read off the live label rather
+## than a copy, so the contrast test measures the pixels and not the source.
+## Roles: hint, quest, skill, zone, level, gold, clock, bar_caption.
+func hud_text_color(role: String) -> Color:
+	var label: Label = null
+	match role:
+		"hint":
+			label = _hint_label
+		"quest":
+			label = _quest_label
+		"skill":
+			label = _skill_label
+		"zone":
+			label = _zone_label
+		"level":
+			label = _level_label
+		"gold":
+			label = _gold_label
+		"clock":
+			label = _clock_label
+		"bar_caption":
+			label = _hp_label
+	if label == null:
+		return Color.TRANSPARENT
+	return label.get_theme_color("font_color")
+
+
 ## The union of the on-screen HUD overlay bounds, so a test can prove the HUD stays
 ## inside the 480x270 viewport at the largest font scale. Only the always-present
 ## plates and the transient centred rows are measured; hidden panels contribute
 ## nothing. Returns an empty Rect2 when nothing is drawn.
 func hud_content_bounds() -> Rect2:
 	var bounds := Rect2()
-	var controls: Array = [_status_plate, _hint_plate, _toast_label, _prompt_label, _boss_panel]
+	var controls: Array = [_status_plate, _right_plate, _hint_plate, _toast_label, _prompt_label, _boss_panel]
 	for control in controls:
 		if control == null or not is_instance_valid(control) or not control.visible:
 			continue
@@ -1052,15 +1157,18 @@ func _accessibility() -> Node:
 ## The dark plate behind a HUD band: a flat, borderless, slightly rounded box in
 ## `PLATE_COLOR`. Unlike `_panel_style` it carries no border (a border would draw a
 ## hard frame around the overlay) and it adds a small content margin so text never
-## sits flush against the plate edge.
+## sits flush against the plate edge. The margins are deliberately tight (3 px
+## across, 1 px top/bottom): every pixel they save is a pixel of playfield the
+## plate does not cover, and the camera guard keeps the player inside the band the
+## plates leave open.
 func _plate_style(color: Color) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = color
 	sb.set_corner_radius_all(2)
-	sb.content_margin_left = 4.0
-	sb.content_margin_right = 4.0
-	sb.content_margin_top = 2.0
-	sb.content_margin_bottom = 2.0
+	sb.content_margin_left = 3.0
+	sb.content_margin_right = 3.0
+	sb.content_margin_top = 1.0
+	sb.content_margin_bottom = 1.0
 	return sb
 
 

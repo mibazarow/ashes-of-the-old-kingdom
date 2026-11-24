@@ -2,6 +2,125 @@ class_name Npc
 extends Area2D
 ## Quest giver. Turns the quest in exactly once through QuestManager.
 
+# --- NPC readability (mirrors the enemy silhouette pass in scripts/ai/enemy.gd) --
+# Enemies got a per-zone silhouette outline and a zone-scaled body tint
+# (CRITIC-P1-18); NPCs stayed unpainted and sank into the dark dungeon and
+# fortress floors as brown blobs. `enemy.gd` is off-limits to this pass, so the
+# shader below is a byte-for-byte copy of `Enemy.OUTLINE_SHADER_CODE` and the
+# two must be kept in sync by hand. The vertex-stage `modulate_alpha` copy is
+# load-bearing there and here for the same reason: this engine hands
+# `fragment()` a `COLOR` already multiplied by the texture sample, so at a
+# transparent ring texel `COLOR.a` is 0 and a ring alpha taken from the
+# fragment's `COLOR` would draw no outline anywhere.
+const NPC_OUTLINE_SHADER_CODE := "
+shader_type canvas_item;
+uniform vec4 outline_color : source_color = vec4(0.043, 0.051, 0.067, 1.0);
+varying float modulate_alpha;
+void vertex() {
+	modulate_alpha = COLOR.a;
+}
+void fragment() {
+	vec2 px = TEXTURE_PIXEL_SIZE;
+	vec4 tex = texture(TEXTURE, UV);
+	float ring = texture(TEXTURE, UV + vec2(px.x, 0.0)).a;
+	ring = max(ring, texture(TEXTURE, UV - vec2(px.x, 0.0)).a);
+	ring = max(ring, texture(TEXTURE, UV + vec2(0.0, px.y)).a);
+	ring = max(ring, texture(TEXTURE, UV - vec2(0.0, px.y)).a);
+	if (tex.a < 0.5 && ring >= 0.5) {
+		COLOR = vec4(outline_color.rgb, outline_color.a * modulate_alpha);
+	} else {
+		COLOR = tex * COLOR;
+	}
+}
+"
+
+## The two silhouette outline colours, mirroring `Enemy.OUTLINE_DARK` and
+## `Enemy.OUTLINE_LIGHT`: dark on the light forest/ruins/village floors, light
+## on the dark dungeon/fortress floors. The zone itself decides which one its
+## NPCs wear, through the same `enemy_outline_color()` hook the enemies read.
+const OUTLINE_DARK := Color(0.043, 0.051, 0.067)
+const OUTLINE_LIGHT := Color(0.910, 0.933, 0.965)
+
+## One cached ShaderMaterial per outline colour, shared by every NPC — the
+## `Npc` subclasses and the code-built `Merchant`/`Smith` alike, which call
+## through these statics instead of inheriting them. At most two shader
+## programs for the whole cast, and a headless test that never draws an NPC
+## pays nothing for either.
+static var _outline_materials: Dictionary = {}
+
+
+## The silhouette material for one outline colour, built on first use.
+static func outline_material(outline_color: Color = OUTLINE_DARK) -> ShaderMaterial:
+	var key := outline_color.to_html(false)
+	var cached: ShaderMaterial = _outline_materials.get(key)
+	if cached == null:
+		var shader := Shader.new()
+		shader.code = NPC_OUTLINE_SHADER_CODE
+		var material := ShaderMaterial.new()
+		material.shader = shader
+		material.set_shader_parameter("outline_color", outline_color)
+		_outline_materials[key] = material
+		cached = material
+	return cached
+
+
+## The nearest ancestor that chose this zone's readability colours — a ZoneBase
+## answers both `enemy_outline_color` and `enemy_body_tint`. Null in a bare
+## arena, where the dark-outline default and an unscaled body apply. The same
+## contract `Enemy._readability_zone` resolves, so an NPC and an enemy standing
+## on the same tile read the same pair of colours from the same zone.
+static func readability_zone(node: Node) -> Node:
+	var parent := node.get_parent()
+	while parent != null:
+		if parent.has_method("enemy_outline_color") and parent.has_method("enemy_body_tint"):
+			return parent
+		parent = parent.get_parent()
+	return null
+
+
+## The outline colour of the zone `node` stands in (dark default with no zone).
+static func zone_outline_color(node: Node) -> Color:
+	var zone := readability_zone(node)
+	if zone == null:
+		return OUTLINE_DARK
+	return zone.call("enemy_outline_color") as Color
+
+
+## The body brightness scalar of the zone `node` stands in. Identity with no
+## zone: a bare NPC keeps the tint its character authored, because the NPC
+## identity tints are already mid-bright (unlike the near-white enemy defaults
+## the zone scalars were tuned around).
+static func zone_body_scalar(node: Node) -> Color:
+	var zone := readability_zone(node)
+	if zone == null:
+		return Color(1.0, 1.0, 1.0)
+	return zone.call("enemy_body_tint") as Color
+
+
+## The outline pass: the zone's silhouette ring on the sprite. NB: this engine
+## build exposes CanvasItem's local material as `material`, not 4.x
+## `material_override` — the same note as in `Enemy._ready`.
+static func apply_npc_outline(node: Node, sprite: Sprite2D) -> void:
+	if sprite == null or not is_instance_valid(sprite):
+		return
+	sprite.material = outline_material(zone_outline_color(node))
+
+
+## The body pass: scale whatever tint the character authored in `_ready` (or
+## the zone script painted over it right after `add_child`) by the zone's
+## brightness scalar, so the same figure sits bright on the dark floors and
+## dark on the light ones. The hue — the character's identity — survives; only
+## the value moves. Nela's undercroft grey (0.70, 0.74, 0.82) over the shared
+## brown NPC sprite rendered as a near-black blob (darkest pixels 32, 29, 29);
+## scaled by the undercroft scalar it renders as a light readable figure.
+static func scale_npc_body(node: Node, sprite: Sprite2D) -> void:
+	if sprite == null or not is_instance_valid(sprite):
+		return
+	var scalar := zone_body_scalar(node)
+	if scalar == Color(1.0, 1.0, 1.0):
+		return
+	sprite.modulate *= scalar
+
 ## The quest this instance hands out. Per-instance (set on `edrik.tscn`, and on
 ## any code-built villager) rather than a hardcoded constant, so a second quest
 ## giver can exist without subclassing the dialogue path. Edrik's scene sets
@@ -20,11 +139,23 @@ extends Area2D
 
 var _bubble: Label
 
+## One-shot body scaling (see `_process`). The zone scripts paint their own
+## identity tint right after `add_child` — after `_ready` has run — so the
+## zone scalar cannot be applied inside `_ready` without being overwritten.
+## A freed NPC never processes again, so a world freed mid-frame (travel uses
+## `free()`, and the screenshot probe travels inside `_ready`) leaves nothing
+## pending behind it.
+var _npc_body_scaled := false
+
 
 func _ready() -> void:
 	add_to_group("interactable")
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
+	# Readability pass (mirrors `Enemy._ready`): the zone's silhouette ring goes
+	# on immediately; the zone-scaled body tint lands on the first processed
+	# frame, after any tint the spawning zone script paints in this same frame.
+	apply_npc_outline(self, sprite)
 	_bubble = Label.new()
 	_bubble.text = "!"
 	_bubble.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
@@ -34,6 +165,19 @@ func _ready() -> void:
 	EventBus.quest_progress.connect(_on_quest_progress)
 	EventBus.quest_completed.connect(_on_quest_completed)
 	_refresh_bubble()
+
+
+## Runs exactly once, on the first processed frame, then switches itself off:
+## the body pass has to land after the spawner's post-`add_child` tint, and no
+## later code in the project writes an NPC sprite's modulate again (the day
+## schedule moves positions, never colours). `Villager` and `Pilgrim` inherit
+## this pass; they only author their identity tint in `_ready`.
+func _process(_delta: float) -> void:
+	if _npc_body_scaled:
+		return
+	_npc_body_scaled = true
+	set_process(false)
+	scale_npc_body(self, sprite)
 
 
 func prompt_text() -> String:

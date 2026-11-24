@@ -27,6 +27,25 @@ const TILE_TREE := 3
 ## Radius (in tiles) around the player that counts as explored on the map.
 const VISIT_RADIUS := 3
 
+## The playfield band the HUD plates leave open, in viewport pixels. The status
+## and right plates hang above `HUD_BAND_TOP` and the hint plate starts at or
+## below `HUD_BAND_BOTTOM` (worst case: tracker + skill + hint rows all filled);
+## `hud.gd` builds to these numbers and the plate-visibility test measures the
+## live rects against them, so the camera and the HUD cannot drift apart in
+## silence. The 480x270 viewport is the one the project ships
+## (`display/window/size/viewport_width|height`).
+const HUD_BAND_TOP := 55.0
+const HUD_BAND_BOTTOM := 225.0
+## How far the camera guard may shift the view vertically to keep the player in
+## the band. 40 px is the largest shift that cannot drag empty space past a map
+## border on any shipped zone: at a border the camera is already clamped by its
+## limits, and the guard only adds what the clamped camera cannot follow, so the
+## uncovered strip above the top wall row stays under the status plate and the
+## one below the bottom wall row under the hint plate. The player's own sprite
+## (16 px) still clears both plate edges by more than this margin at every
+## border tile of every zone — asserted by the plate-visibility test.
+const CAMERA_BAND_LIMIT := 40.0
+
 var player: Node2D
 var tile_layer: TileMapLayer
 var _map: Array[String] = []
@@ -64,6 +83,10 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
+	# The camera guard runs before the visited-tile early return: the band the
+	# plates leave open is a rendering invariant, and it has to hold on every
+	# frame the world exists, not only on frames the player crossed a tile.
+	_guard_camera_band()
 	var tile := player_tile()
 	if tile == _last_visited_tile:
 		return
@@ -347,6 +370,55 @@ func _configure_camera() -> void:
 	cam.position_smoothing_enabled = true
 	cam.position_smoothing_speed = 7.0
 	cam.make_current()
+	# Seed the band offset before the first frame is drawn, so the very first
+	# frame of a freshly built zone already shows the player inside the band
+	# rather than one frame at the old centred position.
+	_guard_camera_band()
+
+
+## The playfield band the HUD plates leave open, in viewport coordinates. The
+## plate-visibility test maps this against the live plate rects and the camera's
+## own transform; nothing else reads it as a source of truth.
+func hud_band() -> Rect2:
+	return Rect2(0.0, HUD_BAND_TOP, 480.0, HUD_BAND_BOTTOM - HUD_BAND_TOP)
+
+
+## Keeps the player inside the band between the HUD plates.
+##
+## The plates are required (opaque backing for HUD text, CRITIC-P1-02/P1-03), and
+## anything drawn under them reads as a 14 %-opacity dark blob — a defect measured
+## at 0 vs 324 outline ring pixels with the HUD hidden. No plate geometry can keep
+## a roaming enemy out of a full-width strip, and no camera limit can either (the
+## player walks on floor, so floor is always on screen around him); what CAN be
+## guaranteed is the player's own visibility and a band that is always playfield,
+## and that is what this does: every frame it measures where the band centre
+## currently lands in world space through the camera's own canvas transform (limits
+## and smoothing included) and shifts `Camera2D.offset.y` so the player sits at
+## that centre, clamped to `CAMERA_BAND_LIMIT`.
+##
+## In open ground the clamp is not binding and the player simply sits at the band
+## centre (2 px below the viewport centre — imperceptible). At a map border the
+## clamped camera cannot follow the player all the way, and the offset takes up the
+## slack up to the limit: the player stays clear of both plates (the limit is
+## smaller than the border clearance, see `CAMERA_BAND_LIMIT`), and the world area
+## the plates cover there is the border wall or empty space beyond the map — never
+## walkable floor. The limit is what keeps that empty area from ever growing past
+## the plates into the band.
+##
+## Pure camera setup: it reads the player and the camera and writes one property,
+## so it is safe on any frame, including the build frame and frames a modal owns.
+func _guard_camera_band() -> void:
+	if player == null or not is_instance_valid(player):
+		return
+	var cam := player.get_node_or_null("Camera2D") as Camera2D
+	if cam == null or not cam.is_current():
+		return
+	# The guard is written for the shipped 1:1 zoom and no rotation; a future
+	# zoom would scale `offset` with it, and the plate-visibility test pins both.
+	var band_centre_viewport := Vector2(240.0, (HUD_BAND_TOP + HUD_BAND_BOTTOM) * 0.5)
+	var band_centre_world := cam.get_canvas_transform().affine_inverse() * band_centre_viewport
+	var delta := player.global_position.y - band_centre_world.y
+	cam.offset.y = clampf(cam.offset.y + delta, -CAMERA_BAND_LIMIT, CAMERA_BAND_LIMIT)
 
 
 ## Gives one NPC a `ScheduleComponent` bound to this zone's clock. The clock has
