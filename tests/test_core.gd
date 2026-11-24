@@ -2424,23 +2424,58 @@ func _test_map_panel() -> void:
 		await process_frame
 		_check(int(hud.call("current_font_size")) == 8, "the HUD font returns to 8 px after reset")
 
-	# --- how the theme font is rasterised (CRITIC-P1-04) ---------------------
+	# --- how text is rasterised, and at what density (readability fix) --------
+	# Two independent things have to hold at once, and the project got each of them
+	# wrong at some point, so both are read back off the live project settings and
+	# the live theme rather than trusted from source.
+	#
+	# 1. The density. `window/stretch/mode="viewport"` rendered the whole Control
+	#    tree into the 480x270 buffer and integer-upscaled it 3x, so every glyph was
+	#    a magnified 8 px raster. `canvas_items` keeps the 480x270 logical layout but
+	#    rasterises the Control tree against the real window, so the base 8 px is
+	#    drawn as a 24 px glyph. `integer` scale mode has to survive the switch or
+	#    the world stops landing on whole pixels.
+	# 2. The smoothing. Gray anti-aliasing (not LCD — LCD fringes against pixel art)
+	#    and automatic subpixel positioning. The pixel art stays hard-edged through a
+	#    different setting entirely, nearest texture filtering, which is asserted
+	#    alongside so the two cannot be confused for one another again.
+	_check(String(ProjectSettings.get_setting("display/window/stretch/mode"))
+		== "canvas_items",
+		"the Control tree is stretched in canvas_items so text rasterises at window "
+		+ "density (got %s)" % String(ProjectSettings.get_setting("display/window/stretch/mode")))
+	_check(String(ProjectSettings.get_setting("display/window/stretch/scale_mode"))
+		== "integer",
+		"the canvas scale stays an integer so pixel art keeps hard edges (got %s)"
+		% String(ProjectSettings.get_setting("display/window/stretch/scale_mode")))
+	# The project default is 0 = Nearest. The enum behind this setting starts at
+	# Nearest, while the per-node `CanvasItem.TextureFilter` starts at Inherited and
+	# puts Nearest at 1 (measured on 4.7.2: `CanvasItem.TEXTURE_FILTER_NEAREST` is 1),
+	# and the engine exposes no GDScript constant for the project-level enum. So the
+	# literal is compared here on purpose: writing `CanvasItem.TEXTURE_FILTER_NEAREST`
+	# would have asserted 1 and failed on a project that is already correct, and
+	# writing 0 without this note reads like a magic number. Switching the default to
+	# Linear makes this 1 and fails, which is the point.
+	_check(int(ProjectSettings.get_setting("rendering/textures/canvas_textures/default_texture_filter"))
+		== 0,
+		"the 2D texture filter default is nearest, so tiles do not blend (got %d)"
+		% int(ProjectSettings.get_setting("rendering/textures/canvas_textures/default_texture_filter")))
+
 	# No pixel font in the local asset packs covers Cyrillic — measured, not
 	# assumed: `NormalFont.ttf`, `font8x8.png` and `font24x30.png` from the Ninja
 	# Adventure pack carry 0 of the 66 Cyrillic code points this UI draws (see
 	# `docs/ASSET_CREDITS.md`). Shipping one would replace every Russian string with
-	# missing-glyph boxes, so the theme deliberately keeps the OS face and turns the
-	# text server's smoothing off instead. Those two properties are the whole of the
-	# fix, so they are read back off the live theme rather than trusted from source.
+	# missing-glyph boxes, so the theme keeps the OS face and rasterises it at the
+	# window's real density instead. Those two properties are the whole of the fix,
+	# so they are read back off the live theme rather than trusted from source.
 	var hud_font: Font = hud.call("theme_font") as Font
 	_check(hud_font != null, "the HUD theme carries a default font")
 	if hud_font != null:
-		_check(int(hud_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_NONE),
-			"the HUD font is rasterised without anti-aliasing (got %d)"
+		_check(int(hud_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_GRAY),
+			"the HUD font is rasterised with gray anti-aliasing (got %d)"
 			% int(hud_font.antialiasing))
 		_check(int(hud_font.subpixel_positioning)
-			== int(TextServer.SUBPIXEL_POSITIONING_DISABLED),
-			"the HUD font is snapped to whole pixels (got %d)"
+			== int(TextServer.SUBPIXEL_POSITIONING_AUTO),
+			"the HUD font uses automatic subpixel positioning (got %d)"
 			% int(hud_font.subpixel_positioning))
 		# The theme reads no font file at all, so a missing asset cannot crash it and
 		# there is no half-loaded state to fall out of. What still has to hold is that
@@ -11301,26 +11336,39 @@ func _test_main_menu() -> void:
 		"a plain test process is neither a bot nor a screenshot probe")
 	menu.set_process(false)
 
-	# --- the menu theme rasterises text the same way the HUD does (CRITIC-P1-04) --
+	# --- the menu theme rasterises text the same way the HUD does -------------
 	# The menu builds its own `Theme` instead of inheriting the HUD's, and that
 	# duplication is exactly where this finding was only half closed the first time:
-	# `hud.gd` turned the text server's smoothing off and `main_menu.gd` did not, so
-	# the boot screen kept drawing blurred, sub-pixel-shifted OS glyphs over pixel
-	# art. Both properties are asserted on the live theme of the real menu instance,
-	# so the two themes cannot drift apart again unnoticed.
+	# one theme was changed and the other was not, so the boot screen kept drawing
+	# text a different way from the in-world HUD next to it. Both properties are
+	# asserted on the live theme of the real menu instance, so the two themes cannot
+	# drift apart again unnoticed.
 	var menu_theme: Theme = menu.get("theme") as Theme
 	_check(menu_theme != null, "the menu sets its own theme")
 	if menu_theme != null:
 		var menu_font := menu_theme.default_font as Font
 		_check(menu_font != null, "the menu theme carries a default font")
 		if menu_font != null:
-			_check(int(menu_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_NONE),
-					"the menu font is rasterised without anti-aliasing, like the HUD font (got %d)"
+			_check(int(menu_font.antialiasing) == int(TextServer.FONT_ANTIALIASING_GRAY),
+					"the menu font is rasterised with gray anti-aliasing, like the HUD font (got %d)"
 					% int(menu_font.antialiasing))
 			_check(int(menu_font.subpixel_positioning)
-					== int(TextServer.SUBPIXEL_POSITIONING_DISABLED),
-					"the menu font is snapped to whole pixels, like the HUD font (got %d)"
+					== int(TextServer.SUBPIXEL_POSITIONING_AUTO),
+					"the menu font uses automatic subpixel positioning, like the HUD font (got %d)"
 					% int(menu_font.subpixel_positioning))
+			# The menu is the screen that had no Cyrillic coverage check at all, and it
+			# draws the same Russian strings as the HUD from its own theme instance.
+			var menu_cyrillic_width: float = menu_font.get_string_size(
+					"Пепел старого королевства", HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+			_check(menu_cyrillic_width > 0.0,
+					"the menu font paints Cyrillic at the title size instead of empty boxes (width %.1f)"
+					% menu_cyrillic_width)
+		# The menu title is the largest type in the game and the one a player reads
+		# first, so the density it rasterises at is checked here too rather than only
+		# for the HUD: the same project setting drives both themes.
+		_check(String(ProjectSettings.get_setting("display/window/stretch/mode"))
+				== "canvas_items",
+				"the menu draws under canvas_items stretch, so its glyphs are not an upscaled 8 px raster")
 
 	# --- the six entries of §16.1, in order ------------------------------------
 	var items: Array = menu.menu_items()

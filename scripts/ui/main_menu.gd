@@ -226,19 +226,25 @@ func _spacer(height: float) -> Control:
 	return spacer
 
 
-## The menu theme (CRITIC-P1-04). The menu builds its own `Theme` rather than
-## inheriting the HUD's, so the raster settings that keep text hard-edged on the
-## native 480x270 buffer have to be repeated here: without them the menu alone
-## kept drawing anti-aliased, sub-pixel-shifted OS glyphs over pixel art while the
-## in-world HUD next to it did not. Kept in lockstep with `hud.gd::_make_theme()`
-## by the `main_menu` test group, which reads the live theme of both.
+## The menu theme. The menu builds its own `Theme` rather than inheriting the HUD's,
+## so the raster settings have to be repeated here or the two screens drift: the
+## boot screen is the first text a player reads, and it is also the one with the
+## largest type on it. Both themes now ask for gray anti-aliasing and automatic
+## subpixel positioning, because the sharpness comes from rasterising at the real
+## window density (`window/stretch/mode="canvas_items"` makes the base 8 px a 24 px
+## glyph at the shipped 1440x810 window), not from disabling the text server's
+## smoothing — disabling it was the earlier fix and it only produced a magnified
+## binary bitmap, since this is a proportional OS face and not a pixel font. Gray
+## rather than LCD, so no colour fringing over the pixel art behind the panel.
+## Kept in lockstep with `hud.gd::_make_theme()` by the `main_menu` test group,
+## which reads the live theme of both.
 func _make_theme() -> Theme:
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray([
 		"Helvetica Neue", "Arial Unicode MS", "Arial", "DejaVu Sans", "sans-serif"
 	])
-	font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
-	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+	font.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
 	var theme := Theme.new()
 	theme.default_font = font
 	theme.default_font_size = 8

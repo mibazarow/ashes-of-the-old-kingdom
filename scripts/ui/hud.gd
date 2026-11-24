@@ -972,39 +972,56 @@ func _build_pause_panel() -> void:
 	box.add_child(_make_text("Q — В главное меню", Color(0.9, 0.9, 0.86)))
 
 
-## The HUD theme (CRITIC-P1-04). No pixel font ships in `assets/` and downloading
-## one is out of scope, so the honest fix is option (a): keep the built-in OS font
-## but render it hard-edged and pixel-snapped. `antialiasing = NONE` and
-## `subpixel_positioning = DISABLED` (both 0 in Godot 4.7) stop the text server
-## from blurring and sub-pixel-shifting the glyphs, so at the native 480x270 buffer
-## each glyph lands on whole pixels and the project's integer 3x nearest upscale
-## (`window/stretch/scale_mode="integer"`, `default_texture_filter=0`) keeps it
-## crisp instead of smearing an anti-aliased bitmap. The size is an integer
-## multiple of the pixel grid (see `_hud_font_size`). The limitation is recorded in
-## `docs/ARCHITECTURE.md`: this is still a proportional OS font, so glyph metrics
-## remain platform-dependent. The three pixel fonts that do ship locally were
-## measured, not assumed, and all three are unusable here — see
-## `docs/ASSET_CREDITS.md` («Шрифты»): `NormalFont.ttf`, `font8x8.png` and
-## `font24x30.png` from the Ninja Adventure pack cover 0 of the 66 Cyrillic code
-## points this UI draws, so shipping one would replace every Russian string with
-## missing-glyph boxes. A Cyrillic pixel font stays an external asset.
+## The HUD theme. No pixel font ships in `assets/` and downloading one is out of
+## scope, so the honest fix is option (a): keep the built-in OS face and let it
+## rasterise at the density it is actually drawn at. `antialiasing = GRAY` and
+## `subpixel_positioning = AUTO` are what make the glyphs smooth instead of
+## stair-stepped, and the crispness does not come from taking them away.
+##
+## The earlier answer to the same critic (CRITIC-P1-04) was the opposite and it was
+## wrong: `NONE` + `DISABLED` made sense only for a bitmap pixel font, and this is a
+## proportional OS face, so all it did was remove every intermediate tone from
+## every stroke. Measured on the committed frame, a whole line of the menu title
+## held 4 distinct grey levels — background, ink and two plate tones — i.e. a binary
+## 8 px bitmap. On top of that `window/stretch/mode="viewport"` rendered the entire
+## Control tree into the 480x270 buffer and integer-upscaled it 3x, so each stroke
+## came out an exact multiple of 3 device pixels with no grey edge at all.
+##
+## `window/stretch/mode="canvas_items"` is what actually fixes it: the Control tree
+## keeps the same 480x270 logical layout, but Godot multiplies the font size by the
+## canvas scale, so the base 8 px is rasterised as a 24 px glyph and anti-aliased at
+## that density against the real 1440x810 window. Gray, deliberately not LCD — LCD
+## subpixel rendering paints colour fringes that are obvious against pixel art.
+## Pixel art stays hard-edged through a different mechanism and must not be
+## conflated with this one: `textures/canvas_textures/default_texture_filter=0`
+## (nearest) plus the integer canvas scale. Sizes stay integers (see
+## `_hud_font_size`). The remaining limitation is recorded in `docs/ARCHITECTURE.md`:
+## this is still a proportional OS font, so glyph metrics remain
+## platform-dependent. The three pixel fonts that do ship locally were measured,
+## not assumed, and all three are unusable here — see `docs/ASSET_CREDITS.md`
+## («Шрифты»): `NormalFont.ttf`, `font8x8.png` and `font24x30.png` from the Ninja
+## Adventure pack cover 0 of the 66 Cyrillic code points this UI draws, so shipping
+## one would replace every Russian string with missing-glyph boxes. A Cyrillic
+## pixel font stays an external asset.
 func _make_theme() -> Theme:
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray([
 		"Helvetica Neue", "Arial Unicode MS", "Arial", "DejaVu Sans", "sans-serif"
 	])
-	font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
-	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+	font.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+	font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
 	var theme := Theme.new()
 	theme.default_font = font
 	theme.default_font_size = _hud_font_size()
 	return theme
 
 
-## The theme font size in pixels: the base 8 px scaled by the accessibility font
-## scale, rounded to an integer and clamped to 8..12 (100..150 %). The clamp is
-## what keeps the HUD inside 480x270 at the largest setting; the integer rounding is
-## what keeps the glyphs on the pixel grid.
+## The theme font size in logical pixels: the base 8 px scaled by the accessibility
+## font scale, rounded to an integer and clamped to 8..12 (100..150 %). The clamp is
+## what keeps the HUD inside the 480x270 logical viewport at the largest setting.
+## These are logical, not device, pixels: under
+## `window/stretch/mode="canvas_items"` the canvas scale (3x at the shipped
+## 1440x810 window) is applied on top, so 8..12 rasterise as 24..36 device px.
 func _hud_font_size() -> int:
 	var factor := 1.0
 	var store := _accessibility()
