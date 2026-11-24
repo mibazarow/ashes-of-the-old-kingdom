@@ -30,14 +30,42 @@ const COLOR_HINT := Color(0.6, 0.62, 0.6)
 ## the readability test asserts against exactly that), yet translucent enough to
 ## read as a HUD plate rather than a solid panel.
 ##
-## The plates are corner boxes and a bottom band, never a full-width strip: the
-## world between them is the playfield, and `ZoneBase` keeps the player inside the
-## band they leave open (`ZoneBase.HUD_BAND_TOP` / `HUD_BAND_BOTTOM` are the same
-## numbers the plate-visibility test measures).
+## The plates are no longer the thing that separates HUD from playfield: they sit
+## INSIDE the two opaque letterbox bands below, so a plate never overlaps the world
+## and its own alpha is a detail of the frame, not a shield for the playfield.
+## `ZoneBase.HUD_BAND_TOP` / `HUD_BAND_BOTTOM` are the band edges the plates are
+## built to fit inside, and the letterbox test measures the live rects against them.
 const PLATE_COLOR := Color(0.04, 0.05, 0.07, 0.86)
+## The letterbox frame itself: two full-width strips, one along the top of the
+## viewport and one along the bottom, painted at alpha 1.0 over the world. The
+## camera is limited so its VISIBLE window is exactly the strip between them
+## (`ZoneBase.HUD_BAND_TOP` … `HUD_BAND_BOTTOM`, 160 px of playfield), so world
+## pixels only ever reach the frame on the far side of an opaque band and cannot
+## be seen at all — which is what makes "an enemy hiding under a HUD plate at
+## 14 % opacity" structurally impossible rather than a geometry problem.
+## Same hue as the plates, so the plates read as part of the frame, not as boxes
+## floating over it.
+const BAND_COLOR := Color(0.04, 0.05, 0.07, 1.0)
+## Band heights in viewport pixels, mirrored from the camera constants so the two
+## cannot disagree: the top band covers 0…55, the bottom band covers 215…270.
+## Spelled as literals here because a `const` cannot call `load()`, and the
+## letterbox test asserts these against `ZoneBase.HUD_BAND_TOP` /
+## `HUD_BAND_BOTTOM` on every run, so a drift between the frame and the camera
+## fails a check instead of showing up as a hairline of world under a band.
+const BAND_TOP_PX := 55.0
+const BAND_BOTTOM_PX := 215.0
+
 ## The always-visible control hint colour, lifted so it clears 4.5:1 on the plate
 ## (the old 0.72,0.74,0.7 was 1.06:1 on grass).
 const COLOR_HINT_TEXT := Color(0.82, 0.84, 0.8)
+## The controls hint, split into its two lines at build time. ` — ` names the
+## action and ` · ` separates the pairs, both with their spaces intact: the string
+## has to be readable at a glance, and the letterbox gives it the room to be. The
+## letterbox test asserts the separators keep their spaces and that the whole string
+## still fits `HINT_LINE_COUNT` lines inside the bottom band.
+const HINT_TEXT_LINE_1 := "WASD — движение · ЛКМ — удар · ПКМ — умение · Space — рывок · E — действие · I — инвентарь"
+const HINT_TEXT_LINE_2 := "J — журнал · M — карта · C — персонаж · K — магия · Esc — пауза · F5/F9 · 1–4 слоты"
+const HINT_LINE_COUNT := 2
 ## The base theme font size in pixels. The accessibility font scale is a percent
 ## of this; the result is rounded to an integer so glyphs stay on the pixel grid.
 const BASE_FONT_SIZE := 8
@@ -116,6 +144,13 @@ var _zone_label: Label
 var _status_plate: PanelContainer
 var _right_plate: PanelContainer
 var _hint_plate: PanelContainer
+## The two opaque letterbox bands (see `BAND_COLOR`). They are the first children
+## of `_root`, so every plate, bar and label above them draws on top of the frame
+## rather than under it, and they are full-width Controls anchored to the top and
+## bottom of the viewport rather than members of the layout column: the frame is
+## the boundary the column is laid out inside, so it must not move with it.
+var _top_band: Panel
+var _bottom_band: Panel
 var _quest_label: Label
 var _skill_label: Label
 var _prompt_label: Label
@@ -272,8 +307,25 @@ func _build_ui() -> void:
 	_root.theme = _make_theme()
 	add_child(_root)
 
+	# --- the letterbox frame, painted before anything else ----------------------
+	# Two opaque full-width strips: the top one covers viewport y 0…55, the bottom
+	# one 215…270. Between them is the only part of the world the player can see,
+	# and `ZoneBase._configure_camera()` limits the camera to exactly that window,
+	# so world pixels never reach the frame at all — and when they do (the camera
+	# still renders 270 px of world), the band is alpha 1.0, so nothing shows
+	# through. Every plate now lives INSIDE a band, which is what removes the old
+	# defect at its root: a roaming enemy used to slide under a corner box or the
+	# controls band and read as an invisible dark blob at 14 % opacity.
+	_top_band = _make_band("TopBand", Control.PRESET_TOP_WIDE, BAND_TOP_PX)
+	_root.add_child(_top_band)
+	_bottom_band = _make_band("BottomBand", Control.PRESET_BOTTOM_WIDE, 270.0 - BAND_BOTTOM_PX)
+	_root.add_child(_bottom_band)
+
 	# Everything sits inside one margin container so nothing can drift off
-	# screen when the viewport changes size.
+	# screen when the viewport changes size. The container is inset by 5 px on
+	# every side, so the plates it lays out start 5 px inside a band and end 5 px
+	# short of the viewport edge: the frame reads as a frame, not as a wall the
+	# HUD is pressed against.
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
 	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -289,15 +341,15 @@ func _build_ui() -> void:
 	# --- top row: stats plate left, level/gold/clock plate right ---------------
 	# The plates (CRITIC-P1-02 / P2-20) are what make every string in this row —
 	# the zone line, the gold line, the day clock — readable on any floor: the
-	# text used to sit directly on grass at 1.1–1.2:1. They used to be ONE
-	# full-width strip, and that strip was the defect: it painted the top 50 px
-	# of the playfield at 14 % across the whole 470 px, so any enemy or NPC
-	# standing there became an invisible dark blob. They are two corner boxes now
-	# — the status block left, the level column right — and the world between
-	# them draws at full strength. `ZoneBase` keeps the player inside the band
-	# the plates leave open (its camera guard recenters the view every frame);
-	# the plate bottoms sit at or above `ZoneBase.HUD_BAND_TOP`, which the
-	# plate-visibility test measures off the live layout.
+	# text used to sit directly on grass at 1.1–1.2:1. They are corner boxes, not
+	# strips, and both of them now sit entirely INSIDE the opaque top band, which
+	# is why their shape stopped mattering to the playfield: the frame behind them
+	# is already opaque and full-width, so the world between the two boxes is
+	# world for exactly the same reason the world behind them is — it is above the
+	# band, not beside it. `ZoneBase._configure_camera()` limits the camera to the
+	# strip below this band, and the letterbox test measures the live plate bottoms
+	# against `ZoneBase.HUD_BAND_TOP`, so a taller font, a longer zone name or a
+	# fourth bar row that pushes a plate out of the frame fails a check.
 	var top_row := HBoxContainer.new()
 	top_row.name = "TopRow"
 	top_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -348,8 +400,9 @@ func _build_ui() -> void:
 	_zone_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	stats.add_child(_zone_label)
 
-	# The gap between the two corner boxes is world, not plate: an entity walking
-	# across the top-centre of the screen stays fully visible.
+	# The gap between the two corner boxes is filled by the top band behind them,
+	# so the frame reads as one continuous strip rather than as two boxes with a
+	# hole between them; the boxes themselves are what the text sits on.
 	var top_spacer := Control.new()
 	top_spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	top_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -424,13 +477,15 @@ func _build_ui() -> void:
 	prompt_row.add_child(_prompt_label)
 
 	# --- quest tracker + skill + controls hint, all on one dark plate ----------
-	# The bottom band used to float on the world too (CRITIC-P1-02: controls line
+	# The bottom rows used to float on the world too (CRITIC-P1-02: controls line
 	# 1.06:1). One plate behind the tracker, the skill line and the hint puts every
-	# one of them on a dark surface. The interact prompt above stays off the plate:
-	# it is transient and already high-contrast. The band is a single compact line
-	# tall (plus the tracker and skill rows when they carry text): its worst-case
-	# top edge is `ZoneBase.HUD_BAND_BOTTOM`, the number the camera guard and the
-	# plate-visibility test measure against.
+	# one of them on a dark surface, and the opaque bottom band behind that plate
+	# puts the whole strip outside the playfield. The interact prompt above stays
+	# off the plate: it is transient and already high-contrast. The plate's
+	# worst-case height is the tracker row + the skill row + the two hint lines,
+	# which still fits inside the 55 px band at the shipped font; the letterbox test
+	# measures the live rect against `ZoneBase.HUD_BAND_BOTTOM` so a row that grows
+	# out of the frame fails a check instead of eating playfield.
 	_hint_plate = PanelContainer.new()
 	_hint_plate.name = "HintPlate"
 	_hint_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -443,7 +498,7 @@ func _build_ui() -> void:
 	_hint_plate.add_child(bottom)
 
 	# One line, ellipsised: a tracker that wrapped to two lines would grow the
-	# plate upward into the band the camera guard keeps clear of the plates.
+	# plate upward out of the band it is built to fit inside.
 	_quest_label = _make_text("", Color(0.86, 0.88, 0.78))
 	_quest_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_quest_label.max_lines_visible = 1
@@ -458,22 +513,24 @@ func _build_ui() -> void:
 	_skill_label.max_lines_visible = 1
 	bottom.add_child(_skill_label)
 
-	# The always-visible control hint (CRITIC-P2-05): it used to omit `pause`/Esc
-	# and the four quick slots even though both are rebindable and documented, and
-	# they are still named here — on ONE line now, because a two-line band ate
-	# 49 px of the playfield and hid anything standing under it. The wording is
-	# the compact form (measured 463 px at the base 8 px font against the 464 px
-	# the plate has); a wider platform font ellipsises instead of growing the
-	# band. The colour is lifted onto the plate's dark surface for a clear
+	# The always-visible control hint (CRITIC-P2-05): every rebindable action is
+	# named, including `pause`/Esc and the four quick slots. It is TWO lines with
+	# normal word spacing, because the readable form of this string does not fit one
+	# line at the base 8 px font: the previous attempt to keep it on one line bought
+	# its 463 px by deleting every space around the separators, and the result read
+	# as `WASD·ЛКМ·ПКМ удар/умение·Space рывок` — cramped and hard to parse at a
+	# glance. The bottom band is 55 px tall, so two 8 px lines fit inside it with
+	# room to spare, and the band is frame rather than playfield: a second line no
+	# longer costs the player any world. The break is a hard `\n` rather than
+	# autowrap so the two halves stay balanced on every platform font; a font wide
+	# enough to overflow a line ellipsises that line instead of growing the plate out
+	# of the band. The colour is lifted onto the plate's dark surface for a clear
 	# ≥4.5:1 (was 1.06:1 on grass).
-	_hint_label = _make_text(
-		"WASD·ЛКМ/ПКМ удар/умение·Space рывок·E действие·I инв·J журнал·M карта·C герой·K магия·Esc пауза·F5/F9·1-4 слоты",
-		COLOR_HINT_TEXT
-	)
+	_hint_label = _make_text(HINT_TEXT_LINE_1 + "\n" + HINT_TEXT_LINE_2, COLOR_HINT_TEXT)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint_label.clip_text = true
 	_hint_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	_hint_label.max_lines_visible = 1
+	_hint_label.max_lines_visible = HINT_LINE_COUNT
 	bottom.add_child(_hint_label)
 
 	_build_dialogue_panel()
@@ -770,11 +827,59 @@ func hint_plate_rect() -> Rect2:
 	return _hint_plate.get_global_rect() if _hint_plate != null else Rect2()
 
 
-## The controls-hint string as built. A test asserts it is one line: the band's
-## worst-case height (and with it the camera band the plates leave open) is only
-## stable while the hint cannot wrap.
+# --- the letterbox frame, as the player actually sees it ------------------------
+# The live rects and surfaces of the two opaque bands. The letterbox test measures
+# these against `ZoneBase.HUD_BAND_TOP` / `HUD_BAND_BOTTOM` and against the live
+# plate rects, so what it asserts is the frame on screen: full width, exactly the
+# reserved height, opaque, and containing every plate.
+
+func top_band_rect() -> Rect2:
+	return _top_band.get_global_rect() if _top_band != null else Rect2()
+
+
+func bottom_band_rect() -> Rect2:
+	return _bottom_band.get_global_rect() if _bottom_band != null else Rect2()
+
+
+func top_band_style() -> StyleBoxFlat:
+	if _top_band == null:
+		return null
+	return _top_band.get_theme_stylebox("panel") as StyleBoxFlat
+
+
+func bottom_band_style() -> StyleBoxFlat:
+	if _bottom_band == null:
+		return null
+	return _bottom_band.get_theme_stylebox("panel") as StyleBoxFlat
+
+
+## The two band rects side by side, so a test reads the frame in one call and
+## cannot accidentally compare a stale top against a fresh bottom.
+func band_rects() -> Array[Rect2]:
+	return [top_band_rect(), bottom_band_rect()]
+
+
+## The controls-hint string as built. A test asserts its separators keep their
+## spaces (the cramped `WASD·ЛКМ` form was a readability defect, not a saving) and
+## that it stays `HINT_LINE_COUNT` lines, which is what keeps the plate's worst-case
+## height inside the bottom band.
 func hint_text() -> String:
 	return _hint_label.text if _hint_label != null else ""
+
+
+## The width in pixels the controls hint actually needs on its widest line, measured
+## with the live theme font at the live font size. The letterbox test asserts it
+## fits the plate it is drawn on, so a platform font wide enough to ellipsise a line
+## fails a check rather than quietly dropping keys off the end of the hint.
+func hint_text_width() -> float:
+	if _hint_label == null:
+		return 0.0
+	var font := _hint_label.get_theme_font("font")
+	var size := _hint_label.get_theme_font_size("font_size")
+	var widest := 0.0
+	for line in _hint_label.text.split("\n"):
+		widest = maxf(widest, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x)
+	return widest
 
 
 ## The colour a HUD string is actually painted in, read off the live label rather
@@ -810,7 +915,8 @@ func hud_text_color(role: String) -> Color:
 ## nothing. Returns an empty Rect2 when nothing is drawn.
 func hud_content_bounds() -> Rect2:
 	var bounds := Rect2()
-	var controls: Array = [_status_plate, _right_plate, _hint_plate, _toast_label, _prompt_label, _boss_panel]
+	var controls: Array = [_top_band, _bottom_band, _status_plate, _right_plate, _hint_plate,
+			_toast_label, _prompt_label, _boss_panel]
 	for control in controls:
 		if control == null or not is_instance_valid(control) or not control.visible:
 			continue
@@ -1154,13 +1260,48 @@ func _accessibility() -> Node:
 	return loop.root.get_node_or_null("Accessibility")
 
 
+## One letterbox band: a full-width, square-cornered, fully opaque strip pinned to
+## the top or the bottom edge of the viewport `height` px tall. Unlike
+## `_plate_style` it has no content margins and no corner radius — it is the frame
+## the HUD is drawn inside, not a backing for text, and a rounded corner here would
+## leak a sliver of world at the screen edge. Anchored (not container-managed) so
+## its rect is exactly the reserved band height whatever the layout column does.
+func _make_band(band_name: String, preset: int, height: float) -> Panel:
+	var band := Panel.new()
+	band.name = band_name
+	band.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Anchored edge-to-edge with the height written into the offsets rather than
+	# into a minimum size, so the rect is exactly the reserved band: full width,
+	# `height` px tall, flush with the viewport edge it belongs to.
+	band.set_anchors_preset(preset)
+	band.anchor_left = 0.0
+	band.anchor_right = 1.0
+	band.offset_left = 0.0
+	band.offset_right = 0.0
+	if preset == Control.PRESET_TOP_WIDE:
+		band.anchor_top = 0.0
+		band.anchor_bottom = 0.0
+		band.offset_top = 0.0
+		band.offset_bottom = height
+	else:
+		band.anchor_top = 1.0
+		band.anchor_bottom = 1.0
+		band.offset_top = -height
+		band.offset_bottom = 0.0
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = BAND_COLOR
+	band.add_theme_stylebox_override("panel", sb)
+	return band
+
+
 ## The dark plate behind a HUD band: a flat, borderless, slightly rounded box in
 ## `PLATE_COLOR`. Unlike `_panel_style` it carries no border (a border would draw a
 ## hard frame around the overlay) and it adds a small content margin so text never
 ## sits flush against the plate edge. The margins are deliberately tight (3 px
-## across, 1 px top/bottom): every pixel they save is a pixel of playfield the
-## plate does not cover, and the camera guard keeps the player inside the band the
-## plates leave open.
+## across, 1 px top/bottom): every pixel they save is a pixel the plate does not
+## take from the band it lives inside, and a plate that outgrew its band would
+## start painting over the playfield again — the letterbox test measures the live
+## plate rects against the band rects for exactly that.
 func _plate_style(color: Color) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = color

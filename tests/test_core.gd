@@ -1911,63 +1911,144 @@ func _test_camera_limits() -> void:
 	_check(cam.limit_right > 0 and cam.limit_bottom > 0, "camera limits cover the map")
 	_check(cam.position_smoothing_enabled, "camera smoothing is on")
 
-	# --- the band the HUD plates leave open -----------------------------------
-	# The plates are required (dark backing for HUD text, CRITIC-P1-02 / P1-03)
-	# and anything drawn under one reads as a 14 %-opacity blob — the defect this
-	# block pins. The contract has three parts, every one measured off the LIVE
-	# layout and the LIVE camera rather than off constants copied into this file:
-	#   1. the plates stay inside the band edges `ZoneBase` declares, so the band
-	#      between them is world on every frame;
-	#   2. the camera guard keeps the player inside the band at every spawn, room
-	#      centre and boss arena of every zone, and the tile the player stands on
-	#      is never under a plate from any stance on it (per reachable tile);
-	#   3. enemies and NPCs close to the player — the ones he fights and talks
-	#      to, inside five tiles vertically — measure clear of every plate.
-	# An entity more than five tiles above or below the player can still be
-	# darkened by a corner box or the hint band; no HUD that has plates at all
-	# can promise otherwise, and the guaranteed-clear band is 170 px (10.6
-	# tiles) centred on the player, which covers every engagement range in the
-	# game — melee, ranged shots and NPC interaction all happen well inside it.
-	var band_consts: Dictionary = load("res://scripts/world/zone_base.gd").get_script_constant_map()
-	var band_top := float(band_consts["HUD_BAND_TOP"])
-	var band_bottom := float(band_consts["HUD_BAND_BOTTOM"])
-	var band_limit := float(band_consts["CAMERA_BAND_LIMIT"])
-	_check(band_limit <= 40.0,
-		"the camera guard shift stays at or under 40 px (got %.0f)" % band_limit)
+	# --- the letterbox: an opaque frame the world cannot be seen through --------
+	# The HUD paints two opaque full-width bands (viewport 0…55 and 215…270) and
+	# `ZoneBase._configure_camera()` limits the camera so its VISIBLE window is
+	# exactly the strip between them. That turns the old defect — an enemy sliding
+	# under a HUD plate and reading as a 14 %-opacity dark blob — from a geometry
+	# problem into a structural one: no plate overlaps the playfield any more
+	# because every plate lives INSIDE a band, and the world a band covers cannot
+	# show through it because the band is alpha 1.0. Four parts, all measured off
+	# the LIVE layout and the LIVE camera rather than off constants copied here:
+	#   1. the frame — two bands, full width, opaque, exactly the reserved heights,
+	#      each plate enclosed in its band;
+	#   2. the camera — a constant offset, limits inset by the band height, and a
+	#      visible world window exactly 160 px tall that never leaves the map, so
+	#      at a border the only world under a band is off-map void;
+	#   3. the guard — the per-frame `_guard_camera_band` this replaced is gone, and
+	#      nothing writes `Camera2D.offset` during play;
+	#   4. the player and his neighbours — driven by real input and then swept over
+	#      every reachable tile of every zone, his sprite stays inside the band and
+	#      so does every enemy or NPC within 4.5 tiles of him vertically (72 px),
+	#      which covers every engagement and interaction range in the game.
+	var zone_consts: Dictionary = load("res://scripts/world/zone_base.gd").get_script_constant_map()
+	var band_top := float(zone_consts["HUD_BAND_TOP"])
+	var band_bottom := float(zone_consts["HUD_BAND_BOTTOM"])
+	var band_offset := float(zone_consts["CAMERA_BAND_OFFSET"])
+	var band_margin := float(zone_consts["CAMERA_BAND_MARGIN"])
+	var band_h := band_bottom - band_top
+	_check(band_top == 55.0 and band_bottom == 215.0,
+			"the reserved band is viewport 55…215 (got %.0f…%.0f)" % [band_top, band_bottom])
+	_check(absf(band_offset) < 0.001,
+			"the band is symmetric (55 px each side), so its centre is the viewport centre and the constant camera offset is 0 (got %.1f)" % band_offset)
+	_check(band_margin == band_top,
+			"the camera limits are inset by exactly the band height (got %.0f)" % band_margin)
+	_check(not zone_consts.has("CAMERA_BAND_LIMIT"),
+			"the guard's ±40 px clamp constant is gone with the guard")
+	_check(not FileAccess.get_file_as_string("res://scripts/world/zone_base.gd").contains("_guard_camera_band"),
+			"the per-frame camera guard is gone from the zone source, not merely unused")
+	_check(not world.has_method("_guard_camera_band"),
+			"a live zone has no camera guard method left to call")
 	# Worst case for the bottom band: tracker and skill rows both carry text, so
 	# the measured hint plate is as tall as it can ever be.
 	(hud.get("_quest_label") as Label).text = "Принеси 3 волчьих клыка Эдрику и отнеси письмо старосте"
 	(hud.get("_skill_label") as Label).text = "Искра · 12 оч. ман"
 	await process_frame
 	await process_frame
+
+	# --- 1. the frame -----------------------------------------------------------
+	var top_band: Rect2 = hud.call("top_band_rect")
+	var bottom_band: Rect2 = hud.call("bottom_band_rect")
+	_check(absf(top_band.position.y) < 0.001 and absf(top_band.size.y - band_top) < 0.001,
+			"the top band covers viewport y 0…%.0f exactly (got %s)" % [band_top, str(top_band)])
+	_check(absf(bottom_band.position.y - band_bottom) < 0.001
+			and absf(bottom_band.end.y - 270.0) < 0.001,
+			"the bottom band covers viewport y %.0f…270 exactly (got %s)" % [band_bottom, str(bottom_band)])
+	_check(top_band.position.x == 0.0 and absf(top_band.size.x - 480.0) < 0.001
+			and bottom_band.position.x == 0.0 and absf(bottom_band.size.x - 480.0) < 0.001,
+			"both bands span the full viewport width (%s / %s)" % [str(top_band), str(bottom_band)])
+	var band_styles: Array = [hud.call("top_band_style"), hud.call("bottom_band_style")]
+	var bands_opaque := true
+	var bands_dark := true
+	for style in band_styles:
+		var flat := style as StyleBoxFlat
+		if flat == null:
+			bands_opaque = false
+			bands_dark = false
+			continue
+		bands_opaque = bands_opaque and flat.bg_color.a >= 0.99
+		bands_dark = bands_dark and maxf(flat.bg_color.r, maxf(flat.bg_color.g, flat.bg_color.b)) < 0.25
+	_check(bands_opaque, "both bands are opaque (alpha ≥ 0.99): no world pixel can show through them")
+	_check(bands_dark, "both bands are dark, so the HUD text drawn on them keeps its ≥4.5:1 contrast")
 	var status_rect: Rect2 = hud.call("status_plate_rect")
 	var right_rect: Rect2 = hud.call("right_plate_rect")
 	var hint_rect: Rect2 = hud.call("hint_plate_rect")
 	_check(status_rect.size.x > 0.0 and right_rect.size.x > 0.0 and hint_rect.size.x > 0.0,
-		"all three plates have live layout rects")
-	_check(status_rect.end.y <= band_top + 0.001,
-		"the status plate ends at or above the band top (%.1f <= %.1f)" % [status_rect.end.y, band_top])
-	_check(right_rect.end.y <= band_top + 0.001,
-		"the right plate ends at or above the band top (%.1f <= %.1f)" % [right_rect.end.y, band_top])
-	_check(hint_rect.position.y >= band_bottom - 0.001,
-		"the hint plate starts at or below the band bottom with tracker and skill rows filled (%.1f >= %.1f)" % [hint_rect.position.y, band_bottom])
-	_check(status_rect.size.y <= 50.0 and right_rect.size.y <= 36.0 and hint_rect.size.y <= 36.0,
-		"plate heights stay at their worst case (status %.1f, right %.1f, hint %.1f)" % [status_rect.size.y, right_rect.size.y, hint_rect.size.y])
-	_check(status_rect.end.x < right_rect.position.x,
-		"the two top plates leave a world gap between them (%.0f < %.0f)" % [status_rect.end.x, right_rect.position.x])
-	_check(not String(hud.call("hint_text")).contains("\n"),
-		"the controls hint is a single line, so the bottom band cannot grow upward")
-	_check(cam.zoom == Vector2.ONE, "the camera ships at 1:1 zoom, which the guard is written for")
+			"all three plates have live layout rects")
+	_check(top_band.encloses(status_rect) and top_band.encloses(right_rect),
+			"both top plates live inside the top band, so neither paints over the playfield (%s and %s in %s)" % [str(status_rect), str(right_rect), str(top_band)])
+	_check(bottom_band.encloses(hint_rect),
+			"the controls plate lives inside the bottom band with its tracker and skill rows filled (%s in %s)" % [str(hint_rect), str(bottom_band)])
+
+	# --- 2. the camera: constant offset, limits inset by the band ---------------
+	var map_size: Vector2i = world.call("map_size")
+	var map_h_px := float(map_size.y * 16)
+	var map_w_px := float(map_size.x * 16)
+	_check(cam.zoom == Vector2.ONE, "the camera ships at 1:1 zoom, which the letterbox is written for")
 	_check(cam.anchor_mode == Camera2D.ANCHOR_MODE_DRAG_CENTER,
-		"the camera keeps the drag-centre anchor the guard recenters through")
-	_check(cam.offset.x == 0.0, "the guard never shifts the camera horizontally")
+			"the camera keeps the drag-centre anchor the follow centres the player through")
+	_check(cam.offset == Vector2(0.0, band_offset),
+			"the camera carries the constant band offset and nothing else (got %s)" % str(cam.offset))
+	_check(cam.limit_top == -int(band_margin),
+			"the camera may scroll %d px past the top of the map, so the follow keeps working while the player is in the top wall (limit_top %d)" % [int(band_margin), cam.limit_top])
+	_check(cam.limit_bottom == int(map_h_px) + int(band_margin),
+			"and the same past the bottom, so the visible window stays inside the map (limit_bottom %d, map %d)" % [cam.limit_bottom, int(map_h_px)])
+	_check(cam.limit_left == 0 and cam.limit_right == int(map_w_px),
+			"the horizontal limits stay on the map edge: there is no band on the left or right")
+	var xform := cam.get_canvas_transform()
+	var inv := xform.affine_inverse()
+	var visible_world := _rect_to_world(inv, Rect2(0.0, band_top, 480.0, band_h))
+	var top_band_world := _rect_to_world(inv, top_band)
+	var bottom_band_world := _rect_to_world(inv, bottom_band)
+	_check(absf(visible_world.size.y - band_h) < 0.01,
+			"the world visible between the bands is exactly %.0f px tall (got %.2f)" % [band_h, visible_world.size.y])
+	_check(absf(top_band_world.end.y - visible_world.position.y) < 0.01
+			and absf(bottom_band_world.position.y - visible_world.end.y) < 0.01,
+			"the two bands butt against the visible window with no gap and no overlap (frame %.1f / %.1f, window %.1f…%.1f)" % [top_band_world.end.y, bottom_band_world.position.y, visible_world.position.y, visible_world.end.y])
+	_check(absf(top_band_world.size.y - band_top) < 0.01
+			and absf(bottom_band_world.size.y - (270.0 - band_bottom)) < 0.01,
+			"each band hides exactly its own height of world at 1:1 zoom (%.1f and %.1f)" % [top_band_world.size.y, bottom_band_world.size.y])
+	_check(visible_world.position.y >= -0.001 and visible_world.end.y <= map_h_px + 0.001,
+			"the visible window lies inside the map, so a band at a border hides off-map void rather than walkable floor (window %.1f…%.1f of 0…%.0f)" % [visible_world.position.y, visible_world.end.y, map_h_px])
+
+	# --- 3. the controls hint reads with normal spaces --------------------------
+	var hint := String(hud.call("hint_text"))
+	_check(hint.count(" — ") >= 3,
+			"the controls hint names its actions with a spaced dash (%d of them)" % hint.count(" — "))
+	var cramped := ""
+	for i in range(hint.length()):
+		if hint[i] != "·":
+			continue
+		if i == 0 or i == hint.length() - 1 or hint[i - 1] != " " or hint[i + 1] != " ":
+			cramped = "index %d" % i
+	_check(cramped == "", "no '·' is used as a separator without spaces on both sides (%s)" % cramped)
+	var hint_lines := hint.split("\n")
+	_check(hint_lines.size() == 2,
+			"the readable hint needs two lines, and the 55 px bottom band has room for two 8 px lines (got %d)" % hint_lines.size())
+	_check(float(hud.call("hint_text_width")) <= hint_rect.size.x - 6.0,
+			"the widest hint line fits the plate it is drawn on (%.0f px needed, %.0f available)" % [float(hud.call("hint_text_width")), hint_rect.size.x - 6.0])
+	for key in ["WASD", "ЛКМ", "ПКМ", "Space", "E —", "I —", "J —", "M —", "C —", "K —", "Esc", "F5/F9", "1–4"]:
+		_check(hint.contains(key), "the controls hint still names %s" % key)
+
+	# --- 4. the player stays inside the band while he moves ---------------------
+	await _check_letterbox_movement(player, cam, band_top, band_bottom)
 
 	var manager := inst.get_node_or_null("ZoneManager")
-	_check(manager != null, "ZoneManager exists for the plate sweep")
+	_check(manager != null, "ZoneManager exists for the letterbox sweep")
 	if manager != null:
 		for zone_id in ["forest", "village", "ruins", "dungeon", "fortress"]:
 			if String(world.call("zone_id")) != zone_id:
-				_check(bool(manager.call("travel", zone_id)), "travel to %s for the plate sweep" % zone_id)
+				_check(bool(manager.call("travel", zone_id)), "travel to %s for the letterbox sweep" % zone_id)
 				await process_frame
 				await process_frame
 				world = inst.get_node_or_null("World")
@@ -1976,10 +2057,9 @@ func _test_camera_limits() -> void:
 			if world == null or player == null or cam == null:
 				_check(false, "%s: world, player and camera exist after travel" % zone_id)
 				continue
-			await _check_zone_plate_band(String(zone_id), world, player, cam,
-					status_rect, right_rect, hint_rect)
-			_check_zone_band_coverage(world, player, cam,
-					status_rect, right_rect, hint_rect, band_top, band_bottom, band_limit)
+			await _check_zone_letterbox(String(zone_id), world, player, cam,
+					band_top, band_bottom, band_h)
+			_check_zone_letterbox_coverage(world, player, cam, band_top, band_bottom)
 		if String(gs.zone) != "forest":
 			_check(bool(manager.call("travel", "forest")), "the sweep returns to the forest")
 			await process_frame
@@ -2005,14 +2085,65 @@ func _rect_to_world(inv: Transform2D, r: Rect2) -> Rect2:
 	return out
 
 
+## Real key events held for several frames in both vertical directions: the
+## projected player must stay inside the band on EVERY frame, and the camera offset
+## must never move. The offset half is the regression test for the removed guard —
+## the old design wrote `Camera2D.offset.y` every frame, so anything that starts
+## doing that again fails here even on a frame where the position still happens to
+## be inside the band.
+func _check_letterbox_movement(player: Node2D, cam: Camera2D,
+		band_top: float, band_bottom: float) -> void:
+	var outside := ""
+	var offset_written := ""
+	var north := 0.0
+	var south := 0.0
+	for phase in [[KEY_W, 30], [KEY_S, 60]]:
+		var key: int = int(phase[0])
+		var frames: int = int(phase[1])
+		var phase_start := player.global_position.y
+		_send_move_key(key, true)
+		for i in range(frames):
+			await physics_frame
+			var vp_y := float((cam.get_canvas_transform() * player.global_position).y)
+			if vp_y < band_top or vp_y > band_bottom:
+				outside = "key %d: player vp y %.1f outside %.0f…%.0f" % [key, vp_y, band_top, band_bottom]
+			if cam.offset != Vector2.ZERO:
+				offset_written = "camera offset became %s" % str(cam.offset)
+		_send_move_key(key, false)
+		for i in range(3):
+			await physics_frame
+		var travel := player.global_position.y - phase_start
+		if travel < 0.0:
+			north = maxf(north, -travel)
+		else:
+			south = maxf(south, travel)
+	_check(outside == "",
+			"the projected player stayed inside the band on every frame of real movement (%s)" % outside)
+	_check(offset_written == "",
+			"nothing writes the camera offset during play any more (%s)" % offset_written)
+	_check(north > 8.0 and south > 8.0,
+			"the movement really moved the player vertically, so the two checks above are not vacuous (north %.0f px, south %.0f px)" % [north, south])
+
+
+func _send_move_key(key: int, pressed: bool) -> void:
+	var ev := InputEventKey.new()
+	ev.physical_keycode = key
+	ev.keycode = key
+	ev.pressed = pressed
+	Input.parse_input_event(ev)
+
+
 ## Spawn, every room centre and every boss arena of a live zone, with the camera
-## after the guard has settled: the player's own sprite must sit fully inside the
-## band the plates leave open, and every enemy or NPC within five tiles
-## vertically — inside the guaranteed band, the ones the player actually fights
-## and talks to — must sit clear of every plate rect mapped through the camera's
-## own transform.
-func _check_zone_plate_band(zone_id: String, world: Node, player: Node2D, cam: Camera2D,
-		status_rect: Rect2, right_rect: Rect2, hint_rect: Rect2) -> void:
+## settled: the player's own sprite must sit fully inside the letterbox band, the
+## camera's visible window must stay inside the map, and every enemy or NPC within
+## 4.5 tiles (72 px) vertically of him — the ones he fights and talks to — must
+## measure inside the band too, i.e. not under either opaque frame strip. The
+## guaranteed-clear band is 160 px (10 tiles) centred on the player, which covers
+## every engagement and interaction range in the game: melee, ranged shots and NPC
+## dialogue all happen well inside it.
+func _check_zone_letterbox(zone_id: String, world: Node, player: Node2D, cam: Camera2D,
+		band_top: float, band_bottom: float, band_h: float) -> void:
+	var map_h_px := float((world.call("map_size") as Vector2i).y * 16)
 	var points: Array[Vector2] = [player.global_position]
 	for lm in world.call("landmarks"):
 		var kind := String(lm.get("kind", ""))
@@ -2030,75 +2161,63 @@ func _check_zone_plate_band(zone_id: String, world: Node, player: Node2D, cam: C
 		for i in 3:
 			await process_frame
 		var xform := cam.get_canvas_transform()
-		var inv := xform.affine_inverse()
 		var standing: Vector2 = player.global_position
 		var pvp: Vector2 = xform * standing
-		_check(pvp.y >= status_rect.end.y + 8.0 and pvp.y <= hint_rect.position.y - 8.0,
-				"%s at %s: the player sprite (centre vp y %.1f) stays clear of both plate edges (%.1f..%.1f)" % [zone_id, str(_tile_of_pos(standing)), pvp.y, status_rect.end.y + 8.0, hint_rect.position.y - 8.0])
-		var plates: Array[Rect2] = [
-			_rect_to_world(inv, status_rect),
-			_rect_to_world(inv, right_rect),
-			_rect_to_world(inv, hint_rect),
-		]
+		var tile := str(_tile_of_pos(standing))
+		_check(pvp.y >= band_top + 8.0 and pvp.y <= band_bottom - 8.0,
+				"%s at %s: the player sprite (centre vp y %.1f) sits inside the band %.1f…%.1f, clear of both frame edges by its own half-height" % [zone_id, tile, pvp.y, band_top + 8.0, band_bottom - 8.0])
+		_check(absf(cam.offset.y) < 0.001,
+				"%s at %s: the camera still carries only the constant offset (%.1f)" % [zone_id, tile, cam.offset.y])
+		var window := _rect_to_world(xform.affine_inverse(), Rect2(0.0, band_top, 480.0, band_h))
+		_check(window.position.y >= -0.001 and window.end.y <= map_h_px + 0.001,
+				"%s at %s: the visible window (%.1f…%.1f) is inside the map, so the frame hides void rather than floor here" % [zone_id, tile, window.position.y, window.end.y])
 		for e in get_nodes_in_group("enemy") + get_nodes_in_group("interactable"):
 			var ent := e as Node2D
 			if ent == null or ent.get_parent() != world:
 				continue
-			if absf(ent.global_position.y - standing.y) > 80.0:
+			if absf(ent.global_position.y - standing.y) > 72.0:
 				continue
 			var evp: Vector2 = xform * ent.global_position
-			var hidden := false
-			for r in plates:
-				if r.has_point(ent.global_position):
-					hidden = true
-			_check(not hidden,
-					"%s at %s: %s within five tiles of the player is not drawn under a plate (vp %s)" % [zone_id, str(_tile_of_pos(standing)), String(ent.name), str(evp.round())])
+			_check(evp.y >= band_top and evp.y <= band_bottom,
+					"%s at %s: %s within 4.5 tiles of the player is not under a band (vp %s)" % [zone_id, tile, String(ent.name), str(evp.round())])
 
 
-## The tile the player stands on must never sit under a plate, from any stance
-## on it, for EVERY reachable tile of the zone. Evaluated in the guard's steady
-## state (camera position clamped by its limits, offset = clamp(player − camera
-## − 5, ±limit) — the guard converges to exactly this in one frame, band centre
-## sitting 5 px under the viewport centre), probed at the tile corner that pulls
-## the view closest to each plate, because the view only ever moves with the
-## player. A tile failing this would be floor the HUD paints over while the
-## player stands on it — the original defect in its permanent form. Plate edges
-## are the conservative band constants; widths and x positions are the live
-## rects, so a plate growing sideways or a font change is caught too.
-func _check_zone_band_coverage(world: Node, player: Node2D, cam: Camera2D,
-		status_rect: Rect2, right_rect: Rect2, hint_rect: Rect2,
-		band_top: float, band_bottom: float, band_limit: float) -> void:
+## Every reachable tile of a live zone, evaluated in the camera's steady state for
+## a player standing on it: position clamped by the camera's OWN limits (read off
+## the live camera, because the limits are the mechanism now — this is exactly what
+## the engine converges to, not a model of the removed guard) plus the constant
+## offset, probed at both ends of the tile because the player can stand anywhere on
+## it. Two things must hold per tile: the player's 16 px sprite is inside the band,
+## and the camera's visible window is inside the map. A tile failing the first
+## would be floor the frame hides while the player stands on it — the original
+## defect in its permanent form; a tile failing the second would mean the frame was
+## hiding off-map void in the middle of the playfield rather than at a border.
+func _check_zone_letterbox_coverage(world: Node, player: Node2D, cam: Camera2D,
+		band_top: float, band_bottom: float) -> void:
 	var zone_id := String(world.call("zone_id"))
 	var reach := _bfs_reachable(world, _tile_of_node(player), {})
 	_check(reach.size() > 50,
 			"%s: the coverage sweep has a meaningful reachable set (got %d)" % [zone_id, reach.size()])
-	var status_r := Rect2(status_rect.position.x, 0.0, status_rect.size.x, band_top)
-	var right_r := Rect2(right_rect.position.x, 0.0, right_rect.size.x, band_top)
-	var hint_r := Rect2(hint_rect.position.x, band_bottom, hint_rect.size.x, 270.0 - band_bottom)
-	var lim_right := float(cam.limit_right)
-	var lim_bottom := float(cam.limit_bottom)
+	var lo := float(cam.limit_top) + 135.0
+	var hi := float(cam.limit_bottom) - 135.0
+	var half := (band_bottom - band_top) * 0.5
+	var map_h_px := float((world.call("map_size") as Vector2i).y * 16)
 	var first_offender := ""
 	for tilev in reach:
 		var tile: Vector2i = tilev
-		var box := Rect2(tile.x * 16.0, tile.y * 16.0, 16.0, 16.0)
-		for probe in [
-			[Vector2(tile.x * 16.0, tile.y * 16.0), status_r],
-			[Vector2(tile.x * 16.0 + 16.0, tile.y * 16.0), right_r],
-			[Vector2(tile.x * 16.0 + 8.0, tile.y * 16.0 + 16.0), hint_r],
-		]:
-			var pc: Vector2 = probe[0]
-			var plate: Rect2 = probe[1]
-			var camx := clampf(pc.x, 240.0, lim_right - 240.0)
-			var camy := clampf(pc.y, 135.0, lim_bottom - 135.0)
-			var offy := clampf(pc.y - camy - 5.0, -band_limit, band_limit)
-			var view := Vector2(camx - 240.0, camy - 135.0 + offy)
-			if box.intersects(Rect2(plate.position + view, plate.size)):
-				first_offender = "%s%s" % [zone_id, str(tile)]
+		for edge_y in [float(tile.y * 16), float(tile.y * 16 + 16)]:
+			var cam_y := clampf(edge_y, lo, hi)
+			var vp_y := float(edge_y - cam_y + 135.0)
+			var window_top := cam_y - half
+			var window_bottom := cam_y + half
+			if vp_y - 8.0 < band_top or vp_y + 8.0 > band_bottom \
+					or window_top < -0.001 or window_bottom > map_h_px + 0.001:
+				first_offender = "%s%s player vp y %.1f, window %.1f…%.1f" % [zone_id, str(tile), vp_y, window_top, window_bottom]
 				break
 		if first_offender != "":
 			break
 	_check(first_offender == "",
-			"%s: no reachable tile sits under a plate while the player stands on it (first offender %s)" % [zone_id, first_offender])
+			"%s: no reachable tile puts the player under the frame or the visible window outside the map (first offender %s)" % [zone_id, first_offender])
 
 
 func _test_scene_loads() -> void:
