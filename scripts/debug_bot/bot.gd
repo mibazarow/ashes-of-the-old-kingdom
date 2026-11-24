@@ -212,6 +212,24 @@ const SOAK_RETREAT_BUDGET := 25.0
 ## kept out of the distance the movement term is judged on.
 const SOAK_TELEPORT_PX := 80.0
 
+## How far off a boss the soak hero keeps himself, and the reason the run stops
+## dying on a timer. The forest posts two: the 180 HP `forest_warden` at (43,6)
+## and the 260 HP `root_mother` at (24,24). Neither is stationary — the Root
+## Mother walked out to (17,21) and met the hero there — so no patrol line can be
+## drawn round them, and a hero who treats either as another wolf to swing at is
+## feeding a 260 HP pool with a 112 HP bar. Measured on the fixed soak seed from
+## `combat.jsonl`: the two bosses, plus the spiders the one of them summons, drank
+## 545 of the run's 1108 damage, and a boss stood on the tile of three of its six
+## deaths. The hero outpaces every melee hostile here, so steering is real safety
+## bought with no teleport and no invulnerability, and the `boss` group the HUD bar
+## and the map marker already read is what marks them — the game's own fact about
+## who is a boss, not a name list the bot keeps for itself. This floor is what a
+## boss with no ranged mechanic of its own gets; `_soak_boss_clearance` widens it
+## for the one that does.
+const SOAK_BOSS_AVOID_RANGE := 112.0
+## Extra room laid on top of a boss's own ranged gate. See `_soak_boss_clearance`.
+const SOAK_BOSS_AVOID_MARGIN := 36.0
+
 ## BOT-003 — which enemy kinds stand in for the three roles the spec's arena
 ## (§19.5: «ближний, дальний и поддерживающий враг») asks for. The list is a
 ## constant and not a guess made at runtime because the forest genuinely does not
@@ -1216,6 +1234,14 @@ func _scenario_soak() -> void:
 	# held a potion in none of them, so the raised threshold had nothing to fire on.
 	# Walking there is real movement through the real input path, and the pickup is
 	# taken by touching it, exactly as a player takes it.
+	#
+	# The forest does hold a second flask, at (20,30) behind the south rubble, and
+	# fetching it was tried and measured: the only lane to that nook runs the hero
+	# down through the tick pack at (12..18, 26) and past the spider at (13,25) at
+	# the one moment in the run when he has no levels to absorb it. The first death
+	# of the measured run landed at (18,28), two tiles from TickC, on the way to a
+	# 40 HP flask that cost more than 40 HP to collect. A hero walks to the potion
+	# that is on his road, not the one that is behind the wolves.
 	var pickup := _find_node("pickup")
 	if pickup != null:
 		await _move_to(pickup.global_position, 10.0, 12.0)
@@ -1282,6 +1308,20 @@ func _scenario_soak() -> void:
 				heading = (_player_pos() - threat.global_position).normalized()
 				stuck = 0
 
+		# A boss is terrain the hero walks around, not prey he swings at. Neither
+		# of the forest's two stays in its authored clearing — the Root Mother came
+		# out to (17,21) to meet him and killed him there — so no patrol line can be
+		# drawn round them and only a steer keeps the run off them. The clearance is
+		# the boss's own, read in `_soak_boss_clearance`, because standing just
+		# outside a too-small ring is worse than standing inside a big one. And this
+		# costs no budget at all, so unlike the retreat bursts it cannot run dry with
+		# half the window still to go.
+		var boss := _nearest_boss()
+		if boss != null \
+				and _player_pos().distance_to(boss.global_position) < _soak_boss_clearance(boss):
+			heading = (_player_pos() - boss.global_position).normalized()
+			stuck = 0
+
 		bot_input.hold(&"move_right", heading.x > 0.35)
 		bot_input.hold(&"move_left", heading.x < -0.35)
 		bot_input.hold(&"move_down", heading.y > 0.35)
@@ -1289,11 +1329,14 @@ func _scenario_soak() -> void:
 		bot_input.set_aim(_player_pos() + heading * 20.0)
 
 		# Fight, unless the nearest thing in reach is the enemy this bot has broken
-		# away from and is still too hurt to trade with. Any other enemy that wanders
-		# into reach is still fair game, which is what keeps the run swinging instead
-		# of turning it into a permanent flee.
-		if enemy != null and enemy_dist < 22.0 \
-				and not (_soak_needs_heal() and enemy.get_instance_id() == fled_id):
+		# away from and is still too hurt to trade with, or is a boss. Any other
+		# hostile that wanders into reach is still fair game, which is what keeps the
+		# run swinging instead of turning it into a permanent flee — and what keeps
+		# it killing, since a level is the only thing in this game that refills the
+		# pools a long window has already drunk dry.
+		var prey := _soak_nearest_prey()
+		var prey_dist := INF if prey == null else _player_pos().distance_to(prey.global_position)
+		if prey != null and prey_dist < 22.0 and not _soak_holds_off(prey, fled_id):
 			await _tap(&"attack")
 			attack_attempts += 1
 
@@ -1369,6 +1412,66 @@ func _scenario_soak() -> void:
 ## test suite cannot drift apart over a duplicated literal.
 func _soak_needs_heal() -> bool:
 	return GameState.hp < GameState.max_hp * SOAK_HEAL_AT
+
+
+## Whether the soak hero refuses to open a swing at `enemy` this iteration.
+##
+## Two refusals, and neither of them is a mercy. A boss is never prey: the forest
+## posts a 180 HP Warden and a 260 HP Root Mother, and a hero with a 112 HP bar who
+## swings at either is not fighting, he is donating — those two and the spiders the
+## one summons drank 545 of this run's 1108 damage before the steer below was
+## added, and a boss stood on the tile of three of its six deaths. The second
+## refusal is the one the scenario has always had: while he is hurt he does not
+## re-open the fight he just broke off from, or the disengage bought nothing.
+##
+## What deliberately is NOT here is any rule about running out of medicine. The
+## obvious policy — stop swinging once the flasks and the mana are gone and save
+## the HP — was tried and measured, and it is worse: this game has no regen, mana
+## comes back on a level and on nothing else, so a hero who will not kill is a hero
+## who will not level, and the run then stands still while three 3-damage ticks
+## charge themselves out of its bar. Measured, that rule alone put 242 of a 453
+## damage run into `tick` and cost three deaths in two minutes. Killing is the
+## heal in this game; the bot is not allowed to refuse the medicine it is made of.
+func _soak_holds_off(enemy: Node2D, fled_id: int) -> bool:
+	if enemy.is_in_group("boss"):
+		return true
+	return _soak_needs_heal() and enemy.get_instance_id() == fled_id
+
+
+## The radius the soak hero keeps off a particular boss: the wider of the flat
+## floor and the boss's own ranged gate plus a margin. The floor alone was tried
+## at seven tiles and it made things worse, not better — the Root Mother drops a
+## spider into the ground every 4 s at anything inside her 220 px `summon_radius`,
+## so a hero circling at 112 px sits outside his own safety line and inside her
+## spawning one. Measured, that turned `spider` into the single biggest source of
+## damage in the run — 420 of 879 — with twelve spider kills against the two the
+## forest actually posts. The gate is read off the live boss rather than copied
+## here, so a boss whose number moves moves the hero's clearance with it.
+func _soak_boss_clearance(boss: Node2D) -> float:
+	var raw: Variant = boss.get("summon_radius")
+	var gate := float(raw) if raw != null else 0.0
+	return maxf(SOAK_BOSS_AVOID_RANGE, gate + SOAK_BOSS_AVOID_MARGIN)
+
+
+## The nearest thing the soak hero is willing to fight: a live enemy that is not a
+## boss. `_nearest_enemy` is left exactly as every other scenario has always used
+## it; this is the soak's own prey picker, so a boss drifting past a wolf cannot
+## leave the run with nothing to swing at and quietly turn the endurance test into
+## a walk that never fights. The boss itself is read by `_nearest_boss`, the same
+## picker the walker already breaks contact with.
+func _soak_nearest_prey() -> Node2D:
+	var best: Node2D = null
+	var best_dist := INF
+	var me := _player_pos()
+	for n in get_tree().get_nodes_in_group("enemy"):
+		var e := n as Node2D
+		if e == null or not is_instance_valid(e) or e.is_in_group("boss"):
+			continue
+		var d := me.distance_to(e.global_position)
+		if d < best_dist:
+			best_dist = d
+			best = e
+	return best
 
 
 ## Whether the item the first quick slot points at is actually in the bag, which
