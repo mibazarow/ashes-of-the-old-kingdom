@@ -114,6 +114,14 @@ func _maybe_capture_screenshot() -> void:
 		var hud := get_node_or_null("HUD")
 		if hud != null:
 			hud.call("open_craft_for_shot")
+	elif ui_probe == "village":
+		# The village, reached the way a player reaches it: through the zone
+		# manager rather than by editing the scene. It is joined to the forest the
+		# run starts in, so one travel lands on the same zone line the player reads
+		# after walking out through the gate.
+		var manager := get_node_or_null("ZoneManager")
+		if manager != null:
+			manager.call("travel", "village")
 	elif ui_probe == "ruins":
 		# The second zone, reached the way a player reaches it: through the zone
 		# manager rather than by editing the scene. The capture then shows both the

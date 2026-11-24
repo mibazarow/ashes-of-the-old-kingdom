@@ -142,6 +142,31 @@ checks: 3470  failures: 0
 (`cautious`, `normal`, `aggressive`, `explorer`, `collector`, `novice`,
 `master`) на `BOT-002` дают `PASS`.
 
+### 2.5. 2026-11-24 — деревня как пятая зона
+
+Числа §2, §2.1, §2.2, §2.3 и §2.4 — история прогонов 2026-11-18, 2026-11-19,
+2026-11-20, 2026-11-21 и 2026-11-23; они не переписываются. Ниже — результат
+прогона на текущем HEAD, после того как деревня вынесена из леса в самостоятельную
+зону `Village`. Групп осталось 65, но проверок стало 3525 вместо 3470: реестр зон
+считает пять строк таблицы и читает из неё имя, скрипт и тайл входа деревни,
+отдельно проверяются пара ворот `VillageGate`/`ForestGate`, безопасная зона внутри
+деревенской стены и то, что боты идут через них, а не телепортируются.
+
+```
+$ godot --headless --path . --script res://tests/test_core.gd
+  PASS  suite left no controls file behind
+  PASS  every test group ran to completion (got 65/65)
+
+checks: 3525  failures: 0
+```
+
+Сопровождающий прогон того же дня: `godot --headless --path . --quit-after 120`
+→ 0 строк `ERROR` / `SCRIPT ERROR`. Все тринадцать ботов проходят: `BOT-001`,
+`BOT-002`, `BOT-003`, `BOT-004`, `BOT-005`, `BOT-006`, `BOT-007`, `BOT-008`,
+`BOT-009`, `BOT-010`, `BOT-011`, `BOT-012`, `BOT-013` → `PASS`. Семь профилей
+(`cautious`, `normal`, `aggressive`, `explorer`, `collector`, `novice`,
+`master`) на `BOT-002` дают `PASS`.
+
 ## 3. Отладочный бот
 
 | Сценарий | Что проверяет | Результат |
