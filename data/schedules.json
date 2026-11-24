@@ -8,57 +8,57 @@
   ],
   "npcs": {
     "Edrik": {
-      "home": [7, 9],
+      "home": [20, 12],
       "spots": {
-        "morning": [7, 9],
-        "day": [10, 12],
-        "evening": [6, 14],
-        "night": [7, 9]
+        "morning": [20, 12],
+        "day": [20, 9],
+        "evening": [21, 14],
+        "night": [20, 12]
       }
     },
     "Yorek": {
-      "home": [3, 11],
+      "home": [24, 10],
       "spots": {
-        "morning": [3, 11],
-        "day": [5, 16],
-        "evening": [3, 11],
-        "night": [3, 11]
+        "morning": [24, 10],
+        "day": [25, 9],
+        "evening": [24, 12],
+        "night": [24, 10]
       }
     },
     "Bran": {
-      "home": [11, 8],
+      "home": [28, 15],
       "spots": {
-        "morning": [11, 8],
-        "day": [13, 10],
-        "evening": [13, 12],
-        "night": [11, 8]
+        "morning": [28, 15],
+        "day": [28, 12],
+        "evening": [28, 15],
+        "night": [28, 15]
       }
     },
     "Mila": {
-      "home": [5, 7],
+      "home": [16, 9],
       "spots": {
-        "morning": [5, 7],
-        "day": [7, 7],
-        "evening": [4, 10],
-        "night": [5, 7]
+        "morning": [16, 9],
+        "day": [18, 9],
+        "evening": [16, 12],
+        "night": [16, 9]
       }
     },
     "Seris": {
-      "home": [2, 6],
+      "home": [12, 16],
       "spots": {
-        "morning": [2, 6],
-        "day": [2, 8],
-        "evening": [2, 10],
-        "night": [2, 6]
+        "morning": [12, 16],
+        "day": [13, 19],
+        "evening": [16, 16],
+        "night": [12, 16]
       }
     },
     "Alvena": {
-      "home": [8, 6],
+      "home": [26, 19],
       "spots": {
-        "morning": [8, 6],
-        "day": [9, 6],
-        "evening": [8, 6],
-        "night": [8, 6]
+        "morning": [26, 19],
+        "day": [29, 19],
+        "evening": [26, 16],
+        "night": [26, 19]
       }
     }
   }

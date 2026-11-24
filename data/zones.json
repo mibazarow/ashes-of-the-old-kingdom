@@ -5,6 +5,11 @@
 			"script": "res://scripts/world/forest.gd",
 			"entry_tile": [4, 9]
 		},
+		"village": {
+			"name": "Последняя деревня",
+			"script": "res://scripts/world/village.gd",
+			"entry_tile": [36, 12]
+		},
 		"ruins": {
 			"name": "Руины у опушки",
 			"script": "res://scripts/world/ruins.gd",

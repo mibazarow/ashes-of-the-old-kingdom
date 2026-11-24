@@ -846,6 +846,14 @@ func _finish() -> void:
 # --- scenarios ---------------------------------------------------------------
 
 func _scenario_talk() -> void:
+	# Edrik moved out of the forest when the village became its own zone, so the
+	# first interactable of the forest is no longer the headman — it is the east
+	# chest, and a key press on it pays a sword, not a quest. The talk bot now
+	# walks the real road first: through `VillageGate` into the village, where
+	# Edrik is again the first interactable, and only then asks.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_unreachable")
+		return
 	var npc := _find_node("interactable")
 	if npc == null:
 		_notes.append("no_npc")
@@ -1022,7 +1030,15 @@ func _scenario_save_load() -> void:
 
 
 func _scenario_quest_loop() -> void:
-	# 1. take the quest from the NPC
+	# 1. travel to the village and take the quest from the NPC. The headman
+	# moved out of the forest when the village became its own zone, so the
+	# first interactable here is the east chest and a bot pressing E on it gets
+	# a sword instead of a job. The wolves the job asks for still live out in
+	# the wild, so the loop is a round trip: gate west for the order, gate east
+	# for the hunt, gate west for the gold.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_unreachable")
+		return
 	var npc := _find_node("interactable")
 	if npc == null:
 		_notes.append("no_npc")
@@ -1038,7 +1054,12 @@ func _scenario_quest_loop() -> void:
 		return
 	_notes.append("quest_taken")
 
-	# 2. hunt until the objective is met
+	# 2. hunt until the objective is met — out in the forest, because the walled
+	# village holds no wolves and an objective worked where the objective does
+	# not live is no objective at all.
+	if not await _goto_zone("forest", SCENARIO_TIMEOUT):
+		_notes.append("forest_unreachable")
+		return
 	#
 	# The budget is counted in physics frames rather than on the wall clock. A
 	# wall-clock deadline makes the number of hunting iterations this run gets a
@@ -1128,7 +1149,17 @@ func _scenario_quest_loop() -> void:
 		_notes.append("objective_not_met")
 		return
 
-	# 3. walk back and turn it in
+	# 3. walk back to the village and turn it in. The `npc` reference died with
+	# the world it stood in the moment the hero crossed a gate, so the headman
+	# is looked up again on his own side of the door rather than walked to by
+	# the memory of a node that no longer exists.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_return_unreachable")
+		return
+	npc = _find_node("interactable")
+	if npc == null:
+		_notes.append("no_npc_on_return")
+		return
 	var gold_before: int = GameState.gold
 	if not await _move_to(npc.global_position, 18.0, 60.0):
 		_notes.append("return_unreachable")
@@ -2245,6 +2276,24 @@ func _zone_travel(gate_name: String, target_zone: String, deadline: int, rally: 
 	return false
 
 
+## Walk the hero into `zone_id` through the world's own ZoneExit gates, or say
+## in the log that the crossing failed. The forest and the village are joined by
+## exactly one pair of doors — `VillageGate` on the forest's west clearing,
+## `ForestGate` one tile inside the village wall — so this covers every crossing
+## the village-era quest and economy bots make; the deeper zones keep their own
+## named gates and call `_zone_travel` directly. Answering true at once when the
+## hero already stands in the wanted zone lets a scenario ask for the leg it
+## means to walk without reading the zone itself first. Every reference to a
+## node of the old zone dies at the gate with that zone, so what a caller wanted
+## from the far side must be looked up again after this returns true.
+func _goto_zone(zone_id: String, timeout_seconds: float) -> bool:
+	if String(GameState.zone) == zone_id:
+		return true
+	var gate_name := "VillageGate" if zone_id == "village" else "ForestGate"
+	var deadline := Engine.get_physics_frames() + _frames(timeout_seconds)
+	return await _zone_travel(gate_name, zone_id, deadline, _rally_point())
+
+
 ## The dungeon kinds this run has actually drawn blood from, read off the damage
 ## sensor. "Engaged" means the bot hit it — not that it walked past one, and not that
 ## it got hit back by one.
@@ -2583,9 +2632,13 @@ func _scenario_economy() -> void:
 	if hud == null:
 		_notes.append("no_hud")
 		return
+	# The chest is in the forest and the till is in the village now: the two
+	# actors this route needs live on opposite sides of a zone line, so only the
+	# chest can be checked on the starting side. Yorek is looked up after the
+	# first crossing, and a till that is not where the world says it is fails
+	# the run by the same note name it always failed it by.
 	var chest := _named("Chest")
-	var merchant := _named("Yorek")
-	if chest == null or merchant == null:
+	if chest == null:
 		_notes.append("economy_actors_missing")
 		return
 	_connect_combat_sensors()
@@ -2609,13 +2662,27 @@ func _scenario_economy() -> void:
 	# level in this game refills both pools outright. Runs that set out east on
 	# the strength of the one starting potion arrived at the chest as a corpse,
 	# and an economy scenario that dies on the road reports nothing about the
-	# economy.
+	# economy. The headman who writes the order lives in the village zone now and
+	# the wolves it is worked on live at the forest spawn edge, so the job is
+	# taken behind `VillageGate` and the purse is filled back out in the wild —
+	# the route of this run is a crossing route: village for the order, forest
+	# for the hunt, village for the turn-in and the till, forest for the chest,
+	# village for the shop legs, and every crossing is a real ZoneExit.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_unreachable")
+		return
 	var edrik := _find_node("interactable")
 	if edrik != null:
 		await _travel_to(edrik.global_position, 18.0, 40.0)
 		await _tap(&"interact")
 		await _wait(0.5)
 		await _dismiss_dialogue()
+	# Back out through `ForestGate` for the sweep and the hunt: the walled
+	# village holds nothing to kill and nothing to loot, and every leash below
+	# is measured from the forest spawn the gate drops the hero onto.
+	if not await _goto_zone("forest", SCENARIO_TIMEOUT):
+		_notes.append("forest_unreachable")
+		return
 
 	# Prep is part of the economy lesson, not a cheat around it. First the
 	# close finds are swept — a find across the map belongs to whatever
@@ -2671,13 +2738,29 @@ func _scenario_economy() -> void:
 	# The turn-in is what pays for the trip east, and it lands on a key press at
 	# the same NPC who handed the job out. Counted before the purse is weighed so
 	# the reward gold is part of the run's own money, never a write of the bot's.
+	# The `edrik` the order was taken from was freed with the village the moment
+	# the hero walked out through its gate, so the headman is looked up again on
+	# the far side of this crossing rather than trusted from a stale reference.
 	var quest_before := QuestManager.state_of(QUEST_ID)
-	if edrik != null and quest_before == QuestManager.STATE_READY:
-		await _travel_to(edrik.global_position, 18.0, 45.0)
-		await _tap(&"interact")
-		await _wait(0.5)
-		await _dismiss_dialogue()
+	if quest_before == QuestManager.STATE_READY and await _goto_zone("village", SCENARIO_TIMEOUT):
+		edrik = _find_node("interactable")
+		if edrik != null:
+			await _travel_to(edrik.global_position, 18.0, 45.0)
+			await _tap(&"interact")
+			await _wait(0.5)
+			await _dismiss_dialogue()
 	_notes.append("prep_quest=%s->%s" % [str(quest_before), str(QuestManager.state_of(QUEST_ID))])
+	# The till stands in the village now, so the merchant is fetched on this side
+	# of the door; a hunt that ended before the turn-in state leaves the hero in
+	# the forest, and the crossing below answers for both cases with one call.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("prep_merchant_unreachable hp=%d taken=%s" % [
+			GameState.hp, _fmt_counts(_m_taken_by_type)])
+		return
+	var merchant := _named("Yorek")
+	if merchant == null:
+		_notes.append("economy_actors_missing")
+		return
 	if not await _travel_to(merchant.global_position, 22.0, 120.0):
 		_notes.append("prep_merchant_unreachable hp=%d taken=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type)])
@@ -2719,14 +2802,27 @@ func _scenario_economy() -> void:
 	var gold_before := GameState.gold
 	var min_gold := GameState.gold
 
-	# The chest sits in the far east corner, and one straight pull across the
-	# whole map is the lane these runs keep losing: the grid draws a line through
-	# the open heath beyond the archer's clearing, and the walk then spends its
-	# entire budget sliding along a fence line it cannot see, arriving at nothing
-	# with almost no damage taken. The road the arena marches east is already
-	# proven run after run — spawn to the archer's clearing, and only then the
-	# corner — so the crossing is taken in the same two hops. A missed waypoint is
-	# not a failed run, it is only a missed shortcut.
+	# The chest sits in the far east corner of the forest, on the other side of
+	# the village wall from the till the prep just left, so the east march starts
+	# with a crossing back through `ForestGate`. The chest and the archer that
+	# marks the road died with the forest at the first gate of this run, so both
+	# are looked up again on this side rather than walked to by a stale reference.
+	if not await _goto_zone("forest", SCENARIO_TIMEOUT):
+		_notes.append("chest_unreachable hp=%d taken=%s" % [
+			GameState.hp, _fmt_counts(_m_taken_by_type)])
+		return
+	chest = _named("Chest")
+	if chest == null:
+		_notes.append("economy_actors_missing")
+		return
+	# One straight pull across the whole map is the lane these runs keep losing:
+	# the grid draws a line through the open heath beyond the archer's clearing,
+	# and the walk then spends its entire budget sliding along a fence line it
+	# cannot see, arriving at nothing with almost no damage taken. The road the
+	# arena marches east is already proven run after run — spawn to the archer's
+	# clearing, and only then the corner — so the crossing is taken in the same
+	# two hops. A missed waypoint is not a failed run, it is only a missed
+	# shortcut.
 	var road_end := _named("ArcherA")
 	if road_end != null:
 		await _travel_to(road_end.global_position, 44.0, 120.0)
@@ -2751,6 +2847,18 @@ func _scenario_economy() -> void:
 	var gold_from_chest := GameState.gold - gold_before
 	min_gold = mini(min_gold, GameState.gold)
 
+	# The way back from the chest is the whole width of the forest to its west
+	# gate and then the village road to the till, so this crossing gets the
+	# widest budget of the run and the merchant is looked up once more on his
+	# own side of the door.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT * 2.0):
+		_notes.append("merchant_unreachable hp=%d taken=%s dealt=%s" % [
+			GameState.hp, _fmt_counts(_m_taken_by_type), _fmt_counts(_m_dmg_by_type)])
+		return
+	merchant = _named("Yorek")
+	if merchant == null:
+		_notes.append("economy_actors_missing")
+		return
 	if not await _travel_to(merchant.global_position, 22.0, 200.0):
 		_notes.append("merchant_unreachable hp=%d taken=%s dealt=%s" % [
 			GameState.hp, _fmt_counts(_m_taken_by_type), _fmt_counts(_m_dmg_by_type)])
@@ -2835,11 +2943,10 @@ func _scenario_economy() -> void:
 
 	# Equip through the inventory panel: open it, walk the cursor to the sword
 	# row the panel itself lists, press E, close it. The panel answers the same
-	# InputSource the player uses, so this is the human equip path. The walk
-	# back to the road corner the potion sweep already proved walkable is
-	# deliberate: standing in a merchant's interact radius while tapping keys
-	# invites his shop back under the panel, and the lesson being measured
-	# here is the equip, not the door.
+	# InputSource the player uses, so this is the human equip path. The walk out
+	# to the village's east road is deliberate: standing in a merchant's interact
+	# radius while tapping keys invites his shop back under the panel, and the
+	# lesson being measured here is the equip, not the door.
 	# No panel may ride along under the keyboard into a walk. A leg asked to move
 	# a hero who is still standing in a till spends its entire budget standing
 	# still and comes back reporting a corner of the map nobody has ever failed
@@ -2861,8 +2968,11 @@ func _scenario_economy() -> void:
 	# hero had long since been out of range of the till — the walk was reported
 	# unreachable by a test of the wrong thing. The reach is read off the player's
 	# own constant rather than repeated here, so a change to how close the hero
-	# has to stand to talk cannot silently move this threshold.
-	var road_corner := _tile_center(Vector2i(13, 10))
+	# has to stand to talk cannot silently move this threshold. The authored east
+	# road of the village is the till's own lane now: ten tiles of open dirt from
+	# Yorek's post and four clear of `ForestGate`, so the panel is opened where
+	# neither door nor till can steal a key press.
+	var road_corner := _tile_center(Vector2i(34, 12))
 	var reached_corner := await _travel_to(road_corner, 28.0, 60.0)
 	var till_reach := float(load("res://scripts/player/player.gd")
 		.get_script_constant_map().get("INTERACT_RADIUS", 26.0))
@@ -2943,6 +3053,14 @@ func _scenario_economy() -> void:
 ## repeat conversation must pay nothing at all: the reward-once rule is measured
 ## as a zero delta across the re-talk, not trusted from the quest state alone.
 func _scenario_quest_chain() -> void:
+	# Edrik lives in the village zone now and the wolves live in the forest, so
+	# the arc is take → cross → hunt → cross → turn in, every crossing made
+	# through a real ZoneExit gate rather than assumed. The first interactable
+	# of the forest is the east chest, and a chain bot that mistook it for the
+	# headman would hunt on a promise nobody made.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_unreachable")
+		return
 	var npc := _find_node("interactable")
 	if npc == null:
 		_notes.append("no_npc")
@@ -2957,6 +3075,10 @@ func _scenario_quest_chain() -> void:
 		_notes.append("quest_not_started")
 		return
 	_notes.append("quest_taken")
+
+	if not await _goto_zone("forest", SCENARIO_TIMEOUT):
+		_notes.append("forest_unreachable")
+		return
 
 	var deadline := Engine.get_physics_frames() + _frames(SCENARIO_TIMEOUT * 2.2)
 	var attacks := 0
@@ -3013,6 +3135,16 @@ func _scenario_quest_chain() -> void:
 			QuestManager.progress_of(QUEST_ID), QuestManager.target_count(QUEST_ID)])
 		return
 
+	# The turn-in is at the headman's post in the village, and the `npc` the
+	# chain took the order from was freed with the world it stood in at the
+	# first crossing — the headman is looked up again after the gate.
+	if not await _goto_zone("village", SCENARIO_TIMEOUT):
+		_notes.append("village_return_unreachable")
+		return
+	npc = _find_node("interactable")
+	if npc == null:
+		_notes.append("no_npc_on_return")
+		return
 	if not await _move_to(npc.global_position, 18.0, 60.0):
 		_notes.append("return_unreachable")
 		return

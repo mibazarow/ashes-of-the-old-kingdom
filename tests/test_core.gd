@@ -3507,16 +3507,12 @@ func _test_bot_soak_survival() -> void:
 		"the soak banks the map's only potion instead of wandering past it")
 
 	# Drive a real burst through the real input path. The threat is planted directly
-	# behind the player, on the side away from Edrik, so the burst walks the open
-	# road the quest bots already prove is walkable instead of pressing into a tree.
-	var npc := _find_named("Edrik") as Node2D
-	_check(npc != null, "Edrik is present to orient the retreat test")
-	if npc == null:
-		scene.queue_free()
-		await process_frame
-		completed["bot_soak_survival"] = true
-		return
-	var walk_dir := player.global_position.direction_to(npc.global_position)
+	# behind the player, to the east, so the burst walks west along the open road
+	# to the village gate — the same clearing the old quest route proved walkable —
+	# instead of pressing into a tree. The orientation is a fixed direction now:
+	# the villagers moved to their own zone, and the retreat bound never depended
+	# on Edrik personally, only on the open ground his clearing sits on.
+	var walk_dir := Vector2.LEFT
 	var threat_point := player.global_position - walk_dir * 12.0
 	var start_pos := player.global_position
 	gs.hp = int(gs.max_hp * 0.2)
@@ -6726,6 +6722,15 @@ func _test_shop() -> void:
 	await process_frame
 	await process_frame
 
+	# The merchant stands behind his own counter in the village now, so the live
+	# part of this group runs there: one travel through the ZoneManager, then the
+	# same checks against the rebuilt world.
+	var shop_manager := scene.get_node_or_null("ZoneManager")
+	_check(shop_manager != null and bool(shop_manager.call("travel", "village")),
+		"the shop group travelled to the village where Yorek keeps his till")
+	await process_frame
+	await process_frame
+
 	var hud := scene.get_node_or_null("HUD")
 	var player := get_first_node_in_group("player") as Node2D
 	_check(hud != null and player != null, "hud and player present for shop panel test")
@@ -7073,6 +7078,15 @@ func _test_craft() -> void:
 	var packed: PackedScene = load("res://scenes/main/main.tscn")
 	var scene := packed.instantiate()
 	root.add_child(scene)
+	await process_frame
+	await process_frame
+
+	# Bran's forge stands in the village now, so the live part of this group runs
+	# there: one travel through the ZoneManager, then the same checks against the
+	# rebuilt world.
+	var craft_manager_node := scene.get_node_or_null("ZoneManager")
+	_check(craft_manager_node != null and bool(craft_manager_node.call("travel", "village")),
+		"the craft group travelled to the village where Bran keeps his forge")
 	await process_frame
 	await process_frame
 
@@ -7636,6 +7650,15 @@ func _test_day_cycle() -> void:
 	await process_frame
 	await process_frame
 
+	# The six scheduled villagers live in the village, so the schedule spots are
+	# village tiles and the walking happens on the village map: travel there first
+	# and read the clock off the rebuilt world.
+	var day_manager := scene.get_node_or_null("ZoneManager")
+	_check(day_manager != null and bool(day_manager.call("travel", "village")),
+		"the day cycle group travelled to the village where the schedules run")
+	await process_frame
+	await process_frame
+
 	var world := scene.get_node_or_null("World")
 	var clock: Node = world.get_node_or_null("DayClock") if world != null else null
 
@@ -7651,7 +7674,7 @@ func _test_day_cycle() -> void:
 	_check(phases.size() == 4, "schedules data has 4 phases (got %d)" % phases.size())
 	_check(npcs_data.size() == 6, "schedules data has 6 npcs (got %d)" % npcs_data.size())
 	_check(float(data.get("day_length_seconds", 0)) > 0.0, "day_length_seconds is positive")
-	_check(clock != null, "Forest creates a DayClock node")
+	_check(clock != null, "the village creates a DayClock node")
 
 	if clock == null or data.is_empty() or world == null:
 		scene.queue_free()
@@ -8458,8 +8481,9 @@ class StubSafeWorld:
 		return rect.has_point(tile)
 
 
-## Village safe zone + the herbwife in the live world (roadmap stage D). Loads the
-## real map to pin the safe-zone geometry, that Mila exists, is not the first
+## Village safe zone + the herbwife in the live world (roadmap stage D). Travels
+## to the village — the zone that owns the safe zone since the villagers moved
+## out of the forest — to pin its geometry, that Mila exists, is not the first
 ## interactable (Edrik stays first for the bots) and stands on a walkable tile
 ## inside the zone, and that Edrik still hands out q01. Then, on a bare arena with
 ## a stub safe-zone owner, measures the two enemy rules: an enemy ordered to chase
@@ -8474,17 +8498,22 @@ func _test_village_world_and_enemy() -> void:
 	root.add_child(scene)
 	await process_frame
 	await process_frame
+	var village_manager := scene.get_node_or_null("ZoneManager")
+	_check(village_manager != null and bool(village_manager.call("travel", "village")),
+			"the village group travelled to the zone that owns the safe zone")
+	await process_frame
+	await process_frame
 	var world := scene.get_node_or_null("World")
 	_check(world != null, "world present for the village group")
 
 	if world != null:
 		# --- safe-zone geometry ----------------------------------------------
-		_check(bool(world.call("is_in_safe_zone", Vector2i(5, 8))),
-				"the clearing centre tile (5,8) is inside the safe zone")
-		_check(not bool(world.call("is_in_safe_zone", Vector2i(18, 14))),
-				"a wolf spawn tile (18,14) is outside the safe zone")
-		_check(not bool(world.call("is_in_safe_zone", Vector2i(11, 8))),
-				"the tile just east of the clearing (11,8) is outside the safe zone")
+		_check(bool(world.call("is_in_safe_zone", Vector2i(20, 12))),
+				"the village square tile (20,12) is inside the safe zone")
+		_check(not bool(world.call("is_in_safe_zone", Vector2i(39, 12))),
+				"the east gate passage (39,12) is outside the safe zone")
+		_check(not bool(world.call("is_in_safe_zone", Vector2i(20, 25))),
+				"the south border row (20,25) is outside the safe zone")
 
 		# --- the herbwife -----------------------------------------------------
 		var mila := _find_interactable_named("interactable", "Mila")
@@ -9525,12 +9554,14 @@ func _test_zone_registry() -> void:
 		completed["zone_registry"] = true
 		return
 	var table: Dictionary = zones as Dictionary
-	_check(table.size() == 4, "data/zones.json declares 4 zones (got %d)" % table.size())
-	_check(table.has("forest") and table.has("ruins") and table.has("dungeon") and table.has("fortress"),
-		"the table declares forest, ruins, dungeon and fortress (got %s)" % str(table.keys()))
+	_check(table.size() == 5, "data/zones.json declares 5 zones (got %d)" % table.size())
+	_check(table.has("forest") and table.has("village") and table.has("ruins")
+			and table.has("dungeon") and table.has("fortress"),
+		"the table declares forest, village, ruins, dungeon and fortress (got %s)" % str(table.keys()))
 
 	var expected := {
 		"forest": {"name": "Лесной край", "script": "res://scripts/world/forest.gd", "entry": Vector2i(4, 9)},
+		"village": {"name": "Последняя деревня", "script": "res://scripts/world/village.gd", "entry": Vector2i(36, 12)},
 		"ruins": {"name": "Руины у опушки", "script": "res://scripts/world/ruins.gd", "entry": Vector2i(3, 8)},
 		"dungeon": {"name": "Подземелье под руинами", "script": "res://scripts/world/dungeon.gd", "entry": Vector2i(3, 12)},
 		"fortress": {"name": "Древняя крепость", "script": "res://scripts/world/fortress.gd", "entry": Vector2i(4, 14)},
@@ -9586,6 +9617,14 @@ func _test_zone_registry() -> void:
 			"ZoneManager reads the fortress entry tile from the table")
 		_check(String(manager_class.call("zone_display_name", "fortress")) == "Древняя крепость",
 			"ZoneManager reads the fortress display name from the table")
+		# The village is the zone the whole quest chain lives in, so its row is read
+		# through the manager exactly like the others: travel, entry and name.
+		_check(bool(manager_class.call("has_zone", "village")),
+			"ZoneManager knows the village from the table")
+		_check(Vector2i(manager_class.call("entry_tile", "village")) == Vector2i(36, 12),
+			"ZoneManager reads the village entry tile from the table")
+		_check(String(manager_class.call("zone_display_name", "village")) == "Последняя деревня",
+			"ZoneManager reads the village display name from the table")
 
 	# --- per-zone floor palettes (CRITIC-P1-01) --------------------------------
 	# All four zones used to paint from one byte-identical tiles.png, so the
@@ -9664,6 +9703,16 @@ func _test_zone_registry() -> void:
 			print("    floor %-8s %s  vs  %-8s %s  ->  %.2f:1" % [
 				za, str((grass_means[za] as Color) * 255.0).substr(1, 20),
 				zb, str((grass_means[zb] as Color) * 255.0).substr(1, 20), grass_pair])
+	# The village is the one zone deliberately painted from another zone's atlas:
+	# it is the last human clearing at the forest's edge, so it shares the forest
+	# floor on purpose. Pin that, so the reuse above (four distinct atlases for
+	# five zones) stays a decision and never becomes an oversight.
+	var village_zone_inst = (load("res://scripts/world/village.gd") as GDScript).new()
+	_check(String(village_zone_inst.call("tile_atlas_path"))
+			== String(expected_atlases["forest"]),
+		"the village paints from the forest atlas on purpose (got %s)"
+			% String(village_zone_inst.call("tile_atlas_path")))
+	village_zone_inst.free()
 	completed["zone_registry"] = true
 
 
@@ -9784,14 +9833,21 @@ func _test_zone_travel() -> void:
 
 	var interactables := get_nodes_in_group("interactable")
 	_check(not interactables.is_empty(), "the forest has interactables")
-	_check(String(interactables[0].name) == "Edrik",
-		"Edrik is still the first interactable after the gate was added (got %s)" % str(interactables[0].name))
+	# The villagers moved to their own zone, so the forest's first interactable is
+	# now its first chest: the bot invariant that used to be pinned here (Edrik
+	# first, so `_find_node("interactable")` never opens a shop by accident) is
+	# pinned for the village in the village segment below.
+	_check(String(interactables[0].name) == "Chest",
+		"the forest's first interactable is its first chest (got %s)" % str(interactables[0].name))
 	_check(interactables.find(gate) > 0,
 		"the gate is not the first interactable (index %d)" % interactables.find(gate))
-	var edrik := forest.get_node_or_null("Edrik") as Node2D
-	_check(edrik != null
-			and edrik.global_position.distance_to((gate as Node2D).global_position) > 26.0,
-		"the gate is outside the interact radius of Edrik, so no bot route reaches it")
+	var village_gate := forest.get_node_or_null("VillageGate") as Node2D
+	_check(village_gate != null, "the forest places a VillageGate")
+	_check(village_gate != null and String(village_gate.get("target_zone")) == "village",
+		"the west gate leads to the village")
+	_check(village_gate != null
+			and village_gate.global_position.distance_to((gate as Node2D).global_position) > 26.0,
+		"the two gates stand far enough apart to be told apart on approach")
 	# The gate owns no handler that could fire on its own: no incoming signal
 	# connection means the only way through it is the interact key the player
 	# presses, so a bot walking its route can never leave the map by accident.
@@ -9803,6 +9859,88 @@ func _test_zone_travel() -> void:
 	_check(String(hud.call("zone_line_text")) == "Зона: Лесной край",
 		"the HUD names the forest in the zone line (got '%s')" % String(hud.call("zone_line_text")))
 	_check(hud.call("map_bound_world") == forest, "the map panel starts bound to the forest")
+
+	# --- forest -> village ------------------------------------------------------
+	# The village is the fifth zone and the only safe one: the six villagers, their
+	# schedules, the merchant's counter and the smith's bench all live behind the
+	# west gate now, so the invariant the quest bots depend on — Edrik first in
+	# the interactable group, so walking to a quest-giver can never open a shop —
+	# is checked here, in the zone that creates it.
+	bus.toast.connect(_count_toast)
+	_toast_count = 0
+	_check(bool(manager.call("travel", "village")), "travel forest -> village succeeds")
+	await process_frame
+	await process_frame
+	_check(_toast_count == 1, "the travel to the village announced itself with one toast (got %d)" % _toast_count)
+	var village := scene.get_node_or_null("World")
+	_check(village != null and String(village.call("zone_id")) == "village",
+		"the live world is now the village")
+	_check(village != null and village.get_script() == load("res://scripts/world/village.gd"),
+		"the new World runs scripts/world/village.gd")
+	_check(String(gs.zone) == "village", "GameState.zone followed the travel to the village")
+	var village_player := village.get_node_or_null("Player") as Node2D
+	_check(village_player != null
+			and Vector2i(floori(village_player.global_position.x / 16.0), floori(village_player.global_position.y / 16.0))
+				== Vector2i(36, 12),
+		"the new player stands on the village entry tile")
+	_check(get_nodes_in_group("player").size() == 1,
+		"exactly one player is in the tree after the village travel (got %d)" % get_nodes_in_group("player").size())
+	_check(get_nodes_in_group("enemy").is_empty(),
+		"the village keeps its streets free of enemies (got %d)" % get_nodes_in_group("enemy").size())
+	var village_interactables := get_nodes_in_group("interactable")
+	_check(not village_interactables.is_empty() and String(village_interactables[0].name) == "Edrik",
+		"Edrik is the first interactable in the village (got %s)"
+			% str(village_interactables[0].name if not village_interactables.is_empty() else "<empty>"))
+	_check(village != null and village.get_node_or_null("ForestGate") != null
+			and String((village.get_node_or_null("ForestGate") as Node).get("target_zone")) == "forest",
+		"the village gate leads back to the forest")
+	_check(village != null and not get_nodes_in_group("safe_zone_owner").is_empty()
+			and (get_nodes_in_group("safe_zone_owner")[0] as Node) == village,
+		"the village advertises itself as the safe zone owner")
+	_check(village != null and bool(village.call("is_in_safe_zone", Vector2i(20, 12))),
+		"the village square is inside the safe zone")
+	_check(village != null and not bool(village.call("is_in_safe_zone", Vector2i(39, 12))),
+		"the gate passage itself is outside the safe zone")
+	var village_lms: Array = village.call("landmarks") if village != null else []
+	_check(village_lms.size() == 7, "the village lists its seven landmarks (got %d)" % village_lms.size())
+	_check(not village_lms.is_empty() and String((village_lms[0] as Dictionary).get("id", "")) == "Edrik",
+		"the village landmark list starts at Edrik, the quest head")
+	var village_gate_lm_found := false
+	for lm: Dictionary in village_lms:
+		if String(lm.get("id", "")) == "ForestGate" and String(lm.get("kind", "")) == "gate":
+			village_gate_lm_found = true
+	_check(village_gate_lm_found, "the village landmark list carries the gate back, of kind 'gate'")
+	_check(String(village.call("music_track")) == "music_forest"
+			and String(village.call("ambience_track")) == "ambience_forest",
+		"the village reuses the forest music and ambience")
+	_check(bool(village.call("cell_at", Vector2i(0, 0)) == "#"), "the village has a border wall")
+	_check(String(village.call("cell_at", Vector2i(36, 12))) in [".", ","],
+		"the village entry tile is walkable")
+	_check(String(village.call("cell_at", Vector2i(39, 12))) in [".", ","],
+		"the east wall gap lets the road out to the forest")
+	hud.call("refresh_zone_line")
+	_check(String(hud.call("zone_line_text")) == "Зона: Последняя деревня",
+		"the zone line names the village (got '%s')" % String(hud.call("zone_line_text")))
+	_check(hud.call("map_bound_world") == village, "the map panel rebound to the village")
+	_check(village != null and Vector2i(village.call("map_size")) == Vector2i(40, 26),
+		"the village reports its size (got %s)" % str(Vector2i(village.call("map_size")) if village != null else Vector2i.ZERO))
+
+	# --- village -> forest ------------------------------------------------------
+	_toast_count = 0
+	_check(bool(manager.call("travel", "forest")), "travel village -> forest succeeds")
+	await process_frame
+	await process_frame
+	_check(_toast_count == 1, "the travel back announced itself with one toast (got %d)" % _toast_count)
+	var back_from_village := scene.get_node_or_null("World")
+	_check(back_from_village != null and String(back_from_village.call("zone_id")) == "forest",
+		"the way back from the village rebuilds the forest")
+	var round_interactables := get_nodes_in_group("interactable")
+	_check(not round_interactables.is_empty() and String(round_interactables[0].name) == "Chest",
+		"the rebuilt forest's first interactable is its chest again (got %s)"
+			% str(round_interactables[0].name if not round_interactables.is_empty() else "<empty>"))
+	_check(get_nodes_in_group("safe_zone_owner").is_empty(),
+		"the forest advertises no safe zone owner")
+	bus.toast.disconnect(_count_toast)
 
 	# --- forest -> ruins -------------------------------------------------------
 	bus.toast.connect(_count_toast)
@@ -9911,8 +10049,9 @@ func _test_zone_travel() -> void:
 	_check(hud.call("map_bound_world") == back, "the map panel rebound back to the forest")
 	_check(not get_nodes_in_group("enemy").is_empty(), "the forest respawned its enemies")
 	var back_interactables := get_nodes_in_group("interactable")
-	_check(not back_interactables.is_empty() and String(back_interactables[0].name) == "Edrik",
-		"Edrik is still the first interactable after a round trip")
+	_check(not back_interactables.is_empty() and String(back_interactables[0].name) == "Chest",
+		"the forest's first interactable is still its chest after a round trip (got %s)"
+			% str(back_interactables[0].name if not back_interactables.is_empty() else "<empty>"))
 	_check(back != null and back.get_node_or_null("RuinsGate") != null,
 		"the rebuilt forest has its gate again")
 	bus.toast.disconnect(_count_toast)
@@ -10361,12 +10500,23 @@ func _test_ruins_quests() -> void:
 		"the way back rebuilt the forest")
 	_check(get_nodes_in_group("quest_stone").is_empty(),
 		"no tablet followed the player into the forest")
-	var edrik := back.get_node_or_null("Edrik") if back != null else null
-	var mila := back.get_node_or_null("Mila") if back != null else null
+	# The quest-givers live in the village now, so the chain's head and tail are
+	# read where they stand: one travel east of the forest, and the group still
+	# finishes by coming back, because its exit contract leaves the run in the
+	# forest.
+	_check(bool(manager.call("travel", "village")), "the group travelled to the village for its givers")
+	await process_frame
+	await process_frame
+	var giver_zone := scene.get_node_or_null("World")
+	var edrik := giver_zone.get_node_or_null("Edrik") if giver_zone != null else null
+	var mila := giver_zone.get_node_or_null("Mila") if giver_zone != null else null
 	_check(edrik != null and String(edrik.get("quest_id")) == "q01_ash_wolves",
 		"Edrik still gives q01_ash_wolves")
 	_check(mila != null and (mila.get("quest_ids") as Array) == ["q02_gather_fangs", "q03_clear_boars"],
 		"Mila still gives q02 and q03 in that order (got %s)" % str(mila.get("quest_ids") if mila != null else null))
+	_check(bool(manager.call("travel", "forest")), "the group travelled back to the forest")
+	await process_frame
+	await process_frame
 
 	# The forest loop end to end, after the ruins quests exist: the kill counter is
 	# still keyed by enemy type, so the new ruin_skeleton quest cannot steal the
@@ -10863,10 +11013,11 @@ func _test_ruins_mechanics() -> void:
 	_check(forest_wolves >= 5, "the forest still spawns its wolf pack (got %d)" % forest_wolves)
 	_check(forest_skeletons == 0, "no skeleton followed the player into the forest")
 	var forest_lms: Array = back.call("landmarks") if back != null else []
-	_check(forest_lms.size() == 10, "the forest still lists its ten landmarks (got %d)" % forest_lms.size())
+	_check(forest_lms.size() == 7, "the forest still lists its seven landmarks (got %d)" % forest_lms.size())
 	var forest_interactables := get_nodes_in_group("interactable")
-	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Edrik",
-		"Edrik is still the first interactable after the ruins were built and freed")
+	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Chest",
+		"the forest's first interactable is still its chest after the ruins were built and freed (got %s)"
+			% str(forest_interactables[0].name if not forest_interactables.is_empty() else "<empty>"))
 
 	# --- leave no residue -------------------------------------------------------
 	scene.queue_free()
@@ -13702,18 +13853,23 @@ func _test_new_npc_and_quests() -> void:
 	# built; the quest table's `giver` values are checked against this set at the end.
 	var giver_speakers: Array[String] = []
 
-	# --- the two new villagers in the forest ----------------------------------
-	var forest := scene.get_node_or_null("World")
-	_check(forest != null and String(forest.call("zone_id")) == "forest",
-		"the new-npc group builds the forest first")
-	var player := forest.get_node_or_null("Player") as Node2D
+	# --- the two new villagers in the village ---------------------------------
+	# The six villagers and their posts live in the village zone now, so the
+	# group travels there before it starts reading givers off the live world.
+	_check(bool(manager.call("travel", "village")), "the new-npc group travelled to the village")
+	await process_frame
+	await process_frame
+	var village := scene.get_node_or_null("World")
+	_check(village != null and String(village.call("zone_id")) == "village",
+		"the new-npc group builds the village first")
+	var player := village.get_node_or_null("Player") as Node2D
 	var edrik := _find_interactable_named("interactable", "Edrik")
 	var yorek := _find_interactable_named("interactable", "Yorek")
 	var bran := _find_interactable_named("interactable", "Bran")
 	var mila := _find_interactable_named("interactable", "Mila")
 	var seris := _find_interactable_named("interactable", "Seris")
 	var alvena := _find_interactable_named("interactable", "Alvena")
-	_check(seris != null and alvena != null, "the forest places Seris and Alvena")
+	_check(seris != null and alvena != null, "the village places Seris and Alvena")
 	_check(seris != null and seris.is_in_group("interactable"), "Seris is an interactable")
 	_check(alvena != null and alvena.is_in_group("interactable"), "Alvena is an interactable")
 	var interactables := get_nodes_in_group("interactable")
@@ -13732,25 +13888,25 @@ func _test_new_npc_and_quests() -> void:
 	# Where the newcomers stand: walkable, inside the safe zone, and at least three
 	# tiles (Chebyshev) from every other villager so the bot's Edrik route never
 	# comes within the 26 px interact radius of anyone else.
-	var forest_npc_tiles := {}
+	var village_npc_tiles := {}
 	for pair: Array in [["Edrik", edrik], ["Yorek", yorek], ["Bran", bran],
 			["Mila", mila], ["Seris", seris], ["Alvena", alvena]]:
 		if pair[1] != null:
-			forest_npc_tiles[String(pair[0])] = _tile_of_node(pair[1] as Node2D)
+			village_npc_tiles[String(pair[0])] = _tile_of_node(pair[1] as Node2D)
 	for who: String in ["Seris", "Alvena"]:
-		if not forest_npc_tiles.has(who):
+		if not village_npc_tiles.has(who):
 			continue
-		var vtile: Vector2i = forest_npc_tiles[who]
-		_check(String(forest.call("cell_at", vtile)) in [".", ","],
+		var vtile: Vector2i = village_npc_tiles[who]
+		_check(String(village.call("cell_at", vtile)) in [".", ","],
 			"%s stands on walkable ground ('%s' at %s)"
-			% [who, String(forest.call("cell_at", vtile)), str(vtile)])
-		_check(bool(forest.call("is_in_safe_zone", vtile)),
+			% [who, String(village.call("cell_at", vtile)), str(vtile)])
+		_check(bool(village.call("is_in_safe_zone", vtile)),
 			"%s stands inside the village safe zone (%s)" % [who, str(vtile)])
 		var too_close: Array[String] = []
-		for other: String in forest_npc_tiles.keys():
+		for other: String in village_npc_tiles.keys():
 			if other == who:
 				continue
-			var otile: Vector2i = forest_npc_tiles[other]
+			var otile: Vector2i = village_npc_tiles[other]
 			var clear := maxi(absi(vtile.x - otile.x), absi(vtile.y - otile.y))
 			if clear < 3:
 				too_close.append("%s=%d" % [other, clear])
@@ -15107,14 +15263,34 @@ func _test_pilgrim() -> void:
 		"the forest pilgrim is named Пепельный Паломник")
 	_check(pf != null and _pilgrim_bubble_hidden(pf), "the pilgrim carries no quest marker over his head")
 	var forest_interactables := get_nodes_in_group("interactable")
-	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Edrik",
-		"the pilgrim did not displace Edrik as the first interactable")
+	_check(not forest_interactables.is_empty() and String(forest_interactables[0].name) == "Chest",
+		"the pilgrim did not displace the forest's first interactable (got %s)"
+			% str(forest_interactables[0].name if not forest_interactables.is_empty() else "<empty>"))
 	if pf != null and forest != null:
 		var pft := _tile_of_node(pf as Node2D)
 		var problems := _pilgrim_placement_problems(forest, pf, Vector2i(4, 9))
 		_check(problems.is_empty(), "the forest pilgrim is placed cleanly (%s)" % ", ".join(problems))
 		_check(not bool(forest.call("is_in_safe_zone", pft)),
 			"the forest pilgrim stands OUTSIDE the village safe zone (%s)" % str(pft))
+
+	# village — the one zone the pilgrim does NOT stand in: he walks the roads and
+	# the ruins between people, not the safe square itself.
+	_check(bool(manager.call("travel", "village")), "the pilgrim group travelled into the village")
+	for i in range(2):
+		await process_frame
+	var village := scene.get_node_or_null("World")
+	_check(village != null and String(village.call("zone_id")) == "village",
+		"the group stands in the village")
+	_check(_find_interactable_named("interactable", "PilgrimVillage") == null,
+		"the village places no pilgrim")
+	var village_found_pilgrim := false
+	for node in get_nodes_in_group("interactable"):
+		if String(node.get_script().resource_path) == "res://scripts/npcs/pilgrim.gd":
+			village_found_pilgrim = true
+	_check(not village_found_pilgrim, "no pilgrim of any name stands in the village")
+	_check(bool(manager.call("travel", "forest")), "the pilgrim group travelled back to the forest")
+	for i in range(2):
+		await process_frame
 
 	# ruins
 	_check(bool(manager.call("travel", "ruins")), "the pilgrim group travelled into the ruins")
@@ -15162,30 +15338,8 @@ func _test_pilgrim() -> void:
 			"the fortress pilgrim stands outside the ring kept for the final boss")
 
 	# --- 4. the three interaction states on both ends of the chain -------------
-	# The forest end: available from the start, then silent once heard.
-	gs.reset()
-	qm.reset()
-	if pf != null:
-		_check(String(pf.call("prompt_text")) == "Заговорить",
-			"the forest pilgrim invites speech before his fragment is heard")
-		spoken.clear()
-		pf.call("interact", forest.get_node_or_null("Player"))
-		_check(spoken.is_empty(), "an available forest fragment opens a conversation, not a silence line")
-		if hud != null and hud.has_method("close_dialogue"):
-			hud.call("close_dialogue")
-		gs.ui_blocking = false
-		gs.set_flag("pilgrim_met_forest", true)
-		_check(String(pf.call("prompt_text")) == "Молчит",
-			"the forest pilgrim falls silent once his fragment is heard")
-		spoken.clear()
-		pf.call("interact", forest.get_node_or_null("Player"))
-		_check(spoken.size() == 1 and spoken[0] == "Он уже сказал всё, что помнит.",
-			"a heard forest fragment answers with the already-said line (%s)" % ", ".join(spoken))
-		if hud != null and hud.has_method("close_dialogue"):
-			hud.call("close_dialogue")
-		gs.ui_blocking = false
-
-	# The fortress end: locked until the dungeon fragment, then available, then silent.
+	# The fortress end first, while the live world still is the fortress: locked
+	# until the dungeon fragment, then available, then silent.
 	gs.reset()
 	qm.reset()
 	if pft_node != null:
@@ -15204,6 +15358,38 @@ func _test_pilgrim() -> void:
 		spoken.clear()
 		pft_node.call("interact", fortress.get_node_or_null("Player"))
 		_check(spoken.is_empty(), "an available fortress fragment opens a conversation, not a silence line")
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+
+	# The forest end: available from the start, then silent once heard. The forest
+	# this group opened in was freed by the first travel, so the group travels back
+	# and re-reads the pilgrim from the rebuilt world — the same node the player
+	# would find on returning, not a reference to a zone that no longer exists.
+	gs.reset()
+	qm.reset()
+	_check(bool(manager.call("travel", "forest")),
+		"the pilgrim group travels back to the forest for its end of the chain")
+	for i in range(2):
+		await process_frame
+	forest = scene.get_node_or_null("World")
+	pf = _find_interactable_named("interactable", "PilgrimForest")
+	if pf != null and forest != null:
+		_check(String(pf.call("prompt_text")) == "Заговорить",
+			"the forest pilgrim invites speech before his fragment is heard")
+		spoken.clear()
+		pf.call("interact", forest.get_node_or_null("Player"))
+		_check(spoken.is_empty(), "an available forest fragment opens a conversation, not a silence line")
+		if hud != null and hud.has_method("close_dialogue"):
+			hud.call("close_dialogue")
+		gs.ui_blocking = false
+		gs.set_flag("pilgrim_met_forest", true)
+		_check(String(pf.call("prompt_text")) == "Молчит",
+			"the forest pilgrim falls silent once his fragment is heard")
+		spoken.clear()
+		pf.call("interact", forest.get_node_or_null("Player"))
+		_check(spoken.size() == 1 and spoken[0] == "Он уже сказал всё, что помнит.",
+			"a heard forest fragment answers with the already-said line (%s)" % ", ".join(spoken))
 		if hud != null and hud.has_method("close_dialogue"):
 			hud.call("close_dialogue")
 		gs.ui_blocking = false
@@ -15236,9 +15422,9 @@ func _test_pilgrim() -> void:
 			"the journal records the truth once the last fragment is heard (got '%s')" % j_truth)
 
 	# --- leave no state behind -------------------------------------------------
-	_check(bool(manager.call("travel", "forest")), "the pilgrim group travels back to the forest")
-	for i in range(2):
-		await process_frame
+	# The forest end above already brought the run home; a second travel from the
+	# forest to it would be a refused no-op, so the zone is asserted, not travelled.
+	_check(String(gs.zone) == "forest", "the pilgrim group is already back in the forest")
 	gs.ui_blocking = false
 	scene.queue_free()
 	await process_frame

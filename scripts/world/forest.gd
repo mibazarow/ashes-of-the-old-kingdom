@@ -1,9 +1,14 @@
 class_name Forest
 extends ZoneBase
 ## The first zone. Builds the forest slice at runtime: the grid from a fixed
-## seed, props and spawns, the village safe zone and the villager schedules.
+## seed, props and spawns, and the two gates — the ruins to the east and the
+## village to the west. The village itself (the six NPCs, their houses and the
+## safe zone the enemies are turned back from) moved into its own zone in
+## `scripts/world/village.gd`; what stays here is the wild half. The old village
+## clearing survives as a keep-out rect: no hostile and no pilgrim is placed on
+## the ground the headman's people still cross on their way in and out.
 ## Everything generic (grid reader, tileset build, exploration, camera, spawn
-## scans, schedule wiring) lives in `ZoneBase`; this file is content only.
+## scans) lives in `ZoneBase`; this file is content only.
 
 const WOLF_SCENE := "res://scenes/enemies/wolf.tscn"
 const ARCHER_SCENE := "res://scenes/enemies/archer.tscn"
@@ -23,8 +28,6 @@ const SLIME_SCENE := "res://scenes/enemies/slime.tscn"
 const TICK_SCENE := "res://scenes/enemies/tick.tscn"
 const LUMBERJACK_SCENE := "res://scenes/enemies/lumberjack.tscn"
 const ROOT_BEAST_SCENE := "res://scenes/enemies/root_beast.tscn"
-const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
-const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
 const CHEST_SCENE := "res://scenes/interactables/chest.tscn"
 const TRAP_SCENE := "res://scenes/interactables/spike_trap.tscn"
 const PICKUP_SCENE := "res://scenes/items/pickup.tscn"
@@ -42,17 +45,12 @@ const MAP_SEED := 20261107
 
 ## Points of interest kept as live node references so the map can show them
 ## without fragile path lookups. Populated in _spawn_actors.
-var _npc_node: Node2D
-var _merchant_node: Node2D
-var _smith_node: Node2D
-var _mila_node: Node2D
-var _seris_node: Node2D
-var _alvena_node: Node2D
 var _chest_node: Node2D
 var _chest_spear_node: Node2D
 var _trap_node: Node2D
 var _rubble_node: Node2D
 var _ruins_gate_node: Node2D
+var _village_gate_node: Node2D
 var _root_mother_node: Node2D
 
 ## Fixed anchor for the spear chest, on the south-west side away from the sword
@@ -61,55 +59,15 @@ var _root_mother_node: Node2D
 ## inside a tree cluster.
 const SPEAR_CHEST_ANCHOR := Vector2i(12, 24)
 
-## Anchor for the smith's forge, on the road just east of the village clearing.
-## He is kept well outside Edrik's interact radius on purpose (see
-## `_find_walkable_away`): the debug bot walks up to Edrik and presses E on the
-## NEAREST interactable, so a forge within reach would steal the quest dialogue
-## and the turn-in and break every quest bot.
-const SMITH_ANCHOR := Vector2i(12, 12)
-
-## Tile distance the smith must keep from the quest-giver, the merchant and the
-## spawn point. 4 tiles is 64 px against a 26 px interact radius and an 18 px bot
-## stop tolerance, so standing at Edrik can never put the forge inside reach.
-const SMITH_MIN_SEPARATION := 4
-
-## The village safe zone, in tiles: the dirt clearing the west of the map is built
-## around (rows 6..11 x cols 2..9) plus a one-tile buffer on every side, so an
-## enemy is turned back before it can reach a villager rather than at their feet.
-## `Enemy` reads this through the `safe_zone_owner` group and refuses to step a
-## single frame's move inside it, and walks straight out if it is ever inside.
+## The old village clearing, in tiles (rows 6..11 x cols 2..9): the dirt patch
+## the generated grid paints in the west of the map. The villagers who lived on
+## it moved to their own zone (`scripts/world/village.gd`), so the forest no
+## longer promises safety anywhere and owns no `safe_zone_owner` group. What the
+## rect still does is keep the clearing empty: no new predator and no pilgrim is
+## placed on it (`_is_new_enemy_tile`, `_is_pilgrim_tile`), because the road to
+## `VillageGate` runs across it and a spider on the doorstep of the only safe
+## place in the game is a defect the old rule was always also about.
 const SAFE_ZONE_RECT := Rect2i(2, 5, 9, 8)
-
-## Anchor for the third villager, the herbwife. She sits on the clearing among the
-## other villagers but a few tiles from Edrik, the merchant and the spawn, so the
-## debug bot walking to the FIRST interactable (Edrik) never comes within the
-## interact radius of her and never has her dialogue stolen (see
-## `_find_walkable_away`). The tile is derived from the generated grid, so she is
-## never placed in a tree.
-const MILA_ANCHOR := Vector2i(5, 7)
-const MILA_MIN_SEPARATION := 3
-
-## Anchors for the two newest villagers (spec §12): the miller Серис and the
-## tanner Альвена. Both anchors are tiles of the village clearing (rows 6..11 x
-## cols 2..9, all dirt), so the anchor itself is walkable ground and inside the
-## safe zone, and `_find_villager_tile` returns it unchanged on this seed. Серис
-## takes the west edge by the water chute his mill would use; Альвена takes the
-## north-east corner, the three tiles from the forge that read as a pair beside
-## the smith without standing within his reach.
-const SERIS_ANCHOR := Vector2i(2, 6)
-const ALVENA_ANCHOR := Vector2i(8, 6)
-
-## How far the two new villagers keep from every other villager, the merchant,
-## the smith and the arrival tile (Chebyshev). Three tiles is 48 px against the
-## 26 px interact radius and the 18 px bot stop tolerance, so standing at Edrik
-## can never bring a newcomer inside reach and steal a quest dialogue — the same
-## margin the herbwife is held to.
-const VILLAGER_MIN_SEPARATION := 3
-
-## How wide the villager scan looks around an anchor when the anchor itself fails
-## a rule. Three tiles clears a one-tile tree edge without wandering a villager
-## out of the clearing its anchor names.
-const VILLAGER_SCAN_RADIUS := 3
 
 ## Anchors for the two new predator types (roadmap stage D), on the east/south
 ## half of the map: far enough from the wolf pack and the village that the BOT-008
@@ -234,6 +192,15 @@ const PICKUP_FLASK_TILE := Vector2i(20, 30)
 ## there, the spawn falls back to the anchor and the zone test notices.
 const RUINS_GATE_TILE := Vector2i(MAP_W - 3, 13)
 
+## The gate to the village, at the western end of the same road, on the first
+## clearing tile east of the wall belt (the clearing paints x2..9, so (2,8) is
+## dirt on every seed). Two tiles and a bit from the arrival point — 35 px
+## against the 26 px interact reach — so no prompt shows under the player's
+## feet on arrival, and the walk west to the village is a walk, not a key
+## already pressed. The village answers with its own `ForestGate` two tiles
+## inside its east wall.
+const VILLAGE_GATE_TILE := Vector2i(2, 8)
+
 ## The pilgrim (spec §12): the grey, near-silent stranger who stands on the road
 ## east of the village and hands out the first fragment of the king's story. He is
 ## a story figure, not a hazard, so — unlike the villagers — he belongs OUTSIDE the
@@ -278,32 +245,14 @@ func ambience_track() -> String:
 	return "ambience_forest"
 
 
-## Advertise the safe zone before any actor is spawned, so an enemy created in
-## `_spawn_actors` can already resolve this world through the group and honour
-## the boundary from its very first physics frame.
-func _advertise_zone() -> void:
-	add_to_group("safe_zone_owner")
-
-
-## The village safe zone rectangle, exposed so `Enemy` and a test read the exact
-## same rect the world enforces rather than a copy of its numbers.
-func safe_zone_rect() -> Rect2i:
-	return SAFE_ZONE_RECT
-
-
-## True when `tile` falls inside the village safe zone. `Enemy` converts its own
-## world position to a tile and asks this each frame; the hostiles keep out.
-func is_in_safe_zone(tile: Vector2i) -> bool:
-	return SAFE_ZONE_RECT.has_point(tile)
+## The forest owns no safe zone any more — the village does, in its own zone —
+## so it advertises nothing and `is_in_safe_zone` stays the base's `false`. The
+## `SAFE_ZONE_RECT` above survives as a private spawn keep-out, not a promise.
 
 
 func landmarks() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for entry: Array in [
-		["Edrik", "npc", _npc_node],
-		["Yorek", "npc", _merchant_node],
-		["Bran", "npc", _smith_node],
-		["Mila", "npc", _mila_node],
 		["Chest", "chest", _chest_node],
 		["ChestSpear", "chest", _chest_spear_node],
 		["Trap", "trap", _trap_node],
@@ -319,6 +268,9 @@ func landmarks() -> Array[Dictionary]:
 		# reference like the rest, so it drops out of the list the moment the
 		# world that owns it goes away.
 		["RuinsGate", "gate", _ruins_gate_node],
+		# The way west into the village. Marked like the ruins gate so both doors
+		# of the forest read on the map.
+		["VillageGate", "gate", _village_gate_node],
 		# The Root Mother is marked so the player can find the second boss on the
 		# map. The warden is not a landmark (it never was); the boss marker points at
 		# the one the player has not met yet, which is the one worth finding.
@@ -400,88 +352,12 @@ func _spawn_actors() -> void:
 	player.add_to_group("player")
 	player.set("spawn_point", player.global_position)
 
-	var npc := _instantiate(NPC_SCENE, _tile_center(7, 9), "Edrik")
-	npc.name = "Edrik"
-	_npc_node = npc
-
-	# The merchant is added after Edrik on purpose: the debug bot picks the first
-	# node in the `interactable` group, so Edrik must stay first or the quest bots
-	# would open the shop instead of the dialogue. It sits on the village clearing
-	# (dirt, walkable, never a tree cluster), far enough from the spawn point that
-	# no prompt shows at start and far enough from Edrik that walking to him never
-	# comes within the interact radius of the shop.
-	var merchant := Merchant.new()
-	merchant.name = "Yorek"
-	merchant.sprite_texture = load("res://assets/sprites/npc.png")
-	merchant.position = _tile_center(3, 11)
-	add_child(merchant)
-	_merchant_node = merchant
-
-	# The smith joins last among the village NPCs, after Edrik and Yorek, for the
-	# same reason the merchant does: the debug bot picks the FIRST node of the
-	# `interactable` group, so Edrik must stay first or the quest bots would open a
-	# bench instead of the dialogue. His tile is chosen by `_find_walkable_away` so
-	# that he is also outside the interact radius of anyone standing at Edrik.
-	var smith := Smith.new()
-	smith.name = "Bran"
-	smith.sprite_texture = load("res://assets/sprites/npc.png")
-	var smith_tile := _find_walkable_away(
-		SMITH_ANCHOR, 4, [Vector2i(7, 9), Vector2i(3, 11), Vector2i(4, 9)], SMITH_MIN_SEPARATION)
-	smith.position = _tile_center(smith_tile.x, smith_tile.y)
-	add_child(smith)
-	_smith_node = smith
-
-	# The herbwife joins last among the village NPCs, after Edrik, Yorek and Bran,
-	# for the same reason they each joined after the one before: the debug bot picks
-	# the FIRST node of the `interactable` group, so Edrik must stay first. She is a
-	# `Villager` (a multi-quest giver) built in code like the merchant and the smith,
-	# given both of her quests and placed by `_find_walkable_away` a few tiles from
-	# Edrik, the merchant and the spawn, so standing at Edrik never reaches her.
-	var mila_script: GDScript = load(VILLAGER_SCRIPT)
-	var mila: Node2D = mila_script.new() as Node2D
-	mila.name = "Mila"
-	mila.set("display_name", "Травница Мила")
-	mila.set("speaker_id", "mila")
-	mila.set("sprite_texture", load("res://assets/sprites/npc.png"))
-	mila.set("quest_ids", PackedStringArray(["q02_gather_fangs", "q03_clear_boars"]))
-	# The base `Npc` scene carries a `Sprite2D` child that its `_ready` reaches for
-	# through an `@onready`; a code-built villager has no scene, so the sprite is
-	# added here, before `add_child`, so the lookup resolves on the first frame.
-	var mila_sprite := Sprite2D.new()
-	mila_sprite.name = "Sprite2D"
-	mila_sprite.texture = load("res://assets/sprites/npc.png")
-	mila.add_child(mila_sprite)
-	var mila_tile := _find_walkable_away(
-		MILA_ANCHOR, 3, [Vector2i(7, 9), Vector2i(3, 11), Vector2i(4, 9)], MILA_MIN_SEPARATION)
-	mila.position = _tile_center(mila_tile.x, mila_tile.y)
-	add_child(mila)
-	_mila_node = mila
-
-	# The two newest villagers (spec §12/§13) join after Mila and before the chests,
-	# for the same reason every villager joined after the one before: the debug bot
-	# picks the FIRST node of the `interactable` group, so Edrik must stay first or
-	# the quest bots would open a mill instead of the hunt dialogue. Each is a
-	# `Villager` built in code like the herbwife, carrying one of the new quests,
-	# placed by `_find_villager_tile` on the clearing so it is walkable, inside the
-	# safe zone and at least `VILLAGER_MIN_SEPARATION` tiles from every other
-	# villager, the merchant, the smith and the arrival tile. The avoid list is read
-	# back from the live nodes rather than hardcoded, so moving an anchor above
-	# moves the clearance with it.
-	var villager_avoid: Array[Vector2i] = [
-		PLAYER_SPAWN_TILE,
-		_tile_of_node(_npc_node),
-		_tile_of_node(_merchant_node),
-		_tile_of_node(_smith_node),
-		_tile_of_node(_mila_node),
-	]
-	var seris_tile := _find_villager_tile(SERIS_ANCHOR, villager_avoid, VILLAGER_MIN_SEPARATION)
-	_seris_node = _spawn_villager("Seris", "Мельник Серис", "seris",
-		PackedStringArray(["q09_the_mill"]), seris_tile, Color(0.62, 0.78, 0.95))
-	var alvena_avoid: Array[Vector2i] = villager_avoid.duplicate()
-	alvena_avoid.append(seris_tile)
-	var alvena_tile := _find_villager_tile(ALVENA_ANCHOR, alvena_avoid, VILLAGER_MIN_SEPARATION)
-	_alvena_node = _spawn_villager("Alvena", "Кожевница Альвена", "alvena",
-		PackedStringArray(["q10_armor_fit"]), alvena_tile, Color(0.95, 0.80, 0.55))
+	# The six villagers (Edrik, Yorek, Bran, Mila, Серис, Альвена) no longer
+	# spawn here. They live in their own zone — `scripts/world/village.gd` —
+	# behind `VillageGate` at the western end of the road, together with the safe
+	# zone, the houses and the schedules that used to hang off this clearing. The
+	# clearing itself stays painted (see `SAFE_ZONE_RECT`) so the road west runs
+	# over ground, but it is empty ground now: the forest is all wild.
 
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"
@@ -580,24 +456,22 @@ func _spawn_actors() -> void:
 
 	_spawn_rubble()
 	_spawn_ruins_gate()
-	# The pilgrim goes last among the interactables, after the gate, for the same
-	# reason every villager joined after the one before: the debug bot walks the
-	# FIRST node of the `interactable` group, so Edrik has to stay first or the quest
-	# bots would open the pilgrim's fragment instead of the hunt. Placing him last
-	# also means the avoid set he is snapped against already knows every enemy, prop
-	# and NPC, so he cannot be parked on any of them.
+	_spawn_village_gate()
+	# The pilgrim goes last among the interactables, after both gates, so the
+	# avoid set he is snapped against already knows every enemy, prop, gate and
+	# find, and he cannot be parked on any of them. He is also the only villager-
+	# class NPC left in the forest now that the six moved to their own zone, and
+	# the debug bot no longer walks the FIRST interactable here at all — it walks
+	# to the village through `VillageGate` first — so his group order is free.
 	_spawn_pilgrim()
 
 
 ## The gate to `ruins`, at the eastern end of the road.
 ##
-## It is appended after every other interactable in the zone — Edrik, Yorek,
-## Bran, Mila, both chests, the trap and the rubble — for the same reason each
-## villager joined after the one before: the debug bot walks the FIRST node of the
-## `interactable` group, so Edrik has to stay first or the quest bots would open a
-## gate instead of the dialogue. The gate is also 42 tiles from Edrik, far outside
-## the 26 px interact radius, and `ZoneExit` owns no overlap handler at all, so no
-## bot route can reach it and nothing can travel by walking over it.
+## It is appended after both chests, the trap and the rubble, and `ZoneExit`
+## owns no overlap handler at all, so no bot route can reach it by accident and
+## nothing can travel by walking over it. The gate is 42 tiles from the arrival
+## point, far outside the 26 px interact radius.
 func _spawn_ruins_gate() -> void:
 	var tile := _find_walkable_near(RUINS_GATE_TILE, 0)
 	var gate := ZoneExit.new()
@@ -609,13 +483,29 @@ func _spawn_ruins_gate() -> void:
 	_ruins_gate_node = gate
 
 
-## Places the pilgrim on the road east of the village. Built in code like the
-## villagers (a `Sprite2D` child added before `add_child` so the base `Npc`'s
-## `@onready` sprite resolves on the first frame); the grey tint is applied by
-## `Pilgrim._ready` itself, so nothing here paints over it. He carries no quest and
-## no schedule — a stranger who drifts between zones holds no post in this one — and
-## he is deliberately not a landmark: the map keeps its ten markers, and a figure
-## who is in every zone is not a fixed point of interest in any of them.
+## The gate to `village`, at the western end of the same road. Its twin in the
+## village is `ForestGate`; the two are the only doors between the wild and the
+## one safe place left in the game. Like every `ZoneExit` it owns no overlap
+## handler, so the west road is walked, not tripped, and the key press is the
+## only thing that moves the player between the two zones.
+func _spawn_village_gate() -> void:
+	var tile := _find_walkable_near(VILLAGE_GATE_TILE, 0)
+	var gate := ZoneExit.new()
+	gate.name = "VillageGate"
+	gate.target_zone = "village"
+	gate.prompt = "В деревню"
+	gate.position = _tile_center(tile.x, tile.y)
+	add_child(gate)
+	_village_gate_node = gate
+
+
+## Places the pilgrim on the road east of the old clearing. Built in code (a
+## `Sprite2D` child added before `add_child` so the base `Npc`'s `@onready`
+## sprite resolves on the first frame); the grey tint is applied by
+## `Pilgrim._ready` itself, so nothing here paints over it. He carries no quest
+## and no schedule — a stranger who drifts between zones holds no post in this
+## one — and he is deliberately not a landmark: a figure who is in every zone is
+## not a fixed point of interest in any of them.
 func _spawn_pilgrim() -> void:
 	var tile := _find_pilgrim_tile(PILGRIM_ANCHOR, PILGRIM_SCAN_RADIUS, _occupied_pilgrim_tiles())
 	var pilgrim := Pilgrim.new()
@@ -651,9 +541,10 @@ func _occupied_pilgrim_tiles() -> Dictionary:
 	return occupied
 
 
-## The pilgrim's tile: walkable ground, outside the village safe zone and its
-## one-tile buffer (the same margin enemies are turned back at — a grey stranger is
-## not something to post in the one place this world promises is safe), at least
+## The pilgrim's tile: walkable ground, outside the old village clearing and its
+## one-tile buffer (the keep-out that keeps the road to `VillageGate` clear of
+## hostiles — a grey stranger is not something to post on the one stretch of
+## this map that reads as a doorstep), at least
 ## `PILGRIM_CLEAR_FROM_ENTRY` tiles from the arrival tile, and clear of every tile in
 ## `avoid`. The declared anchor first, then the outward rings, so the named spot on
 ## the road wins over a tile a ring away. Deterministic like every other spawn here:
@@ -682,73 +573,8 @@ func _is_pilgrim_tile(tile: Vector2i, avoid: Dictionary) -> bool:
 	return maxi(absi(tile.x - PLAYER_SPAWN_TILE.x), absi(tile.y - PLAYER_SPAWN_TILE.y)) >= PILGRIM_CLEAR_FROM_ENTRY
 
 
-## Builds one `Villager` in code (the herbwife's type) and places it on `tile`,
-## carrying `quests` as its offer list. Mirrors exactly what the Mila block in
-## `_spawn_actors` does by hand: a `Sprite2D` child is added before `add_child` so
-## the base `Npc`'s `@onready` sprite lookup resolves on the first frame, and the
-## per-villager `tint` is applied AFTER `add_child` because `Villager._ready`
-## paints every herbwife the same green and would otherwise overwrite it. Returns
-## the live node so the caller can keep it as a landmark/schedule reference.
-func _spawn_villager(node_name: String, display: String, speaker: String,
-		quests: PackedStringArray, tile: Vector2i, tint: Color) -> Node2D:
-	var script: GDScript = load(VILLAGER_SCRIPT)
-	if script == null:
-		push_error("Forest: cannot load %s" % VILLAGER_SCRIPT)
-		return null
-	var villager: Node2D = script.new() as Node2D
-	villager.name = node_name
-	villager.set("display_name", display)
-	villager.set("speaker_id", speaker)
-	villager.set("sprite_texture", load("res://assets/sprites/npc.png"))
-	villager.set("quest_ids", quests)
-	var spr := Sprite2D.new()
-	spr.name = "Sprite2D"
-	spr.texture = load("res://assets/sprites/npc.png")
-	villager.add_child(spr)
-	villager.position = _tile_center(tile.x, tile.y)
-	add_child(villager)
-	spr.modulate = tint
-	return villager
-
-
-## The tile a new villager stands on: the anchor when it passes every rule, else
-## the first ring tile that does, scanning outward ring-by-ring so the declared
-## corner of the clearing wins over a tile a ring away. Three rules a plain
-## walkability check does not carry: the tile must be inside the village safe zone
-## (a villager belongs in the clearing the enemies are turned back from), and it
-## must keep `min_distance` tiles (Chebyshev) from every point in `avoid` so the
-## debug bot walking to Edrik never comes within the interact radius of anyone
-## else. Deterministic like every other spawn here: the order depends only on the
-## fixed anchors and the fixed grid. Falls back to the anchor when nothing in
-## range passes, which the villager test group notices rather than trusts.
-func _find_villager_tile(anchor: Vector2i, avoid: Array[Vector2i], min_distance: int) -> Vector2i:
-	if _is_villager_tile(anchor, avoid, min_distance):
-		return anchor
-	for ring in range(1, VILLAGER_SCAN_RADIUS + 1):
-		for dy in range(-ring, ring + 1):
-			for dx in range(-ring, ring + 1):
-				if absi(dx) != ring and absi(dy) != ring:
-					continue
-				var t := Vector2i(anchor.x + dx, anchor.y + dy)
-				if _is_villager_tile(t, avoid, min_distance):
-					return t
-	return anchor
-
-
-func _is_villager_tile(tile: Vector2i, avoid: Array[Vector2i], min_distance: int) -> bool:
-	var ch := cell_at(tile)
-	if ch != "." and ch != ",":
-		return false
-	if not SAFE_ZONE_RECT.has_point(tile):
-		return false
-	for point: Vector2i in avoid:
-		if maxi(absi(tile.x - point.x), absi(tile.y - point.y)) < min_distance:
-			return false
-	return true
-
-
 ## The tile a live node stands on, in the same 16 px grid the world uses. Used to
-## read the existing villagers' positions back into the newcomer separation rule
+## read the standing actors' positions back into the pilgrim separation rule
 ## instead of trusting hardcoded coordinates.
 func _tile_of_node(node: Node2D) -> Vector2i:
 	if node == null:
@@ -885,19 +711,13 @@ func _is_new_enemy_tile(tile: Vector2i, taken: Dictionary) -> bool:
 	return maxi(absi(tile.x - PLAYER_SPAWN_TILE.x), absi(tile.y - PLAYER_SPAWN_TILE.y)) >= NEW_ENEMY_CLEAR_FROM_SPAWN
 
 
-## Builds the day cycle and gives every scheduled villager a `ScheduleComponent`.
-## The clock is added first so its `_ready` (which loads `data/schedules.json` and
-## seeds the morning phase) runs before any component reads `phase()`. The smith
-## keeps his forge tile: his schedule morning spot is the tile `_find_walkable_away`
-## already chose, so attaching a schedule never drags him into the village and
-## never breaks the separation that keeps the quest bots talking to Edrik.
+## The forest has no villagers and therefore no schedule to serve — the six and
+## their `ScheduleComponent`s live in the village zone now — but the day cycle
+## is world-owned state the HUD reads through the `day_clock` group, so the zone
+## runs its own clock, exactly like the ruins, the dungeon and the fortress.
+## Without it the clock line would simply go blank for as long as the player
+## stood here.
 func _setup_day_cycle() -> void:
 	day_clock = DayClock.new()
 	day_clock.name = "DayClock"
 	add_child(day_clock)
-	_attach_schedule(_npc_node)
-	_attach_schedule(_merchant_node)
-	_attach_schedule(_smith_node)
-	_attach_schedule(_mila_node)
-	_attach_schedule(_seris_node)
-	_attach_schedule(_alvena_node)
