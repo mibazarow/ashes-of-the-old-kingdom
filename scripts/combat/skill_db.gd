@@ -11,6 +11,18 @@ const PATH := "res://data/skills.json"
 ## Fixed school order for the UI and the tests; independent of JSON order.
 const SCHOOL_ORDER := ["fire", "ice", "lightning", "nature"]
 
+## Russian display names for the four schools. The school id in `data/skills.json`
+## is a program key, and printing it straight into the HUD put a raw `· fire` on a
+## line the player reads as prose. An id missing from this table comes back
+## unchanged on purpose: a school added to the JSON without a name here shows its
+## real id rather than being silently mislabelled with some other school's word.
+const SCHOOL_NAMES := {
+	"fire": "огонь",
+	"ice": "лёд",
+	"lightning": "молния",
+	"nature": "природа",
+}
+
 static var _skills: Dictionary = {}
 static var _loaded := false
 
@@ -59,6 +71,12 @@ static func schools() -> Array[String]:
 				out.append(school)
 				break
 	return out
+
+
+## The Russian word for a school, for every line the player reads. Unknown ids
+## pass through as the id itself, so the HUD never invents a name it does not have.
+static func school_name(school: String) -> String:
+	return String(SCHOOL_NAMES.get(school, school))
 
 
 ## Skill ids of one school, kept in JSON declaration order.

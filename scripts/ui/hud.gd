@@ -1796,8 +1796,15 @@ func _refresh_skill() -> void:
 	_skill_label.text = "Умение: %s · %d маны · %s" % [
 		String(skill.get("name", GameState.selected_skill)),
 		int(skill.get("mana", 0)),
-		String(skill.get("school", "")),
+		SkillDB.school_name(String(skill.get("school", ""))),
 	]
+
+
+## The bottom skill line exactly as the player reads it. Same read-only view of
+## the HUD's own state that `skills_row_texts` is for the skills panel, so a test
+## asserts the wording on screen instead of reaching into a private Label.
+func get_skill_line_text() -> String:
+	return "" if _skill_label == null else _skill_label.text
 
 
 func _on_prompt(text: String) -> void:

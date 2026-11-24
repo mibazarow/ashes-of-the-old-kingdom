@@ -5,8 +5,10 @@ extends ZoneBase
 ## village to the west. The village itself (the six NPCs, their houses and the
 ## safe zone the enemies are turned back from) moved into its own zone in
 ## `scripts/world/village.gd`; what stays here is the wild half. The old village
-## clearing survives as a keep-out rect: no hostile and no pilgrim is placed on
-## the ground the headman's people still cross on their way in and out.
+## clearing survives as a ruined camp — the broken palisade, the trampled yard
+## and the saplings coming up through both — and as a keep-out rect: no hostile
+## and no pilgrim is placed on the ground the headman's people still cross on
+## their way in and out.
 ## Everything generic (grid reader, tileset build, exploration, camera, spawn
 ## scans) lives in `ZoneBase`; this file is content only.
 
@@ -59,15 +61,80 @@ var _root_mother_node: Node2D
 ## inside a tree cluster.
 const SPEAR_CHEST_ANCHOR := Vector2i(12, 24)
 
-## The old village clearing, in tiles (rows 6..11 x cols 2..9): the dirt patch
-## the generated grid paints in the west of the map. The villagers who lived on
-## it moved to their own zone (`scripts/world/village.gd`), so the forest no
-## longer promises safety anywhere and owns no `safe_zone_owner` group. What the
-## rect still does is keep the clearing empty: no new predator and no pilgrim is
-## placed on it (`_is_new_enemy_tile`, `_is_pilgrim_tile`), because the road to
-## `VillageGate` runs across it and a spider on the doorstep of the only safe
-## place in the game is a defect the old rule was always also about.
+## The old village clearing, in tiles (rows 6..11 x cols 2..9): the footprint of
+## the settlement that moved to its own zone (`scripts/world/village.gd`). It is
+## painted as a ruined camp now (see `CAMP_RECT` and friends below), not as the
+## bare dirt rectangle it was, so the ground reads as a place that was lived in
+## and left rather than as an orange hole in the wood. The forest owns no
+## `safe_zone_owner` group any more: it promises nothing. What the rect still
+## does is keep the camp empty: no new predator and no pilgrim is placed on it
+## (`_is_new_enemy_tile`, `_is_pilgrim_tile`), because the road to `VillageGate`
+## runs across it and a spider on the doorstep of the only safe place in the game
+## is a defect the old rule was always also about.
 const SAFE_ZONE_RECT := Rect2i(2, 5, 9, 8)
+
+## The ruined camp that replaced the clearing: what the headman's people left
+## behind when the settlement moved to its own zone. Painted over the old
+## clearing rect and nowhere else, so the map's shape, its borders and every
+## seeded tree cluster stay exactly where the fixed seed has always put them.
+##
+## The layout is written against what the four tiles of this atlas actually look
+## like when they are drawn next to each other, not against the story. Two facts
+## decide it, both measured off a rendered 6x sheet of the rect:
+##
+##  * `,` is the road tile. Any dirt painted inside the rect that is not joined to
+##    the road reads as the same orange hole the clearing used to be, only
+##    smaller — a detached dirt patch is the defect, not the fix for it. So the
+##    camp paints no dirt at all; the road crossing the rect is the only worn
+##    ground there, and it is worn because it is a road.
+##  * `#` is a flat grey slab. Two of them side by side merge into one grey band,
+##    and a band of one tile running straight through the middle of the map is
+##    the same class of thing as the rectangle it replaced — authored geometry
+##    that looks like nothing. So no two `#` in the camp touch edge to edge: they
+##    read as individual fallen foundation stones, which is what they are.
+##
+## What is left to say "people lived here" is therefore rock and bush: isolated
+## rubble with thickets growing in the gaps, on grass, with the road running
+## through it. That is the same visual language the rest of the map already uses,
+## which is the only reason it reads as a place rather than as a patch.
+const CAMP_RECT := Rect2i(2, 6, 8, 6)
+
+## The foundation rubble: five stones, no two of them edge-adjacent, spread along
+## the two rows of the rect that lie north of the road. Gaps of at least two tiles
+## between stones are what keep them reading as five stones instead of one wall.
+const CAMP_RUBBLE: Array[Vector2i] = [
+	Vector2i(2, 6), Vector2i(5, 6), Vector2i(8, 6),
+	Vector2i(7, 7), Vector2i(9, 7),
+]
+
+## The thickets that came up over the floors: bushes may touch — a clump of
+## bushes is the one thing on this map that reads as natural at any density — and
+## they sit in the gaps between the stones, which is how a ruin actually goes
+## back to wood. Also on the two rows north of the road, for the reason in
+## `CAMP_PROP_ROW_TOP`.
+const CAMP_THICKET: Array[Vector2i] = [
+	Vector2i(3, 6), Vector2i(4, 6), Vector2i(8, 7),
+]
+
+## How far a solid camp prop keeps from the tile the player arrives on
+## (Chebyshev, so the diagonal counts as close too). The camp is scenery, and
+## scenery that narrows the ground under the arrival point is not scenery: a
+## palisade post two tiles south-east of `PLAYER_SPAWN_TILE` was measured to
+## shave a fifth off the diagonal step the `diagonal` test measures, because the
+## post and a sapling closed the corner the player has to pass between. Every
+## entry in `CAMP_RUBBLE` and `CAMP_THICKET` clears this distance, and
+## `_paint_ruined_camp` says so out loud rather than painting it silently.
+const CAMP_CLEAR_FROM_SPAWN := 3
+
+## The two rows of the camp rect the props are allowed on, and the reason they
+## stop there: everything south of them is the road and its shoulders. Held as
+## constants so `_paint_ruined_camp` can refuse a prop that lands in the lane
+## rather than discover it in a bot log three steps later.
+const CAMP_PROP_ROW_TOP := 6
+const CAMP_PROP_ROW_BOTTOM := 7
+
+
+
 
 ## Anchors for the two new predator types (roadmap stage D), on the east/south
 ## half of the map: far enough from the wolf pack and the village that the BOT-008
@@ -193,8 +260,11 @@ const PICKUP_FLASK_TILE := Vector2i(20, 30)
 const RUINS_GATE_TILE := Vector2i(MAP_W - 3, 13)
 
 ## The gate to the village, at the western end of the same road, on the first
-## clearing tile east of the wall belt (the clearing paints x2..9, so (2,8) is
-## dirt on every seed). Two tiles and a bit from the arrival point — 35 px
+## open tile east of the wall belt. The ruined camp paints its rect back to
+## grass and the road then takes the two rows it drifts across, so (2, 8) is
+## open ground on this seed — grass rather than the dirt the old clearing made
+## it, but walkable either way, which is all the radius-0 scan below asks for.
+## Two tiles and a bit from the arrival point — 35 px
 ## against the 26 px interact reach — so no prompt shows under the player's
 ## feet on arrival, and the walk west to the village is a walk, not a key
 ## already pressed. The village answers with its own `ForestGate` two tiles
@@ -311,17 +381,20 @@ func _generate_map() -> void:
 				row.append(".")
 		grid.append(row)
 
+	# The ruined camp, painted BEFORE the road on purpose. The road drifts one
+	# tile per column inside a clamp, so which two rows it occupies across the
+	# camp is a property of the seed, not a number this file can promise; painting
+	# the camp first lets the road have its way with any post or sapling it
+	# crosses, which keeps the west corridor walkable on every seed instead of
+	# on this one.
+	_paint_ruined_camp(grid)
+
 	# A dirt road from the village (west) to the ruins edge (east).
 	var road_y := 8
 	for x in range(2, MAP_W - 2):
 		road_y = clampi(road_y + rng.randi_range(-1, 1), 6, MAP_H - 5)
 		for dy in range(0, 2):
 			grid[road_y + dy][x] = ","
-
-	# Village clearing around the spawn point.
-	for y in range(6, 12):
-		for x in range(2, 10):
-			grid[y][x] = ","
 
 	# Tree clusters, never on the road or the clearing.
 	var clusters := 60
@@ -346,6 +419,70 @@ func _generate_map() -> void:
 		_map.append("".join(PackedStringArray(grid[y])))
 
 
+## Paints the ruined camp over the old clearing rect. Draws no RNG numbers at
+## all, and every prop is a fixed constant, so the seeded scatter downstream —
+## every tree cluster, the wolf posts the bots hunt, the neck the rubble seals —
+## lands exactly where it always has. The rect goes back to grass and stays
+## there: the camp paints no dirt, so the only worn ground inside it is the road
+## that will be painted over the top of it a few lines later, which is worn for a
+## reason. See `CAMP_RECT` for why dirt is the one tile this camp must not use.
+##
+## Solid props are checked against `CAMP_CLEAR_FROM_SPAWN` before they are drawn.
+## The check is here rather than left to the constants above because the camp is
+## content someone will edit again, and a post moved onto the arrival tile's
+## doorstep does not announce itself: the map still loads, the bots still pass,
+## and the only symptom is the player stepping out of the village gate into a
+## wall. Logging it makes the next edit that does that fail loudly.
+func _paint_ruined_camp(grid: Array) -> void:
+	for y in range(CAMP_RECT.position.y, CAMP_RECT.end.y):
+		for x in range(CAMP_RECT.position.x, CAMP_RECT.end.x):
+			grid[y][x] = "."
+	for tile: Vector2i in CAMP_RUBBLE:
+		_paint_camp_solid(grid, tile, "#")
+	for tile: Vector2i in CAMP_THICKET:
+		_paint_camp_solid(grid, tile, "T")
+
+
+## Draws one solid camp prop, refusing to place it inside the arrival clearance
+## or south of the two prop rows. Both rules exist because of what a solid costs
+## this map rather than because the layout looks better with them: the arrival
+## tile needs open ground under it, and everything south of row 7 is the road and
+## its shoulders — the lane the bots walk east to the wolves and back west to
+## `VillageGate`. A post dropped into that lane does not read as scenery in the
+## bot log, it reads as `watchdog_stuck` repeated until the run fails.
+func _paint_camp_solid(grid: Array, tile: Vector2i, ch: String) -> void:
+	if tile.y < CAMP_PROP_ROW_TOP or tile.y > CAMP_PROP_ROW_BOTTOM:
+		push_error("Forest: camp prop at %s is outside the prop rows %d..%d (the road owns the rest)"
+			% [str(tile), CAMP_PROP_ROW_TOP, CAMP_PROP_ROW_BOTTOM])
+		return
+	if maxi(absi(tile.x - PLAYER_SPAWN_TILE.x), absi(tile.y - PLAYER_SPAWN_TILE.y)) < CAMP_CLEAR_FROM_SPAWN:
+		push_error("Forest: camp prop at %s is inside the %d-tile arrival clearance"
+			% [str(tile), CAMP_CLEAR_FROM_SPAWN])
+		return
+	grid[tile.y][tile.x] = ch
+
+
+
+
+
+## The ruined camp as the world actually paints it, exposed so a test reads the
+## layout off the live zone instead of copying its numbers — the same reason
+## `Village` exposes `safe_zone_rect`. Reached through the node rather than
+## through the `Forest` class name on purpose: a class-name reference from the
+## suite drags `forest.gd` and everything under `ZoneBase` into the test's own
+## compile unit, and the autoloads those scripts use are not identifiers there.
+func camp_layout() -> Dictionary:
+	return {
+		"rect": CAMP_RECT,
+		"rubble": CAMP_RUBBLE,
+		"thicket": CAMP_THICKET,
+		"clear_from_spawn": CAMP_CLEAR_FROM_SPAWN,
+		"prop_row_top": CAMP_PROP_ROW_TOP,
+		"prop_row_bottom": CAMP_PROP_ROW_BOTTOM,
+		"spawn_tile": PLAYER_SPAWN_TILE,
+	}
+
+
 func _spawn_actors() -> void:
 	player = _instantiate(PLAYER_SCENE, _tile_center(PLAYER_SPAWN_TILE.x, PLAYER_SPAWN_TILE.y), "Player")
 	player.name = "Player"
@@ -355,9 +492,11 @@ func _spawn_actors() -> void:
 	# The six villagers (Edrik, Yorek, Bran, Mila, Серис, Альвена) no longer
 	# spawn here. They live in their own zone — `scripts/world/village.gd` —
 	# behind `VillageGate` at the western end of the road, together with the safe
-	# zone, the houses and the schedules that used to hang off this clearing. The
-	# clearing itself stays painted (see `SAFE_ZONE_RECT`) so the road west runs
-	# over ground, but it is empty ground now: the forest is all wild.
+	# zone, the houses and the schedules that used to hang off this clearing. What
+	# is left of them in the forest is the camp they pulled out of: the broken
+	# palisade, four tiles of trampled yard and the saplings coming up through
+	# both (`_paint_ruined_camp`). It is a footprint now, not a village, and the
+	# road still runs straight through it.
 
 	var chest := _instantiate(CHEST_SCENE, _tile_center(MAP_W - 4, 5), "Chest")
 	chest.name = "Chest"

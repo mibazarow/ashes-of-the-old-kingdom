@@ -22,17 +22,24 @@ the bush in a TileMapLayer, so every tile is passed through ensure_opaque(),
 which gives anything with alpha a solid opaque base underneath. Grass, dirt and
 stone are already fully opaque and stay byte-identical.
 
-Tree readability: the bush composited over grass measured only lum 149.2 against
-grass lum 174.9 — a 25.7-unit gap — so in game trees read as slightly darker
-grass, not as dense impassable foliage. Three opaque variants are therefore
-built in one run and measured (see tree_variants): A = bush over solid
-RGB(38,66,38); B = bush over solid RGB(26,48,30) with every non-transparent
-pixel then darkened 25% by integer multiply; C = the bush composited twice over
+Tree readability: the bush composited over grass measured only lum 142.1 against
+grass lum 167.5 — a 25.4-unit gap — so in game trees read as slightly darker
+grass, not as dense impassable foliage. The first fix gave the bush a solid dark
+base, which fixed the gap and put a worse defect in its place: a flat colour has
+four straight edges, so every tree drew a 16x16 dark box on the ground, seam and
+all, including across the corners the bush never touches. Four variants are
+therefore built in one run and measured (see tree_variants): A = bush over solid
+RGB(38,66,38); B = bush over solid RGB(26,48,30) with every non-transparent pixel
+then darkened 25% by integer multiply; C = the bush composited twice over
 RGB(38,66,38), once as-is and once mirrored vertically at +2 px, thickening the
-silhouette into a clump. --tree-variant picks which one lands in tiles.png
-(default b, the measured darkest). All three are 100% opaque, single 16x16
-cells, integer math, nearest-neighbour only, no blur. --sheet writes an 8x
-labelled comparison PNG of grass, bush-over-grass, A, B and C.
+silhouette into a clump; D = the bush over the grass tile itself with only the
+pixels the bush covers darkened to 60%. --tree-variant picks which one lands in
+tiles.png (default d). D is the only variant with no flat backing: the bush cell's
+margin columns are empty, so they stay the grass cell's own pixels and measure 0.0
+channel distance from grass (A/B/C measure 100+), while the silhouette still lands
+51.6 luma units below the grass. All four are 100% opaque, single 16x16 cells,
+integer math, nearest-neighbour only, no blur. --sheet writes an 8x labelled
+comparison PNG of grass, bush-over-grass, A, B, C and D.
 
 Uses PIL when it is installed; otherwise falls back to a pure-Python PNG
 codec (zlib + struct). Deterministic, idempotent, no randomness.
@@ -320,6 +327,27 @@ def mirror_v(src):
     return [row[:] for row in reversed(src)]
 
 
+def darken_where(grid, mask, num, den):
+    """Multiply only the RGB of the pixels `mask` selects by num//den.
+
+    `darken` hits every opaque pixel, which after a composite over grass would
+    darken the grass with the bush and put the visible 16x16 box straight back.
+    This leaves the ground the bush stands on byte-identical to the grass tile,
+    so the tree tile has no edge to draw at all: its margins ARE grass pixels.
+    Integer math, alpha untouched, byte-identical on every run and machine.
+    """
+    out = []
+    for y, row in enumerate(grid):
+        newrow = []
+        for x, (r, g, b, a) in enumerate(row):
+            if mask[y][x] and a != 0:
+                newrow.append((r * num // den, g * num // den, b * num // den, a))
+            else:
+                newrow.append((r, g, b, a))
+        out.append(newrow)
+    return out
+
+
 def darken(grid, num, den):
     """Multiply every non-transparent pixel's RGB by num//den (integer, exact).
 
@@ -356,9 +384,21 @@ def mean_luminance(grid):
 TREE_BASE_MID = (38, 66, 38)
 TREE_BASE_DARK = (26, 48, 30)
 
+# Variant D (the shipped one) throws the solid base away entirely and paints the
+# bush over the grass tile itself, darkening only the pixels the bush actually
+# covers. A and B both sit on a flat colour, and a flat colour has four straight
+# edges: on screen every tree read as a 16x16 dark box with a bush floating in
+# it, because the backing differed from the grass on all four sides including
+# the corners the bush never touches. The bush cell has fully transparent margin
+# columns (measured: 0 covered pixels in col 0 and col 15) and two empty bottom
+# rows, so over a grass base those margins are the grass tile's own pixels and
+# the box disappears, while the silhouette stays 51.6 luma units darker than the
+# grass it sits on — still unmistakably an obstacle, not a patch of darker lawn.
+TREE_GROUND_DARKEN = (60, 100)
 
-def tree_variants(bush):
-    """Return {'a':grid,'b':grid,'c':grid}, each 16x16 and 100% opaque."""
+
+def tree_variants(bush, grass):
+    """Return {'a','b','c','d': grid}, each 16x16 and 100% opaque."""
     # A: bush over a solid mid dark-green base.
     a = composite_over(solid(16, 16, TREE_BASE_MID), bush)
     # B: bush over a darker solid base, then every non-transparent pixel
@@ -371,7 +411,29 @@ def tree_variants(bush):
     c = solid(16, 16, TREE_BASE_MID)
     composite_over(c, bush)
     composite_over(c, shift_down(mirror_v(bush), 2))
-    return {"a": a, "b": b, "c": c}
+    # D: the bush over the real grass tile, silhouette only darkened. No flat
+    #    backing anywhere, so the tile has no straight dark edge against grass.
+    d = [row[:] for row in grass]
+    covered = [[bush[y][x][3] > 0 for x in range(16)] for y in range(16)]
+    composite_over(d, bush)
+    d = darken_where(d, covered, *TREE_GROUND_DARKEN)
+    return {"a": a, "b": b, "c": c, "d": d}
+
+
+def edge_column_distance(a, b, x):
+    """Mean per-channel abs colour distance between two cells' column `x`.
+
+    The metric the box defect shows up in: a tile whose left and right border
+    columns differ from the ground it is laid on draws a visible vertical seam
+    on every copy of itself in the TileMapLayer. Zero means the two columns are
+    the same colour, so the tile has no edge the eye can catch.
+    """
+    total = 0
+    for y in range(len(a)):
+        for i in range(3):
+            total += abs(a[y][x][i] - b[y][x][i])
+    return total / float(len(a) * 3)
+
 
 
 def shift_down(src, dy):
@@ -686,13 +748,15 @@ def main():
     ap.add_argument("--src", default="/tmp/ninja",
                     help="dir holding the extracted Ninja Adventure pack")
     ap.add_argument("--out", default=default_out, help="assets/sprites output dir")
-    ap.add_argument("--tree-variant", choices=("a", "b", "c"), default="b",
+    ap.add_argument("--tree-variant", choices=("a", "b", "c", "d"), default="d",
                     help="which tree tile to write into tiles.png: "
                          "a = bush over solid RGB(38,66,38); "
                          "b = bush over solid RGB(26,48,30) then all pixels "
                          "darkened 25%% (integer); c = bush plus its vertical "
-                         "mirror at +2px over RGB(38,66,38). Default b: the "
-                         "measured darkest, i.e. furthest from grass.")
+                         "mirror at +2px over RGB(38,66,38); d = bush over the "
+                         "grass tile itself with only its silhouette darkened "
+                         "to 60%%. Default d: the only variant with no flat "
+                         "backing, so it does not draw a 16x16 box on screen.")
     ap.add_argument("--sheet", default="",
                     help="also write an 8x labelled comparison sheet "
                          "(grass, bush-over-grass, A, B, C) to this PNG path")
@@ -753,8 +817,8 @@ def main():
     # Grass, dirt and stone are already 1.000 opaque and pass through
     # ensure_opaque() byte-identical. The tree cell is 0.539 opaque (118
     # transparent px, both edge columns empty), and the old bush-over-grass
-    # composite measured only lum 149.2 vs grass 174.9, so trees read as darker
-    # grass. tree_variants() builds three opaque alternatives (A/B/C) and
+    # composite measured only lum 142.1 vs grass 167.5, so trees read as darker
+    # grass. tree_variants() builds four opaque alternatives (A/B/C/D) and
     # --tree-variant writes one of them into the atlas; see the module docstring.
     grass = cell("field", 16, 64)
     dirt_raw = cell("field", 16, 16)
@@ -763,9 +827,10 @@ def main():
     dirt, dirt_bg = ensure_opaque(dirt_raw, grass, "dirt")
     stone, stone_bg = ensure_opaque(stone_raw, grass, "stone")
     # Legacy behaviour, kept only so the sheet can show what is being replaced:
-    # the bush composited over grass, which reads as slightly darker grass.
+    # the bush composited over grass with no darkening, which reads as slightly
+    # darker grass.
     tree_over_grass, _tog = ensure_opaque(tree_raw, grass, "tree")
-    variants = tree_variants(tree_raw)
+    variants = tree_variants(tree_raw, grass)
     chosen_lum = {k: mean_luminance(v) for k, v in variants.items()}
     grass_lum = mean_luminance(grass)
     tree = variants[args.tree_variant]
@@ -787,14 +852,29 @@ def main():
 
     # --- tree variant measurements + verification ----------------------------
     print("tree variant candidates (mean luminance, grass = %.1f):" % grass_lum)
-    for key in ("a", "b", "c"):
-        print("  %s: lum %.1f  dark_vs_grass %.1f  opaque_frac %.3f"
+    for key in ("a", "b", "c", "d"):
+        print("  %s: lum %.1f  dark_vs_grass %.1f  edge_col_dist %.1f/%.1f  "
+              "opaque_frac %.3f"
               % (key, chosen_lum[key], grass_lum - chosen_lum[key],
+                 edge_column_distance(variants[key], grass, 0),
+                 edge_column_distance(variants[key], grass, 15),
                  opaque_fraction(variants[key])))
     print("chosen: %s" % args.tree_variant)
     gap_lum = grass_lum - chosen_lum[args.tree_variant]
     assert gap_lum >= 35.0, \
         "tree tile is only %.1f lum units darker than grass, need >= 35" % gap_lum
+    # The box check. A tile that draws a visible square on the ground differs
+    # from that ground along its own border, so the two border columns are
+    # measured against the grass tile's: the flat-backed variants A/B/C sit at
+    # 100+ per channel (that straight dark seam is the box), while D's margins
+    # are the grass cell's own pixels and measure a flat zero.
+    chosen = variants[args.tree_variant]
+    for col in (0, 15):
+        dist = edge_column_distance(chosen, grass, col)
+        print("  tree vs grass border column %d: mean channel distance %.1f "
+              "(<= 16 required)" % (col, dist))
+        assert dist <= 16.0, \
+            "tree tile column %d is %.1f from grass, so it draws a box" % (col, dist)
     four = {"grass": grass, "dirt": dirt, "stone": stone,
             "tree": variants[args.tree_variant]}
     names = sorted(four)
@@ -810,7 +890,8 @@ def main():
                  ("BUSH+GRASS", tree_over_grass),
                  ("CAND A", variants["a"]),
                  ("CAND B", variants["b"]),
-                 ("CAND C", variants["c"])]
+                 ("CAND C", variants["c"]),
+                 ("CAND D", variants["d"])]
         sw, sh = comparison_sheet(items, args.sheet)
         print("  wrote sheet  %s  %dx%d" % (args.sheet, sw, sh))
 

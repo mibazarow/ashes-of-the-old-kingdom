@@ -1951,6 +1951,134 @@ func _test_world_enemy_composition() -> void:
 	_check(archer != null and wolf != null and int(archer.get("kind")) != int(wolf.get("kind")),
 		"the cultist kind differs from the wolf kind (ranged vs melee)")
 
+	# --- the old village clearing is a ruined camp, not a bare patch -----------
+	# The six villagers moved to their own zone and left the forest holding a
+	# 48-tile dirt rectangle that explained nothing: an orange hole in the wood.
+	# It is the footprint of the camp they pulled out of now — foundation rubble
+	# with thickets growing through it — and the assertions below are the two
+	# halves of that: the ground is no longer a bare patch, the camp is really on
+	# it, and the road through it is still the walkable corridor `VillageGate`,
+	# the bots and the player's own arrival tile depend on.
+	#
+	# The two shape rules (no detached dirt, no touching stones) are the load-
+	# bearing ones, and they come off a rendered sheet of the rect rather than
+	# off taste. `,` is the road tile, so dirt that is not joined to the road is
+	# the same orange hole only smaller; `#` is a flat grey slab, so two of them
+	# edge to edge merge into one grey band, which is authored geometry that
+	# looks like nothing — the defect it is supposed to fix, in a different colour.
+	var world := scene.get_node_or_null("World")
+	_check(world != null, "the world node is present for the camp check")
+	if world != null:
+		# Read off the live zone rather than through the `Forest` class name: a
+		# class-name reference here drags `forest.gd` and everything under
+		# `ZoneBase` into the suite's own compile unit, where the autoloads those
+		# scripts use are not identifiers and the whole file stops compiling.
+		var camp: Dictionary = world.call("camp_layout")
+		var rect: Rect2i = camp.get("rect", Rect2i())
+		var spawn: Vector2i = camp.get("spawn_tile", Vector2i())
+		var clear_from_spawn := int(camp.get("clear_from_spawn", 0))
+		var dirt := 0
+		var stone := 0
+		var trees := 0
+		var painted := 0
+		for y in range(rect.position.y, rect.end.y):
+			for x in range(rect.position.x, rect.end.x):
+				painted += 1
+				var ch := String(world.call("cell_at", Vector2i(x, y)))
+				if ch == ",":
+					dirt += 1
+				elif ch == "#":
+					stone += 1
+				elif ch == "T":
+					trees += 1
+		_check(painted == 48, "the camp rect is 48 tiles (got %d)" % painted)
+		_check(dirt <= painted * 0.40,
+			"the old clearing is no longer a bare dirt patch (dirt %d of %d tiles)" % [dirt, painted])
+		_check(stone >= 5, "the foundation rubble is on the map (%d '#' tiles)" % stone)
+		_check(trees >= 3, "the wood is reclaiming the camp (%d 'T' tiles)" % trees)
+
+		# Every dirt tile inside the rect has to walk out of the rect to more
+		# dirt: dirt that cannot reach the road is a patch, and a patch is the
+		# defect this whole block exists to keep away.
+		var detached_dirt: Array[String] = []
+		for y in range(rect.position.y, rect.end.y):
+			for x in range(rect.position.x, rect.end.x):
+				if String(world.call("cell_at", Vector2i(x, y))) != ",":
+					continue
+				var open_set := _bfs_reachable(world, Vector2i(x, y), {})
+				var escaped := false
+				for seen_tile: Variant in open_set.keys():
+					var t: Vector2i = seen_tile
+					if not rect.has_point(t) \
+							and String(world.call("cell_at", t)) == ",":
+						escaped = true
+						break
+				if not escaped:
+					detached_dirt.append("(%d,%d)" % [x, y])
+		_check(detached_dirt.is_empty(),
+			"every dirt tile in the camp is joined to the road, not a patch of its own (%s)"
+				% ", ".join(detached_dirt))
+
+		# No two stones share an edge: edge-adjacent `#` merge into one grey band
+		# on screen, and a straight band across the map is what the clearing was.
+		var touching_stones: Array[String] = []
+		for y in range(rect.position.y, rect.end.y):
+			for x in range(rect.position.x, rect.end.x):
+				if String(world.call("cell_at", Vector2i(x, y))) != "#":
+					continue
+				for d: Vector2i in [Vector2i(1, 0), Vector2i(0, 1)]:
+					var n := Vector2i(x, y) + d
+					if rect.has_point(n) \
+							and String(world.call("cell_at", n)) == "#":
+						touching_stones.append("(%d,%d)+%s" % [x, y, str(d)])
+		_check(touching_stones.is_empty(),
+			"no two camp stones are edge-adjacent, so they read as stones not a wall (%s)"
+				% ", ".join(touching_stones))
+
+		# The road through the camp, and the two tiles that must never be walled
+		# in: the arrival tile and the door to the village.
+		var spawn_ch := String(world.call("cell_at", spawn))
+		_check(spawn_ch == "." or spawn_ch == ",",
+			"the arrival tile is still walkable ('%s' at %s)" % [spawn_ch, str(spawn)])
+		var gate_node := world.get_node_or_null("VillageGate") as Node2D
+		_check(gate_node != null, "the village gate is still on the west road")
+		if gate_node != null:
+			var gate_tile := Vector2i(
+				floori(gate_node.global_position.x / 16.0),
+				floori(gate_node.global_position.y / 16.0)
+			)
+			var reach := _bfs_reachable(world, spawn, {})
+			_check(reach.has(gate_tile),
+				"the road through the camp still walks from the arrival tile to VillageGate (%s)" % str(gate_tile))
+
+		# No solid camp prop on the arrival tile's doorstep: a post two tiles
+		# south-east of the spawn closed the corner the player steps diagonally
+		# through and cost a fifth of the diagonal speed the `diagonal` group
+		# measures. The clearance is a constant so this stays a rule, not luck.
+		var props_in_the_way: Array[String] = []
+		for key: String in ["rubble", "thicket"]:
+			for entry: Variant in camp.get(key, []):
+				var prop: Vector2i = entry
+				if maxi(absi(prop.x - spawn.x), absi(prop.y - spawn.y)) < clear_from_spawn:
+					props_in_the_way.append("%s:%s" % [key, str(prop)])
+		_check(props_in_the_way.is_empty(),
+			"every solid camp prop clears the arrival tile by %d tiles (in the way: %s)"
+				% [clear_from_spawn, ", ".join(props_in_the_way)])
+
+		# Props stay on the two rows north of the road. The lane south of them is
+		# what the bots walk east to the wolves and back west to the gate, and a
+		# stone dropped into it shows up as `watchdog_stuck` repeated until a run
+		# fails — BOT-008 failed exactly that way before the rule was written.
+		var lane_props: Array[String] = []
+		for key: String in ["rubble", "thicket"]:
+			for entry: Variant in camp.get(key, []):
+				var prop: Vector2i = entry
+				if prop.y < int(camp.get("prop_row_top", 0)) or prop.y > int(camp.get("prop_row_bottom", 0)):
+					lane_props.append("%s:%s" % [key, str(prop)])
+		_check(lane_props.is_empty(),
+			"camp props stay on rows %d..%d, out of the road lane (%s)"
+				% [int(camp.get("prop_row_top", 0)), int(camp.get("prop_row_bottom", 0)), ", ".join(lane_props)])
+
 	scene.queue_free()
 	await process_frame
 	completed["world_composition"] = true
@@ -3140,6 +3268,26 @@ func _test_skills() -> void:
 		if SkillDB.skills_of_school(school).size() != 2:
 			two_each = false
 	_check(two_each, "every school has exactly 2 skills")
+
+	# The school id in the JSON is a program key, and the HUD used to print it
+	# straight onto the line under the player's feet — `· fire` where a player
+	# reads prose. Every school the JSON declares now has a Russian word, and a
+	# school it does not declare comes back as its own id rather than being
+	# quietly mislabelled with some other school's name.
+	_check(SkillDB.school_name("fire") == "огонь", "school_name renders fire as огонь")
+	_check(SkillDB.school_name("ice") == "лёд", "school_name renders ice as лёд")
+	_check(SkillDB.school_name("lightning") == "молния", "school_name renders lightning as молния")
+	_check(SkillDB.school_name("nature") == "природа", "school_name renders nature as природа")
+	_check(SkillDB.school_name("shadow") == "shadow",
+		"school_name leaves an unknown school as the raw id")
+	_check(SkillDB.school_name("") == "", "school_name leaves the empty school empty")
+	var all_schools_named := true
+	for school in school_list:
+		if SkillDB.school_name(school) == school:
+			all_schools_named = false
+	_check(all_schools_named,
+		"every school the JSON declares has a Russian display name")
+
 	_check(SkillDB.is_shape("fire_bolt", "projectile"), "fire_bolt is a projectile")
 	_check(SkillDB.is_shape("fire_burst", "aoe"), "fire_burst is an aoe")
 	_check(SkillDB.is_shape("ice_barrier", "self"), "ice_barrier is self-target")
@@ -9738,6 +9886,41 @@ func _test_zone_registry() -> void:
 			print("    floor %-8s %s  vs  %-8s %s  ->  %.2f:1" % [
 				za, str((grass_means[za] as Color) * 255.0).substr(1, 20),
 				zb, str((grass_means[zb] as Color) * 255.0).substr(1, 20), grass_pair])
+	# --- the tree tile must not read as a dark box ------------------------------
+	# The tree used to be the bush composited over a flat dark base, and a flat
+	# colour has four straight edges: on screen every tree drew a 16x16 square on
+	# the ground, because its border columns differed from the grass it was laid
+	# next to by 114 units per channel. The shipped tile paints the bush over the
+	# grass cell itself and darkens only the silhouette the bush covers, so its
+	# margins are the grass cell's own pixels. Both halves are measured from the
+	# PNG bytes: the border columns must match grass (no box), and the tile must
+	# still sit far enough below grass to read as an obstacle (not a patch of
+	# darker lawn). The 35-unit bar is a base-palette bar — the per-zone shifts
+	# compress absolute luma (the dungeon's whole palette tops out around 68), so
+	# the other three zones are held to "clearly darker", not to the same number.
+	var tree_gap_worst := 1.0e9
+	var tree_gap_worst_zone := ""
+	for zid: String in expected_atlases:
+		var tree_atlas := _atlas_image(String(expected_atlases[zid]))
+		if tree_atlas == null:
+			_check(false, "the %s atlas decodes for the tree tile check" % zid)
+			continue
+		var edge := (_atlas_edge_column_distance(tree_atlas, 0)
+				+ _atlas_edge_column_distance(tree_atlas, 15)) * 0.5
+		_check(edge <= 16.0,
+			"%s tree tile border columns match its grass (mean channel distance %.1f, <= 16)"
+				% [zid, edge])
+		var gap := _atlas_cell_luma(tree_atlas, 0) - _atlas_cell_luma(tree_atlas, 48)
+		_check(gap >= 10.0,
+			"%s tree tile reads as an obstacle: %.1f luma units below its grass (>= 10)" % [zid, gap])
+		if gap < tree_gap_worst:
+			tree_gap_worst = gap
+			tree_gap_worst_zone = zid
+		if zid == "forest":
+			_check(gap >= 35.0,
+				"the forest tree tile is %.1f luma units below grass (>= 35)" % gap)
+	print("    tree vs grass luma gap: weakest %s at %.1f, forest bar 35"
+			% [tree_gap_worst_zone, tree_gap_worst])
 	# The village is the one zone deliberately painted from another zone's atlas:
 	# it is the last human clearing at the forest's edge, so it shares the forest
 	# floor on purpose. Pin that, so the reuse above (four distinct atlases for
@@ -11222,6 +11405,20 @@ func _test_skills_panel() -> void:
 	_check(gs.mana == mana_before - 7,
 		"the cast spent shock's 7 mana, not fire_bolt's 8 (spent %d)" % (mana_before - gs.mana))
 
+	# The bottom skill line, read off the HUD rather than off SkillDB. The panel
+	# above already printed Russian school headers; the line under the player's
+	# feet printed the raw school id (`· lightning`), which is the defect this
+	# pins on the text actually shown. Read while `shock` is the selection, so it
+	# costs the group no extra skill changes to set up.
+	hud.call("_refresh_skill")
+	var skill_line := String(hud.call("get_skill_line_text"))
+	_check(skill_line.contains("· молния"),
+		"the HUD skill line names the selected school in Russian (got '%s')" % skill_line)
+	_check(not skill_line.contains("lightning"),
+		"the HUD skill line leaks no raw school id (got '%s')" % skill_line)
+	_check(skill_line.contains("Разряд") and skill_line.contains("7 маны"),
+		"the HUD skill line still names the skill and its cost (got '%s')" % skill_line)
+
 	# Selecting a locked skill changes nothing.
 	var sel_before: String = gs.selected_skill
 	hud.call("skills_select_row", 5)  # chain_lightning (locked)
@@ -12000,6 +12197,33 @@ func _atlas_floor_max_share(path: String) -> float:
 	for key: String in shares.keys():
 		best = maxi(best, int(shares[key]))
 	return float(best) / 512.0
+
+
+## Mean Rec.601 luma (0.299R+0.587G+0.114B over 0..255) of one 16x16 atlas cell
+## starting at `x0`. `tools/import_ninja_sprites.py` measures the tree-vs-grass
+## gap with the same formula, so the suite reads the number the generator
+## asserted rather than a WCAG-flavoured variant of it.
+func _atlas_cell_luma(img: Image, x0: int) -> float:
+	var total := 0.0
+	for y in range(16):
+		for x in range(x0, x0 + 16):
+			var c := img.get_pixel(x, y)
+			total += (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) * 255.0
+	return total / 256.0
+
+
+## Mean per-channel colour distance between the tree cell's column `col` and the
+## grass cell's same column. A tile whose border differs from the ground it is
+## laid next to draws a visible seam on every copy of itself in the TileMapLayer
+## — that straight dark edge is the box — so this is the number that says
+## "there is no box", and zero means the two columns are the same colour.
+func _atlas_edge_column_distance(img: Image, col: int) -> float:
+	var total := 0.0
+	for y in range(16):
+		var t := img.get_pixel(48 + col, y)
+		var g := img.get_pixel(col, y)
+		total += (absf(t.r - g.r) + absf(t.g - g.g) + absf(t.b - g.b)) * 255.0
+	return total / 48.0
 
 
 ## The sprite's own image, decoded from the PNG bytes its texture points at, so
