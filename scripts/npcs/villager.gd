@@ -24,8 +24,10 @@ extends Npc
 func _ready() -> void:
 	super()
 	# A saturated herb green, distinct from the merchant's deep azure and the
-	# smith's charcoal, so the three code-built villagers read apart on the one
-	# shared sprite.
+	# smith's charcoal. Each of the three already wears its own sprite from
+	# `Actor/Character/` of the Ninja Adventure pack (`npc_mila.png` and the
+	# other named-villager sheets); this tint is a deliberate readability
+	# treatment on top of real art, not a stand-in for a shared placeholder.
 	# Guarded because a bare `Villager` built without the world's sprite has none.
 	# This is the identity hue only: the zone's brightness scalar is multiplied
 	# into it on the first processed frame by the body pass in `Npc._process`,

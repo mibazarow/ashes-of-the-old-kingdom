@@ -40,7 +40,10 @@ func _ready() -> void:
 	# A deep azure, one clear step darker and more saturated than Seris's pale
 	# mill blue so the trader and the miller never read as the same figure, and
 	# the cold opposite of the headman's warm brown and the smith's charcoal.
-	# Reuses the one placeholder sprite. The zone's brightness scalar moves only
+	# Yorek wears his own sprite (`npc_yorek.png` from `Actor/Character/Noble/`
+	# of the Ninja Adventure pack), not a shared placeholder; the tint is a
+	# deliberate readability treatment on top of real art.
+	# The zone's brightness scalar moves only
 	# the value axis of this tint on the first processed frame (see `_process`
 	# and `Npc.scale_npc_tint`); the hue authored here is the identity.
 	sprite.modulate = Color(0.30, 0.55, 0.95)

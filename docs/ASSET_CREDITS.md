@@ -7,8 +7,13 @@
 | Сгенерированные звуки | проект | CC0 (собственная работа) | `assets/audio/*.wav` |
 | Иконка | проект | CC0 (собственная работа) | `icon.svg` |
 
-Спрайты в `assets/sprites/` — реальный арт, а не заглушки: все восемь файлов
-нарезаны из CC0-пака Ninja Adventure скриптом `tools/import_ninja_sprites.py`
+Спрайты в `assets/sprites/` — реальный арт, а не заглушки: все 58 файлов
+(23 спрайтов врагов и боссов `enemy_*.png`, 9 спрайтов именованных NPC
+`npc_*.png`, 14 иконок предметов `icon_*.png`, 4 зональных атласа пола,
+базовые `player.png`/`chest.png`/`potion.png`/`coin.png`/`tiles.png` и три
+легаси-файла `wolf.png`/`archer.png`/`npc.png`, которые игровой код больше не
+использует) нарезаны из CC0-пака Ninja Adventure скриптами
+`tools/import_ninja_sprites.py` и `tools/import_item_icons.py`
 (карта источников — в таблице «Ninja Adventure: что взято» ниже). Что импорт
 действительно лёг на диск, а не остался в намерениях, доказывает доминирующий
 цвет тайла травы: **RGB(173, 188, 58)** (среднее по тайлу —
@@ -132,10 +137,13 @@ ZIP-архива, 44 из них — паки Sova) и реестр `assets/asse
 
 ### Ninja Adventure: что взято
 
-Восемь спрайтов в `assets/sprites/` — реальный арт из
+Все 58 файлов в `assets/sprites/` — реальный арт из
 `assets/assets4/ninja_adventure_asset_pack.zip` (автор **Pixel-Boy / Sparklin
-Labs**, лицензия **CC0 1.0**). Файлы нарезаны скриптом
-`tools/import_ninja_sprites.py`; размеры и имена сохранены, поэтому игровой код
+Labs**, лицензия **CC0 1.0**): у каждого из 23 врагов и боссов собственный
+спрайт 16×16 из `Actor/`, у каждого из 9 именованных NPC собственный из
+`Actor/Character/`, иконки предметов из `Items/`. Файлы нарезаны скриптом
+`tools/import_ninja_sprites.py` (базовый набор, враги, NPC, зональные атласы) и
+`tools/import_item_icons.py` (иконки); размеры и имена сохранены, поэтому игровой код
 не менялся. Распакованный пак сверен с архивом побайтово (`md5` совпали у
 `Backgrounds/Tilesets/TilesetNature.png` и
 `Actor/Character/NinjaRed/SpriteSheet.png`), ничего не скачивалось.
@@ -145,14 +153,14 @@ Labs**, лицензия **CC0 1.0**). Файлы нарезаны скрипт�
 ```bash
 unzip -q assets/assets4/ninja_adventure_asset_pack.zip -d /tmp/ninja
 python3 tools/import_ninja_sprites.py --src /tmp/ninja
-python3 tools/import_ninja_sprites.py --enemies         # девять вражеских спрайтов
+python3 tools/import_ninja_sprites.py --enemies         # 23 вражеских спрайта
 python3 tools/import_ninja_sprites.py --npcs            # девять спрайтов именованных жителей
 python3 tools/import_ninja_sprites.py --zone-variants   # четыре зональных атласа пола
 ```
 
 Скрипт детерминирован и идемпотентен: три последовательных запуска дали
-побайтово одинаковые PNG — `md5` всех восьми файлов во всех трёх прогонах
-совпали; `--enemies` и `--npcs` идемпотентны так же (два запуска `--npcs` дали
+побайтово одинаковые PNG — `md5` всех файлов базового набора во всех трёх
+прогонах совпали; `--enemies` и `--npcs` идемпотентны так же (два запуска `--npcs` дали
 побайтово одинаковые девять файлов). Уточнение к «побайтово»: байты PNG зависят
 от кодировщика, поэтому два запуска **одним и тем же** бэкендом дают
 идентичные файлы, а PIL и pure-Python кодируют те же пиксели разными байтами
@@ -199,8 +207,8 @@ RIGHT(col3)**:
 | Файл проекта | Размер | Источник в паке | Ячейка | Примечание |
 | --- | --- | --- | --- | --- |
 | `player.png` | 64×16 | `Actor/Character/NinjaRed/SpriteSheet.png` | (0,0) DOWN, (16,0) UP, (48,0) RIGHT, (0,0) резерв | ряд 0 — стойка |
-| `wolf.png` | 16×16 | `Actor/Animal/Dog/SpriteSheet.png` | (0,0) | лист только вид-сбоку, взят кадр 0 |
-| `archer.png` | 16×16 | `Actor/Character/Hunter/SpriteSheet.png` | (0,0) | |
+| `wolf.png` | 16×16 | `Actor/Animal/Dog/SpriteSheet.png` | (0,0) | лист только вид-сбоку, взят кадр 0; более не используется игровым кодом: у пепельного волка собственный `enemy_ash_wolf.png` |
+| `archer.png` | 16×16 | `Actor/Character/Hunter/SpriteSheet.png` | (0,0) | более не используется игровым кодом: у лучников собственные `enemy_ash_archer.png` / `enemy_ruin_skeleton_archer.png` |
 | `npc.png` | 16×16 | `Actor/Character/Villager/SpriteSheet.png` | (0,0) | более не используется игровым кодом: у девяти именованных жителей собственные листы, см. «Девять именованных жителей» ниже |
 | `chest.png` | 16×16 | `Items/Treasure/LittleTreasureChest.png` | (0,0) | закрытый сундук |
 | `potion.png` | 16×16 | `Items/Potion/LifePot.png` | 9×11 по центру | |

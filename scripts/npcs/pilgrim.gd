@@ -43,8 +43,11 @@ func _ready() -> void:
 	display_name = "Пепельный Паломник"
 	speaker_id = "pilgrim"
 	super()
-	# A grey-violet cloak on the one shared NPC sprite (no new sprite file):
-	# the violet cast is what keeps him a person and not a second grey blob —
+	# A grey-violet cloak on his own sprite (`npc_pilgrim.png` from
+	# `Actor/Character/Spirit/` of the Ninja Adventure pack — the one sprite he
+	# genuinely shares is only across the four zones he walks, not with other
+	# NPCs): the violet cast is what keeps him a person and not a second grey
+	# blob —
 	# distinct from the herbwife's green, the merchant's azure, the smith's
 	# charcoal and the undercroft watchwoman's cool steel. Guarded because a
 	# bare `Pilgrim` built without the world's sprite has none. Identity hue

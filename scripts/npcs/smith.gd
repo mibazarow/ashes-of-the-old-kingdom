@@ -7,8 +7,10 @@ extends Area2D
 ## The smith owns the one `CraftManager` for its station, built over the live
 ## `GameState`, so the recipes, the prices and the unlock flags it shows are the
 ## player's real ones — and a test can build the same manager over a throwaway
-## state. Built entirely in code (no scene) so it reuses the shared npc sprite with
-## a distinct tint and joins the `interactable` group exactly like Edrik and Yorek.
+## state. Built entirely in code (no scene); the sprite is his own
+## `npc_bran.png` from `Actor/Character/` of the Ninja Adventure pack with a
+## deliberate identity tint on top of the real art, and he joins the
+## `interactable` group exactly like Edrik and Yorek.
 
 @export var display_name: String = "Кузнец Бран"
 @export var sprite_texture: Texture2D

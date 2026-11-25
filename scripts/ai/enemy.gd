@@ -184,8 +184,9 @@ static func outline_material(outline_color: Color = OUTLINE_DARK) -> ShaderMater
 
 
 ## The body modulate a type wears in a zone (CRITIC-P1-18): the type's own hue
-## and saturation at full value — so a reused placeholder sprite still reads as a
-## different creature — scaled by the zone's brightness scalar. Bright on the
+## and saturation at full value — a deliberate readability treatment on top of
+## each enemy's own sprite from the pack, not a recoloured placeholder —
+## scaled by the zone's brightness scalar. Bright on the
 ## dark floors, dark on the light ones, so the body separates from the floor it
 ## stands on. Pure data; the readability test derives the same colour per zone.
 static func readable_body_tint(type: StringName, zone_scalar: Color) -> Color:
@@ -214,9 +215,11 @@ static func readable_body_tint(type: StringName, zone_scalar: Color) -> Color:
 ## radius and pushes straight in: the ranged minimum distance (back off below
 ## `MIN_RANGED_RANGE`, refuse to shoot inside it) is inert while it is set.
 @export var charge_on_sight: bool = false
-## Colour of this enemy's own sprite, so a reused placeholder sprite still reads
-## as a different creature. The damage flash returns to this colour rather than
-## to plain white, otherwise the first hit would wash the identity away.
+## Colour of this enemy's own sprite: every enemy already wears its own art from
+## `Actor/` of the Ninja Adventure pack, so this is a light per-zone readability
+## tint on top of real art, not a stand-in for a shared sprite. The damage flash
+## returns to this colour rather than to plain white, otherwise the first hit
+## would wash the identity away.
 @export var sprite_tint: Color = Color.WHITE
 
 ## --- behaviour traits (spec §10) ---------------------------------------------
@@ -344,10 +347,10 @@ func _ready() -> void:
 	_set_hitbox(false)
 	# Readability pass (CRITIC-P1-18): the body tint and the silhouette outline
 	# are chosen for the zone this enemy actually stands in, so no enemy
-	# camouflages into its own floor. The body keeps the type's hue (a reused
-	# placeholder sprite still reads as a different creature) at the zone's
-	# brightness; the outline flips to light on the dark floors and stays dark on
-	# the light ones. With no zone above (a bare test arena) the forest defaults
+	# camouflages into its own floor. The body keeps the type's hue (a
+	# deliberate readability treatment on top of its own sprite from the pack,
+	# not a recoloured placeholder) at the zone's brightness; the outline flips
+	# to light on the dark floors and stays dark on the light ones. With no zone above (a bare test arena) the forest defaults
 	# apply — still a readable non-white tint over a dark silhouette.
 	var zone := _readability_zone()
 	var zone_scalar: Color = zone.call("enemy_body_tint") if zone != null else Color(0.5, 0.5, 0.5)
