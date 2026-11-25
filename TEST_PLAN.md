@@ -41,7 +41,7 @@ TESTS='godot --headless --path . --script res://tests/test_core.gd'   # $TESTS
 
 | Уровень | Что покрывает | Команда | Ожидаемый результат |
 | --- | --- | --- | --- |
-| unit | Чистая логика: `DamageResolver`, `GameState`, `QuestManager`, `SaveManager`, `ItemDB`, `SkillDB`, `DialogueDB`, `ShopManager`, `CraftManager`, `StatusComponent`, `Combinations`, `InputBindings` | `$TESTS` | `failures: 0`, строка `got 65/65`, `checks: 3470` |
+| unit | Чистая логика: `DamageResolver`, `GameState`, `QuestManager`, `SaveManager`, `ItemDB`, `SkillDB`, `DialogueDB`, `ShopManager`, `CraftManager`, `StatusComponent`, `Combinations`, `InputBindings` | `$TESTS` | `failures: 0`, строка `got 65/65`, `checks: 3820` |
 | integration | `main.tscn` целиком: враги, HUD, журнал, карта, сундуки, быстрый слот, умение, панель персонажа, лавка, стенд крафта, диалог, часы суток, переход между зонами, дверь и рычаг руин | `$TESTS` | те же строки, `SCRIPT ERROR` нет |
 | smoke | Чистый запуск сцены без тестов | `godot --headless --path . --quit-after 120 2>&1 \| grep -cE 'ERROR\|SCRIPT ERROR'` | `0` |
 | bot | Реальный игровой путь через `InputSource`, тринадцать сценариев `BOT-001`…`BOT-013` | `godot --headless --path . -- --bot=BOT-001` | `[bot] BOT-001 -> PASS (...)` |
@@ -134,7 +134,9 @@ TESTS='godot --headless --path . --script res://tests/test_core.gd'   # $TESTS
 ## 4. Как читать результат
 
 - `$TESTS` печатает `checks: N  failures: M`. Норма — `failures: 0`.
-  Актуально на 2026-11-24: `checks: 3525  failures: 0`, 65 групп.
+  Актуально на 2026-11-25: `checks: 3820  failures: 0`, 65 групп. Число проверок
+  растёт с каждой новой проверкой, так что норма — `failures: 0` и `got 65/65`,
+  а не конкретное `N`.
 - Код возврата у Godot **не** является доказательством: движок выходит `0`
   и после ошибок времени выполнения. Смысл имеет только вывод.
 - Любая строка `ERROR` или `SCRIPT ERROR` в выводе — прогон считается

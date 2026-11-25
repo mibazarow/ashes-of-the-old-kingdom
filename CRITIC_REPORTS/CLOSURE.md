@@ -175,3 +175,53 @@ PEPEL_SCREENSHOT=/tmp/cl/cp_world.png PEPEL_SCREENSHOT_UI=world \
 My throwaway measurement scripts live in `/tmp` (`cl_render.sh`, `cl_bots.sh`,
 `cl_sprites.py`, `cl_panels.py`, `pngtool.py`, `repro.sh`) and are deliberately not added
 to the repository. The working tree is otherwise exactly `043fda8` as I found it.
+
+---
+
+## Перепроверка 2026-11-25
+
+Re-verification of the findings this file left `OPEN`/`PARTIAL`, run at HEAD
+`23133eb` (2026-11-25). This file was committed at `a079dcc` (2026-11-23); HEAD is
+**16 commits** newer (`git rev-list --count a079dcc..HEAD`), and several of the
+verdicts below were overtaken by code that had already landed by the time this
+report was written — noted per row where it applies.
+
+Nothing here is asserted from `PROCESS.md` or from a commit message. Every row was
+re-checked against the file it names, or against a probe I ran myself.
+
+| Finding | Verdict in §1–§4 above | Verdict now | Evidence (commit + file:line / test) |
+| --- | --- | --- | --- |
+| **D2-R1** — four zones, not five | OPEN | **CLOSED** | `data/zones.json` holds five entries: `forest`, `village`, `ruins`, `dungeon`, `fortress`, each with its own `script` and `entry_tile`. Commit `72e8420` («Пятая зона: деревня вынесена из леса»). The suite iterates all five by id — `tests/test_core.gd:2049` `for zone_id in ["forest", "village", "ruins", "dungeon", "fortress"]` — and `tests/test_core.gd:8882` `_test_village_safe_zone_and_quests()` drives the village as a zone, not as a district of the forest. |
+| **D4-R1** — objective vocabulary is two verbs against TZ §13.3's six | OPEN | **CLOSED** | `data/quests.json` over all 12 quests: `kill` 6, `collect` 1, `deliver` 2, `use` 1, `visit` 1, `talk` 1 — **6 distinct types**. The verbs are implemented, not just written down: `scripts/quests/quest_manager.gd:168` `objective_type()`, `:189-190` bag verbs (`collect`/`deliver` read the live bag and spend on hand-in), `:270` `_advance_stored_objective("visit", zone_id)`, `:274` `("talk", speaker_id)`, `:277-278` `notify_objective_used()`. Commit `72bc569`. Tests: synthetic quests of all four new verbs at `tests/test_core.gd:1371-1374`, hand-in spending at `:1422`, real quests read back at `:15865` (`q06_the_crown` → `visit`) and `:15869` (`q07_captain_guard` → `talk`). |
+| **D5-R1** — a standing stone hands out 5 of 12 quests | OPEN | **CLOSED** | Giver census over `data/quests.json`: `ruins_tablet` **3** (q04, q05, q06), `npc_mila` 2, `npc_oren` 2, `npc_nela` 2, `npc_edrik` 1, `npc_seris` 1, `npc_alvena` 1 — **7 givers for 12 quests**, and the tablet is no longer the largest single owner. q07/q12 moved to Орен, q08/q11 to Нела. Commit `72bc569`. |
+| **D5-R2** — no-effect option is not labelled cosmetic (TZ §12.2) | PARTIAL | **CLOSED** | The renderer now reads the flag it used to ignore: `scripts/ui/hud.gd:2200` `if option is Dictionary and bool((option as Dictionary).get("cosmetic", false))` appends `" (без последствий)"` to that option's row (`hud.gd:2201`), so the player sees which answers commit nothing. Was: `hud.gd` rendered `"> %d. %s"` from `text` only. Commit `72bc569`. Test asserts the rendered string carries the mark — `tests/test_core.gd:15116` `_check(cos_text.contains("без последствий"), …)`. |
+| **D6-R2** — pilgrim thread untracked and unjournalled | PARTIAL | **CLOSED** | `scripts/ui/hud.gd:2343-2360`: the journal gets its own pilgrim block — counts which of the four fragments were heard and where (`pilgrim_met_forest/ruins/dungeon/fortress`), and states «Правда о короле открыта» once `pilgrim_truth_known` is set; the block stays hidden until there is something to report. Was: `_refresh_journal()` iterated `QuestManager.quests` only. Commit `72bc569`. Tests: `tests/test_core.gd:16650` «the journal counts the two fragments heard», `:16655` «the journal records the truth once the last fragment is heard» — both PASS in the 3820-check run. |
+| **CRITIC-P1-18** — enemies camouflage into their own zone floor; one shared near-black outline | OPEN | **CLOSED** | The outline is chosen **per zone**: `scripts/ai/enemy.gd:162-163` `OUTLINE_DARK` / `OUTLINE_LIGHT`, cached per colour by `outline_material()` (`enemy.gd:172`), selected at `enemy.gd:357` via `zone.call("enemy_outline_color")`. The zones own the choice: `scripts/world/zone_base.gd:143`, `forest.gd:298`, `ruins.gd:242`, `dungeon.gd:266`, `fortress.gd:304` — dark ring on the light forest/ruins floors, light ring on the dark dungeon/fortress floors. Commit `a079dcc`. **The suite no longer gives false comfort either**: the hue-OR-contrast escape hatch this file criticised (`_hue_separation_deg(…) < 45.0 or contrast < 3.0`) is gone — `_hue_separation_deg` does not appear anywhere in `tests/test_core.gd` — and the replacement measures the outline itself against the zone floor (`tests/test_core.gd:12811` `outline_contrast`) and fails the run below 3:1 (`:13312`), on top of ≥90 % separated and ≥50 % of the sprite's own pixels clearing 3:1, judged against **every zone each type actually spawns in** (`READABLE_SPAWN_ZONES`, `tests/test_core.gd:12836`). |
+| **D4-R3** — content density collapses toward the finale (11 → 6 → 2 → 1 new kinds) | OPEN | **CLOSED for the collapse; one residual stands** | `godot --headless --path . --script res://CRITIC_REPORTS/probe_census.gd` at HEAD: forest 20 instances / 9 kinds, ruins 8 / 3, dungeon 15 / 6, fortress 18 / 10. Recomputed first appearance per zone in zone order: forest 9 new, ruins 3 new, dungeon 3 new, fortress **3 new** — the tail is flat at 3 instead of falling to 1, and the 18 kinds total match the roster. Boss coverage is even, not finale-starved: forest 2 (`root_mother`, `forest_warden`), ruins 1 (`captain_of_the_guard`), dungeon 1 (`bell_ringer`), fortress 1 (`king_without_crown`) — 5 bosses, at least one in every hostile zone. **Residual that is still true and was part of the original note:** the fortress still re-uses the forest's `ash_boar` (1 instance), and total hostiles are 61 against the 54 audited — so **D6-R1 (content budget) stays OPEN**. |
+
+### Still open after this re-check — unchanged
+
+| Item | Why it is still open |
+| --- | --- |
+| **D7-R3 / G3-R2 — soak duration** | `SOAK_SECONDS_DEFAULT` was raised `600.0` → **`1800.0`** (`scripts/debug_bot/bot.gd:25`), which satisfies the *window* half of §19.5/§21.2. The *run* half is not satisfied: no 30-minute BOT-010 log has been produced or published. The only soak executed while making this change was `--soak=60` → `PASS (… window=60s … goal_survived=ok)`, which proves the `--soak=` override still works, not that a half-hour session is stable. **Stays open until a ≥1800 s run is logged.** |
+| **G1-R3 — stale release artifact** | Still open, and now measurable rather than estimated: the published `v001` tag points at `45e9902` (2026-11-20) and is **48 commits** behind HEAD (`git rev-list --count v001..HEAD`). `docs/BUILD_MACOS.md` has been corrected to say 48 and to state the zip must be rebuilt before distribution. No export was run as part of this housekeeping. |
+| **CRITIC-P1-04 — `SystemFont`** | Unchanged: antialiasing is off, but the HUD font is still a platform-dependent `SystemFont` and the repo still ships no `.ttf`/`.otf`/`.fnt`. Not re-checked beyond confirming the finding was not touched by the commits above. |
+| **Human playtest** | Unchanged and unresolvable by an agent: the game has still never been played by a person. `README.md` states this plainly. |
+| **CRITIC-P1-01 — zone palette dominance** | **Not re-measured here.** `a079dcc` claims «палитры без доминанты» and the suite grew pixel checks, but I did not re-render and re-measure the dominant-pixel and ruins↔fortress contrast in this pass, so I am not moving this verdict. Treat it as unverified rather than closed. |
+| **D6-R1 — content budget vs the 5–8 h target** | Open, as above: 61 hostile instances against 54 at audit is not a 4× shortfall closed. |
+
+### Corrections to this file's own framing
+
+- §0 and §6 cite `checks: 3391`. The suite at HEAD is **`checks: 3820  failures: 0`,
+  65 groups** (`godot --headless --path . --script res://tests/test_core.gd`,
+  re-run 2026-11-25). The growth is real coverage, not a re-count.
+- §0's headline says the build "is still not releasable … one player-facing
+  readability P1 … is not fixed and is not actually covered by the green test
+  suite". Both halves of that are no longer true — see CRITIC-P1-18 above. What
+  still blocks a release is the stale artifact, the unrun long soak, and the
+  absent human playtest.
+- The per-zone outline fix landed in `a079dcc` — **the same commit that added this
+  file**. `git show a079dcc:scripts/ai/enemy.gd | grep -c OUTLINE_LIGHT` → 1, while
+  the HEAD this file claims to have re-verified (`043fda8`) has 0. The CRITIC-P1-18
+  `OPEN` verdict was therefore already stale on the day it was written.
+- **Blocker "no export templates" was false.** `~/Library/Application Support/Godot/export_templates/4.7.2.stable/` exists, its `version.txt` is `4.7.2.stable`, and it contains `windows_release_x86_64.exe` and `macos.zip`. Windows export is not blocked; it has simply never been attempted. `PROCESS.md` no longer lists it as a blocker.

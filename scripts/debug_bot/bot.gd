@@ -18,14 +18,19 @@ const QUEST_ID := "q01_ash_wolves"
 const SCENARIO_TIMEOUT := 75.0
 ## How long BOT-010 runs when nobody says otherwise, counted in simulated seconds
 ## (physics steps at 60 Hz), not in wall-clock ones. The spec's own table asks for a
-## soak of half an hour to an hour; 75 s was a smoke test that had been allowed to
-## call itself an endurance run. Six hundred seconds is the floor at which a soak can
-## actually find a slow leak, and `--soak=` moves the number for a quick local check
-## without touching the default a release gate runs on.
-const SOAK_SECONDS_DEFAULT := 600.0
-## The soak's own budget in the unit the other scenarios use, so the retreat budget
-## below can be scaled against a run that is eight times longer without the constant
-## the test suite pins having to move.
+## soak of half an hour to an hour (§19.5 BOT-010, §21.2), so the default is the floor
+## of that band: 1800 s. The numbers it replaced were a smoke test (75 s) and then a
+## tenth of the required window (600 s) allowed to call themselves an endurance run.
+## `--soak=` still moves the number for a quick local check without touching the
+## default a release gate runs on.
+const SOAK_SECONDS_DEFAULT := 1800.0
+## The soak's own budget in the unit the other scenarios use, so the retreat and
+## travel goals below can be scaled up from a short window without the constant the
+## test suite pins having to move. Both scalings are capped (×8 for the retreat
+## budget, ×4 for the travel goal), so at the 1800 s default they are already at
+## their ceiling — the caps are deliberate, not an oversight: the map is finite, and
+## a goal that kept growing with the window would eventually ask for ground the
+## forest does not have.
 const SOAK_BUDGET_REFERENCE_SECONDS := 75.0
 
 ## The watchdog (spec §19.6 «BotWatchdog»). These four numbers are the whole
@@ -1214,16 +1219,19 @@ func _scenario_soak() -> void:
 	var impulse_heals := 0
 	var retreats := 0
 	# The disengage budget scales with the window, because a budget sized for 75 s of
-	# wandering buys the same safety eight times over and then runs out with nine
-	# tenths of the run still to go. The constant the test suite pins stays what it
-	# is; only its share of a longer run grows.
+	# wandering would run out long before a long one ends. The multiplier is capped at
+	# ×8, so past a window eight times the reference the budget stops growing and a
+	# 30-minute run spends a smaller share of itself retreating than a 10-minute one
+	# does. The constant the test suite pins stays what it is.
 	var retreat_left := SOAK_RETREAT_BUDGET \
 		* clampf(soak_seconds / SOAK_BUDGET_REFERENCE_SECONDS, 1.0, 8.0)
 	# The ground the run has to cover, for the same reason: 300 px proved a hero was
-	# walking during a 75 s window, and the same 300 px over ten minutes would prove
-	# he stood still for nine of them. Capped rather than proportional, because the
-	# forest is 52x32 tiles and a wander that crossed it four times over is a
-	# different scenario, not a longer one.
+	# walking during a 75 s window, and the same 300 px over a long run would prove
+	# he stood still for nearly all of it. Capped at ×4 rather than proportional,
+	# because the forest is 52x32 tiles and a wander that crossed it four times over
+	# is a different scenario, not a longer one. The cap is reached well before the
+	# 1800 s default, so the goal is a fixed 1200 px there — a floor that catches a
+	# bot that stopped walking, not a difficulty scaled with the clock.
 	var travel_goal := 300.0 * clampf(soak_seconds / SOAK_BUDGET_REFERENCE_SECONDS, 1.0, 4.0)
 	# Instance id of the enemy the bot has broken off from, or -1. Tracked by id so
 	# the bot stops running from a corpse the moment that enemy dies.
