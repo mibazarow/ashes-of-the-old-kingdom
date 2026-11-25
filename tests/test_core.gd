@@ -2171,15 +2171,27 @@ func _check_zone_letterbox(zone_id: String, world: Node, player: Node2D, cam: Ca
 		var window := _rect_to_world(xform.affine_inverse(), Rect2(0.0, band_top, 480.0, band_h))
 		_check(window.position.y >= -0.001 and window.end.y <= map_h_px + 0.001,
 				"%s at %s: the visible window (%.1f…%.1f) is inside the map, so the frame hides void rather than floor here" % [zone_id, tile, window.position.y, window.end.y])
+		# One aggregate check per standing point, not one per nearby entity: the
+		# live spawn set is unseeded, so a per-enemy check would make the total
+		# number of checks depend on where enemies happened to spawn. The
+		# assertion is unchanged — any single offender fails it.
+		var nearby_count := 0
+		var band_offenders := 0
+		var first_offender := ""
 		for e in get_nodes_in_group("enemy") + get_nodes_in_group("interactable"):
 			var ent := e as Node2D
 			if ent == null or ent.get_parent() != world:
 				continue
 			if absf(ent.global_position.y - standing.y) > 72.0:
 				continue
+			nearby_count += 1
 			var evp: Vector2 = xform * ent.global_position
-			_check(evp.y >= band_top and evp.y <= band_bottom,
-					"%s at %s: %s within 4.5 tiles of the player is not under a band (vp %s)" % [zone_id, tile, String(ent.name), str(evp.round())])
+			if evp.y < band_top or evp.y > band_bottom:
+				band_offenders += 1
+				if first_offender == "":
+					first_offender = "%s vp %s" % [String(ent.name), str(evp.round())]
+		_check(band_offenders == 0,
+				"%s at %s: no enemy or NPC within 4.5 tiles of the player is under a band (%d nearby, %d offenders%s)" % [zone_id, tile, nearby_count, band_offenders, ("" if first_offender == "" else ", first: " + first_offender)])
 
 
 ## Every reachable tile of a live zone, evaluated in the camera's steady state for

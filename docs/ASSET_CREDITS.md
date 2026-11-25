@@ -145,12 +145,21 @@ Labs**, лицензия **CC0 1.0**). Файлы нарезаны скрипт�
 ```bash
 unzip -q assets/assets4/ninja_adventure_asset_pack.zip -d /tmp/ninja
 python3 tools/import_ninja_sprites.py --src /tmp/ninja
+python3 tools/import_ninja_sprites.py --enemies         # девять вражеских спрайтов
+python3 tools/import_ninja_sprites.py --npcs            # девять спрайтов именованных жителей
 python3 tools/import_ninja_sprites.py --zone-variants   # четыре зональных атласа пола
 ```
 
 Скрипт детерминирован и идемпотентен: три последовательных запуска дали
 побайтово одинаковые PNG — `md5` всех восьми файлов во всех трёх прогонах
-совпали. Из сглаживания только nearest-neighbour, размытия нет. Запуск
+совпали; `--enemies` и `--npcs` идемпотентны так же (два запуска `--npcs` дали
+побайтово одинаковые девять файлов). Уточнение к «побайтово»: байты PNG зависят
+от кодировщика, поэтому два запуска **одним и тем же** бэкендом дают
+идентичные файлы, а PIL и pure-Python кодируют те же пиксели разными байтами
+(проверено: все девять файлов совпали побайтово при двух PIL-запусках и
+покомпонентно по RGBA между PIL и pure-Python). Значит, перегенерация другим
+бэкендом не меняет картинку, но перепишет файл — после неё всё равно нужен
+`--import`. Из сглаживания только nearest-neighbour, размытия нет. Запуск
 `--zone-variants` исходников не требует: он берёт готовый `tiles.png` и
 дописывает четыре атласа (см. «Атласы пола по зонам» ниже).
 
@@ -192,11 +201,49 @@ RIGHT(col3)**:
 | `player.png` | 64×16 | `Actor/Character/NinjaRed/SpriteSheet.png` | (0,0) DOWN, (16,0) UP, (48,0) RIGHT, (0,0) резерв | ряд 0 — стойка |
 | `wolf.png` | 16×16 | `Actor/Animal/Dog/SpriteSheet.png` | (0,0) | лист только вид-сбоку, взят кадр 0 |
 | `archer.png` | 16×16 | `Actor/Character/Hunter/SpriteSheet.png` | (0,0) | |
-| `npc.png` | 16×16 | `Actor/Character/Villager/SpriteSheet.png` | (0,0) | |
+| `npc.png` | 16×16 | `Actor/Character/Villager/SpriteSheet.png` | (0,0) | более не используется игровым кодом: у девяти именованных жителей собственные листы, см. «Девять именованных жителей» ниже |
 | `chest.png` | 16×16 | `Items/Treasure/LittleTreasureChest.png` | (0,0) | закрытый сундук |
 | `potion.png` | 16×16 | `Items/Potion/LifePot.png` | 9×11 по центру | |
 | `coin.png` | 8×8 | `Items/Treasure/GoldCoin.png` | 7×7 → nearest-neighbour 8×8 | |
 | `tiles.png` | 64×16 | трава ← `Backgrounds/Tilesets/TilesetField.png` (16,64); земля ← `Backgrounds/Tilesets/TilesetField.png` (16,16); камень ← `Backgrounds/Tilesets/TilesetNature.png` (288,240); дерево ← `Backgrounds/Tilesets/TilesetNature.png` (192,144) | порядок в листе: grass, dirt, stone, tree | все четыре тайла 100 % непрозрачны; дерево — куст на траве с затемнённым силуэтом, без подложки, см. абзац «Композит дерева» ниже |
+
+**Девять именованных жителей (`--npcs`).** Раньше все девять персонажей
+рисовались одним `npc.png` и различались только оттенком `modulate`, то есть на
+экране сидел один лысый деревенщина в девяти цветах. Режим `--npcs` берёт у
+каждого свой лист и режет из него кадр DOWN-стояния (0,0) того же размера 16×16
+в `assets/sprites/npc_<speaker_id>.png`; имя файла совпадает с `speaker_id` из
+`data/dialogue.json`, поэтому спрайт и разговор называют одного человека.
+Порядок столбцов и правило «один лист — один персонаж» те же, что у `--enemies`:
+ни один лист ниже не занят врагом, и ни один лист не выдан дважды (скрипт
+падает на обоих случаях). Зональный оттенок тела и обводка силуэта остались на
+своих местах: лист даёт фигуре тело, оттенок по-прежнему даёт ей личность.
+
+| Файл проекта | Источник в паке | Чем это выглядит |
+| --- | --- | --- |
+| `npc_edrik.png` | `Actor/Character/OldMan3/SpriteSheet.png` | старейшина: широкая шляпа, белая борода |
+| `npc_yorek.png` | `Actor/Character/Noble/SpriteSheet.png` | купец: шляпа с полями, сюртук, выбрит |
+| `npc_bran.png` | `Actor/Character/FighterRed/SpriteSheet.png` | кузнец: лысый, с голым торсом |
+| `npc_mila.png` | `Actor/Character/Villager2/SpriteSheet.png` | травница: кудрявые волосы |
+| `npc_seris.png` | `Actor/Character/Woman/SpriteSheet.png` | платок, платье |
+| `npc_alvena.png` | `Actor/Character/Cavegirl/SpriteSheet.png` | дубильщица: шкуры и листья |
+| `npc_nela.png` | `Actor/Character/NinjaGray/SpriteSheet.png` | странница в капюшоне |
+| `npc_oren.png` | `Actor/Character/GladiatorBlue/SpriteSheet.png` | солдат с гребнем на шлеме |
+| `npc_pilgrim.png` | `Actor/Character/Spirit/SpriteSheet.png` | паломник: капюшон, бледное лицо |
+
+Три соответствия подобраны «ближайшее из доступного», а не точные, и это
+записано: у пака нет ни кузнеца/дубильщика, ни офицера, ни странницы. Альвена
+взята у `Cavegirl` (шкуры и листья — единственный humanoid-лист с таким
+видом), Орен у `GladiatorBlue` (гребень на шлеме — самый военный силуэт;
+`Hunter`, `Samurai`, `Knight` и `Sultan` уже носят враги). Нела взята у
+`NinjaGray` не только из-за капюшона: это самый светлый капюшон в паке
+(яркость 130), а `Npc.scale_npc_tint` зажимает `modulate` единицей, поэтому
+тёмную текстуру в склепе нельзя вытянуть ярче неё самой.
+
+Отдельная ловушка, найденная при нарезке: в паке **три** каталога с именем
+`Spirit` (`Actor/Character`, `Actor/Monster` и `FX/Magic`), и старый поиск
+`resolve()` по имени родительской папки приносил Паломнику пустой кадр из
+`FX/Magic`. Теперь сначала ищется полное совпадение относительного пути, и
+только если его нет — прежнее совпадение по имени родителя.
 
 **Композит дерева.** Ячейка дерева `TilesetNature.png` px(192,144) — куст,
 нарисованный на пустом фоне: замер дал **118 прозрачных пикселей из 256**

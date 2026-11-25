@@ -241,7 +241,11 @@ const BONE_CRAWLER_D_ANCHOR := Vector2i(20, 12)
 ## reachable, off the road itself, and eight tiles from the arrival so arriving
 ## never opens his prompt under the player's feet.
 const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
-const NPC_SPRITE := "res://assets/sprites/npc.png"
+## The two figures of this zone, each on its OWN sprite (one sheet per character,
+## `tools/import_ninja_sprites.py --npcs`): the deserter a crested-helmet soldier
+## and the pilgrim a hooded cloak, no longer the same bald villager in two tints.
+const OREN_SPRITE := "res://assets/sprites/npc_oren.png"
+const PILGRIM_SPRITE := "res://assets/sprites/npc_pilgrim.png"
 const OREN_ANCHOR := Vector2i(21, 10)
 const OREN_SCAN_RADIUS := 0
 const OREN_CLEAR_FROM_ENTRY := 8
@@ -498,7 +502,7 @@ func _spawn_oren(entry: Vector2i, reserved: Dictionary) -> void:
 	oren.name = "Oren"
 	oren.set("display_name", "Офицер Орен")
 	oren.set("speaker_id", "oren")
-	oren.set("sprite_texture", load(NPC_SPRITE))
+	oren.set("sprite_texture", load(OREN_SPRITE))
 	# Орен now carries two quests: the word he needs carried down to the watchwoman
 	# (q07, moved off the tablet so the stone no longer hands out most of the chain)
 	# and his own officer's seal (q12). Only q12 is a spoken conversation, so
@@ -507,7 +511,7 @@ func _spawn_oren(entry: Vector2i, reserved: Dictionary) -> void:
 	oren.set("dialogue_quest_id", "q12_officers_seal")
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load(NPC_SPRITE)
+	spr.texture = load(OREN_SPRITE)
 	oren.add_child(spr)
 	oren.position = _tile_center(tile.x, tile.y)
 	add_child(oren)
@@ -527,10 +531,10 @@ func _spawn_pilgrim(entry: Vector2i, reserved: Dictionary) -> void:
 	var pilgrim := Pilgrim.new()
 	pilgrim.name = "PilgrimFortress"
 	pilgrim.zone_id = "fortress"
-	pilgrim.sprite_texture = load(NPC_SPRITE)
+	pilgrim.sprite_texture = load(PILGRIM_SPRITE)
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load(NPC_SPRITE)
+	spr.texture = load(PILGRIM_SPRITE)
 	pilgrim.add_child(spr)
 	pilgrim.position = _tile_center(tile.x, tile.y)
 	add_child(pilgrim)

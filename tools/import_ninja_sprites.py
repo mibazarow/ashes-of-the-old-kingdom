@@ -44,6 +44,16 @@ comparison PNG of grass, bush-over-grass, A, B, C and D.
 Uses PIL when it is installed; otherwise falls back to a pure-Python PNG
 codec (zlib + struct). Deterministic, idempotent, no randomness.
 
+--npcs is a fourth mode with the same contract for the named cast: it slices the
+16x16 down-facing idle cell (0,0) of one dedicated sheet per NPC (NPC_SOURCES
+below) into assets/sprites/npc_<npc_id>.png, so the nine named figures are nine
+different people instead of one bald villager wearing nine tints. The same
+measured sheet contract applies (64x112, 4x7 of 16x16, DOWN col0, row0 idle), the
+same loud failure on a missing or too-small source, and the same one-sheet-per-
+figure rule the enemy mode asserts. The per-zone body tint and the silhouette
+outline stay exactly where they were: the sprite gives each figure a body, the
+tint still gives them their identity colour.
+
 --zone-variants is a separate mode that needs no source pack: it derives the
 four per-zone floor atlases (tiles_forest/ruins/dungeon/fortress.png) from the
 shipped tiles.png so each zone gets its own floor palette (CRITIC-P1-01). See
@@ -621,6 +631,74 @@ def generate_enemies(srcdir, outdir):
           % (len(ENEMY_SOURCES), len(seen_sheets)))
 
 
+# --- per-NPC dedicated sheets (--npcs mode) -----------------------------------
+# npc id -> the ONE sheet its sprite is sliced from. The id is the character's
+# `speaker_id` (the same ASCII key data/dialogue.json uses), so the file name and
+# the conversation data name the same person. Chosen as the closest humanoid the
+# pack offers for each role out of the 91 Actor/Character sheets (90 of them
+# 64x112; Child and OldWoman are 64x32 but still carry a full 16x16 down-idle at
+# (0,0)); every sheet here is used by exactly one NPC, and none of them is a
+# sheet an enemy already wears (ENEMY_SOURCES above), so no figure on screen is
+# a recoloured boss. Where the pack has no true match the closest sheet is taken
+# and the gap is documented:
+#   alvena  no armourer/tanner sheet -> Cavegirl (hides-and-leaves look of a
+#           woman who works skins; the pack's only other female humanoids are
+#           Woman, Princess, OldWoman and the Villager girls, all already taken
+#           by or closer to another village figure)
+#   oren    no officer sheet         -> GladiatorBlue (crested helmet, the most
+#           military silhouette available; Hunter, Samurai, Knight and Sultan
+#           would have collided with an enemy's sheet)
+#   nela    no traveller sheet       -> NinjaGray (hooded and wrapped, and the
+#           brightest hood in the pack at lum 130 — an NPC's modulate is capped
+#           at 1.0 by Npc.scale_npc_tint, so a dark texture can never be pushed
+#           brighter than itself on the near-black undercroft floor)
+NPC_SOURCES = {
+    "edrik":   "Character/OldMan3/SpriteSheet.png",      # headman: broad hat, white beard
+    "yorek":   "Character/Noble/SpriteSheet.png",        # merchant: brimmed hat, coat, clean-shaven
+    "bran":    "Character/FighterRed/SpriteSheet.png",   # smith: bald, bare-chested bruiser
+    "mila":    "Character/Villager2/SpriteSheet.png",    # herbwife: villager, dark curly hair
+    "seris":   "Character/Woman/SpriteSheet.png",        # miller's daughter: headscarf, dress
+    "alvena":  "Character/Cavegirl/SpriteSheet.png",     # tanner: hides-and-leaves look
+    "nela":    "Character/NinjaGray/SpriteSheet.png",    # survivor: hooded, bright on a dark floor
+    "oren":    "Character/GladiatorBlue/SpriteSheet.png",  # deserter: crested-helmet soldier
+    "pilgrim": "Character/Spirit/SpriteSheet.png",       # ash pilgrim: hooded cloak, pale face
+}
+
+
+def generate_npcs(srcdir, outdir):
+    """Slice the down-idle 16x16 cell (0,0) of each mapped sheet into
+    assets/sprites/npc_<npc_id>.png. Fails loudly on a missing source."""
+    print("backend: %s" % ("PIL" if HAVE_PIL else "pure-Python"))
+    print("source : %s" % srcdir)
+    print("output : %s" % outdir)
+    os.makedirs(outdir, exist_ok=True)
+    seen_sheets = {}
+    for npc_id in sorted(NPC_SOURCES):
+        rel = NPC_SOURCES[npc_id]
+        if rel in seen_sheets:
+            raise SystemExit("ERROR: sheet %s mapped to both %s and %s"
+                             % (rel, seen_sheets[rel], npc_id))
+        seen_sheets[rel] = npc_id
+        path = resolve(srcdir, rel)
+        w, h, grid = load_rgba(path)
+        if w < 16 or h < 16:
+            raise SystemExit("ERROR: %s is %dx%d, too small for a 16x16 idle "
+                             "frame (%s)" % (rel, w, h, npc_id))
+        cell = blank(16, 16)
+        blit_cell(cell, 0, 0, grid, 0, 0, 16, 16)
+        cov = sum(1 for r in cell for p in r if p[3] > 8) / 256.0
+        if cov <= 0.0:
+            raise SystemExit("ERROR: down-idle frame of %s is empty (%s)"
+                             % (rel, npc_id))
+        out = os.path.join(outdir, "npc_%s.png" % npc_id)
+        save_rgba(out, 16, 16, cell)
+        print("  %-10s %-38s %2dx%-2d -> npc_%s.png  alpha coverage %.1f%%  "
+              "lum %.1f" % (npc_id, rel, w, h, npc_id, cov * 100,
+                            mean_luminance(cell)))
+    print("  %d npcs, %d distinct sheets, all unique"
+          % (len(NPC_SOURCES), len(seen_sheets)))
+
+
 # --- per-zone floor palettes (CRITIC-P1-01) ----------------------------------
 # All four zones used to paint from one byte-identical tiles.png, so the forest
 # grass RGB(173,188,58) measured 65%/79%/39%/92% of the sampled floor in
@@ -822,16 +900,33 @@ def resolve(srcdir, rel):
             return c
     base = os.path.basename(rel)
     parent = os.path.basename(os.path.dirname(rel))
+    tail = os.path.normpath(rel).split(os.sep)
     for root, _dirs, files in os.walk(srcdir):
-        # the pack reuses "SpriteSheet.png" hundreds of times: match the
-        # parent directory too, or a walk hit on an unrelated folder with the
-        # same file name wins (Hunter once resolved to NinjaGreen this way)
+        # the pack reuses "SpriteSheet.png" hundreds of times: match the WHOLE
+        # relative path, not just the file name. Parent-name matching alone was
+        # already the documented Hunter/NinjaGreen trap and still is: the pack
+        # has three directories named Spirit (Actor/Character, Actor/Monster and
+        # FX/Magic), and a walk hit on FX/Magic/Spirit handed the pilgrim an
+        # empty FX frame instead of the hooded figure under Actor/Character.
+        if base in files and _path_ends_with(root, tail[:-1]):
+            return os.path.join(root, base)
+    for root, _dirs, files in os.walk(srcdir):
+        # fall back to the parent directory name, for a pack whose tree differs
+        # from the documented one (the same rule that fixed Hunter once)
         if base in files and os.path.basename(root) == parent:
             return os.path.join(root, base)
     for root, _dirs, files in os.walk(srcdir):
         if base in files:
             return os.path.join(root, base)
     raise SystemExit("ERROR: source not found under %s: %s" % (srcdir, rel))
+
+
+def _path_ends_with(path, parts):
+    """True when `path` ends with the directory components `parts`."""
+    if not parts:
+        return False
+    comps = [c for c in os.path.normpath(path).split(os.sep) if c]
+    return len(comps) >= len(parts) and comps[-len(parts):] == parts
 
 
 def main():
@@ -864,12 +959,22 @@ def main():
                          "enemy type (ENEMY_SOURCES) into "
                          "assets/sprites/enemy_<enemy_type>.png; fails loudly "
                          "if a source sheet is missing")
+    ap.add_argument("--npcs", action="store_true",
+                    help="slice one dedicated 16x16 down-idle sprite per named "
+                         "NPC (NPC_SOURCES) into assets/sprites/npc_<id>.png; "
+                         "fails loudly if a source sheet is missing")
     args = ap.parse_args()
 
     if args.enemies:
         if not os.path.isdir(args.src):
             raise SystemExit("ERROR: source dir does not exist: %s" % args.src)
         generate_enemies(args.src, args.out)
+        return
+
+    if args.npcs:
+        if not os.path.isdir(args.src):
+            raise SystemExit("ERROR: source dir does not exist: %s" % args.src)
+        generate_npcs(args.src, args.out)
         return
 
     if args.zone_variants:

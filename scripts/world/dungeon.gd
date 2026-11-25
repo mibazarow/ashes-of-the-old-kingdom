@@ -213,7 +213,14 @@ const BELL_RINGER_CLEAR_FROM_ENTRY := 10
 ## reachable from the crossing, and eight tiles from the arrival stair so arriving
 ## never opens her prompt under the player's feet.
 const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
-const NPC_SPRITE := "res://assets/sprites/npc.png"
+## The two figures of this zone, each on its OWN sprite (one sheet per character,
+## `tools/import_ninja_sprites.py --npcs`): the watchwoman a hooded traveller and
+## the pilgrim a hooded cloak, no longer the same bald villager in two tints.
+## Nela's sheet is the brightest hood in the pack — an NPC's modulate is capped
+## at 1.0 by `Npc.scale_npc_tint`, so on this near-black floor a dark texture
+## could never be pushed brighter than itself.
+const NELA_SPRITE := "res://assets/sprites/npc_nela.png"
+const PILGRIM_SPRITE := "res://assets/sprites/npc_pilgrim.png"
 const NELA_ANCHOR := Vector2i(16, 6)
 const NELA_SCAN_RADIUS := 0
 const NELA_CLEAR_FROM_ENTRY := 8
@@ -532,7 +539,7 @@ func _spawn_nela(entry: Vector2i, reserved: Dictionary) -> void:
 	nela.name = "Nela"
 	nela.set("display_name", "Смотрящая Нела")
 	nela.set("speaker_id", "nela")
-	nela.set("sprite_texture", load(NPC_SPRITE))
+	nela.set("sprite_texture", load(NELA_SPRITE))
 	# Нела now carries two quests: the bell she needs silenced below the stair (q08,
 	# moved off the tablet so the stone no longer hands out most of the chain) and her
 	# own light-the-way (q11). Only q11 is a spoken conversation — it is the one with a
@@ -542,7 +549,7 @@ func _spawn_nela(entry: Vector2i, reserved: Dictionary) -> void:
 	nela.set("dialogue_quest_id", "q11_light_the_way")
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load(NPC_SPRITE)
+	spr.texture = load(NELA_SPRITE)
 	nela.add_child(spr)
 	nela.position = _tile_center(tile.x, tile.y)
 	add_child(nela)
@@ -562,10 +569,10 @@ func _spawn_pilgrim(entry: Vector2i, reserved: Dictionary) -> void:
 	var pilgrim := Pilgrim.new()
 	pilgrim.name = "PilgrimDungeon"
 	pilgrim.zone_id = "dungeon"
-	pilgrim.sprite_texture = load(NPC_SPRITE)
+	pilgrim.sprite_texture = load(PILGRIM_SPRITE)
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load(NPC_SPRITE)
+	spr.texture = load(PILGRIM_SPRITE)
 	pilgrim.add_child(spr)
 	pilgrim.position = _tile_center(tile.x, tile.y)
 	add_child(pilgrim)

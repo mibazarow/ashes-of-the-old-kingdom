@@ -16,6 +16,19 @@ extends ZoneBase
 const NPC_SCENE := "res://scenes/npcs/edrik.tscn"
 const VILLAGER_SCRIPT := "res://scripts/npcs/villager.gd"
 
+## Each named figure's OWN sprite, sliced one-per-sheet by
+## `tools/import_ninja_sprites.py --npcs` (see docs/ASSET_CREDITS.md for the
+## sheet each one comes from). Before this the whole cast shared `npc.png` and
+## differed only by tint, so six villagers read as one bald man in six colours.
+## The file name is the character's `speaker_id` — the same ASCII key
+## `data/dialogue.json` uses — so the sprite and the conversation name one
+## person. Edrik's own sprite is set in `edrik.tscn`, not here.
+const YOREK_SPRITE := "res://assets/sprites/npc_yorek.png"
+const BRAN_SPRITE := "res://assets/sprites/npc_bran.png"
+const MILA_SPRITE := "res://assets/sprites/npc_mila.png"
+const SERIS_SPRITE := "res://assets/sprites/npc_seris.png"
+const ALVENA_SPRITE := "res://assets/sprites/npc_alvena.png"
+
 ## Authored map, not a generated one: a village is streets and house plots, and
 ## a seeded scatter cannot promise a road reaches the gate. The grid is fixed
 ## text, so every run, every test and every bot seed sees the same streets.
@@ -239,7 +252,7 @@ func _spawn_actors() -> void:
 	# four tiles away so standing at the headman never reaches the shop either.
 	var merchant := Merchant.new()
 	merchant.name = "Yorek"
-	merchant.sprite_texture = load("res://assets/sprites/npc.png")
+	merchant.sprite_texture = load(YOREK_SPRITE)
 	merchant.position = _tile_center(YOREK_TILE.x, YOREK_TILE.y)
 	add_child(merchant)
 	_merchant_node = merchant
@@ -248,18 +261,19 @@ func _spawn_actors() -> void:
 	# clearance: his forge sits by the east road, five tiles from the headman.
 	var smith := Smith.new()
 	smith.name = "Bran"
-	smith.sprite_texture = load("res://assets/sprites/npc.png")
+	smith.sprite_texture = load(BRAN_SPRITE)
 	smith.position = _tile_center(BRAN_TILE.x, BRAN_TILE.y)
 	add_child(smith)
 	_smith_node = smith
 
 	var mila := _spawn_villager("Mila", "Травница Мила", "mila",
-		PackedStringArray(["q02_gather_fangs", "q03_clear_boars"]), MILA_TILE, Color(0.55, 0.85, 0.55))
+		PackedStringArray(["q02_gather_fangs", "q03_clear_boars"]), MILA_TILE, Color(0.55, 0.85, 0.55),
+		MILA_SPRITE)
 	_mila_node = mila
 	_seris_node = _spawn_villager("Seris", "Мельник Серис", "seris",
-		PackedStringArray(["q09_the_mill"]), SERIS_TILE, Color(0.62, 0.78, 0.95))
+		PackedStringArray(["q09_the_mill"]), SERIS_TILE, Color(0.62, 0.78, 0.95), SERIS_SPRITE)
 	_alvena_node = _spawn_villager("Alvena", "Кожевница Альвена", "alvena",
-		PackedStringArray(["q10_armor_fit"]), ALVENA_TILE, Color(0.95, 0.80, 0.55))
+		PackedStringArray(["q10_armor_fit"]), ALVENA_TILE, Color(0.95, 0.80, 0.55), ALVENA_SPRITE)
 
 	# The way back to the forest. `ZoneExit` owns no overlap handler at all, so
 	# nothing travels by walking over it; the key press is the only door.
@@ -276,10 +290,13 @@ func _spawn_actors() -> void:
 ## carrying `quests` as its offer list. A `Sprite2D` child is added before
 ## `add_child` so the base `Npc`'s `@onready` sprite lookup resolves on the
 ## first frame, and the per-villager `tint` is applied AFTER `add_child`
-## because `Villager._ready` paints every herbwife the same green. Returns the
+## because `Villager._ready` paints every herbwife the same green. `sprite` is
+## this villager's own sheet (see the sprite constants above): the body comes
+## from the file, the tint stays the character's identity colour. Returns the
 ## live node so the caller can keep it as a landmark/schedule reference.
 func _spawn_villager(node_name: String, display: String, speaker: String,
-		quests: PackedStringArray, tile: Vector2i, tint: Color) -> Node2D:
+		quests: PackedStringArray, tile: Vector2i, tint: Color,
+		sprite: String) -> Node2D:
 	var script: GDScript = load(VILLAGER_SCRIPT)
 	if script == null:
 		push_error("Village: cannot load %s" % VILLAGER_SCRIPT)
@@ -288,11 +305,11 @@ func _spawn_villager(node_name: String, display: String, speaker: String,
 	villager.name = node_name
 	villager.set("display_name", display)
 	villager.set("speaker_id", speaker)
-	villager.set("sprite_texture", load("res://assets/sprites/npc.png"))
+	villager.set("sprite_texture", load(sprite))
 	villager.set("quest_ids", quests)
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load("res://assets/sprites/npc.png")
+	spr.texture = load(sprite)
 	villager.add_child(spr)
 	villager.position = _tile_center(tile.x, tile.y)
 	add_child(villager)

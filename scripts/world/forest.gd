@@ -280,6 +280,10 @@ const VILLAGE_GATE_TILE := Vector2i(2, 8)
 ## can never take him, and the avoid set keeps him off every enemy, prop and NPC.
 const PILGRIM_ANCHOR := Vector2i(24, 4)
 const PILGRIM_SCAN_RADIUS := 2
+## The pilgrim's own sprite (one sheet per named character,
+## `tools/import_ninja_sprites.py --npcs`), the same file every other zone gives
+## him, so the ash cloak is the same figure in all four zones.
+const PILGRIM_SPRITE := "res://assets/sprites/npc_pilgrim.png"
 const PILGRIM_CLEAR_FROM_ENTRY := 6
 
 
@@ -650,10 +654,10 @@ func _spawn_pilgrim() -> void:
 	var pilgrim := Pilgrim.new()
 	pilgrim.name = "PilgrimForest"
 	pilgrim.zone_id = "forest"
-	pilgrim.sprite_texture = load("res://assets/sprites/npc.png")
+	pilgrim.sprite_texture = load(PILGRIM_SPRITE)
 	var spr := Sprite2D.new()
 	spr.name = "Sprite2D"
-	spr.texture = load("res://assets/sprites/npc.png")
+	spr.texture = load(PILGRIM_SPRITE)
 	pilgrim.add_child(spr)
 	pilgrim.position = _tile_center(tile.x, tile.y)
 	add_child(pilgrim)
