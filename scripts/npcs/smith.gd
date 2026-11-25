@@ -37,11 +37,13 @@ func _ready() -> void:
 	_sprite = sprite
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
-	# A hot forge tint, deliberately the opposite of the merchant's cool blue, so
-	# the two village NPCs read apart while sharing the one placeholder sprite.
-	# The zone's brightness scalar is multiplied into it on the first processed
-	# frame (see `_process`); the hue authored here is the identity.
-	sprite.modulate = Color(1.0, 0.66, 0.42)
+	# Sooty charcoal with a cold steel cast — the man who stands in the smoke
+	# all day. The forge's own orange belongs to his anvil glow, not his cloak:
+	# as a body tint orange sat too close to the headman's warm brown and the
+	# tanner's wheat, which is how the six villagers became six brown blobs.
+	# The zone's brightness scalar moves only the value axis of this tint on
+	# the first processed frame (see `_process` and `Npc.scale_npc_tint`).
+	sprite.modulate = Color(0.42, 0.45, 0.50)
 	add_child(sprite)
 	# Readability pass (mirrors `Enemy._ready` and `Npc._ready`): the zone's
 	# silhouette ring on the sprite.

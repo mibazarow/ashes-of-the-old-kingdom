@@ -37,11 +37,13 @@ func _ready() -> void:
 	_sprite = sprite
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
-	# A cool tint keeps the merchant visually distinct from the warm quest-giver
-	# while reusing the one placeholder sprite. The zone's brightness scalar is
-	# multiplied into it on the first processed frame (see `_process`); the hue
-	# authored here is the character's identity and survives the scaling.
-	sprite.modulate = Color(0.62, 0.86, 1.0)
+	# A deep azure, one clear step darker and more saturated than Seris's pale
+	# mill blue so the trader and the miller never read as the same figure, and
+	# the cold opposite of the headman's warm brown and the smith's charcoal.
+	# Reuses the one placeholder sprite. The zone's brightness scalar moves only
+	# the value axis of this tint on the first processed frame (see `_process`
+	# and `Npc.scale_npc_tint`); the hue authored here is the identity.
+	sprite.modulate = Color(0.30, 0.55, 0.95)
 	add_child(sprite)
 	# Readability pass (mirrors `Enemy._ready` and `Npc._ready`): the zone's
 	# silhouette ring on the sprite, so the counter figure cannot sink into the

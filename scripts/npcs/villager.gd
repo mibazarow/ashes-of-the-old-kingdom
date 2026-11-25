@@ -23,8 +23,9 @@ extends Npc
 
 func _ready() -> void:
 	super()
-	# A cool herb tint, distinct from the merchant's blue and the smith's forge
-	# orange, so the three code-built villagers read apart on the one shared sprite.
+	# A saturated herb green, distinct from the merchant's deep azure and the
+	# smith's charcoal, so the three code-built villagers read apart on the one
+	# shared sprite.
 	# Guarded because a bare `Villager` built without the world's sprite has none.
 	# This is the identity hue only: the zone's brightness scalar is multiplied
 	# into it on the first processed frame by the body pass in `Npc._process`,
@@ -32,7 +33,7 @@ func _ready() -> void:
 	# `add_child` — that tint gets scaled the same way (Nela's undercroft grey,
 	# Oren's garrison ochre, the village herbwives' per-character pastels).
 	if sprite != null and is_instance_valid(sprite):
-		sprite.modulate = Color(0.66, 0.92, 0.62)
+		sprite.modulate = Color(0.55, 0.95, 0.60)
 
 
 func prompt_text() -> String:

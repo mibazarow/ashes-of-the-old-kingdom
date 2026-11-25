@@ -10512,6 +10512,44 @@ func _test_zone_travel() -> void:
 		_check(figure != null and _npc_wears_outline(figure, "res://scripts/world/village.gd", village_npc_cls),
 			"%s wears the village silhouette outline" % npc_name)
 
+	# --- the six villagers read as six distinct people --------------------------
+	# The owner's second frame review: the village contrast measured 9.24:1 and
+	# the six figures still rendered as six of the same dark lump, because the
+	# inherited 0.5 enemy scalar crushed every identity tint toward black. The
+	# live modulates are the frame the owner actually reviewed, so the claims
+	# are measured on them: each figure's tint is its authored identity moved
+	# along the value axis by the village scalar, no figure is crushed below
+	# the floor, and every pair of the six clears the wide margin.
+	await process_frame
+	var village_body_inst: Node = (load("res://scripts/world/village.gd") as GDScript).new()
+	var village_scalar: Color = village_body_inst.call("enemy_body_tint")
+	village_body_inst.free()
+	var figure_tints := {}
+	for figure_name: String in ["Edrik", "Yorek", "Bran", "Mila", "Seris", "Alvena"]:
+		var fig := (village.get_node_or_null(figure_name) as Node) if village != null else null
+		var fig_spr := fig.get_node_or_null("Sprite2D") as Sprite2D if fig != null else null
+		var fig_tint: Color = fig_spr.modulate if fig_spr != null else Color(0.0, 0.0, 0.0)
+		figure_tints[figure_name] = fig_tint
+		var want_fig: Color = village_npc_cls.call("scale_npc_tint",
+			NPC_IDENTITY_TINTS[figure_name] as Color, village_scalar)
+		_check(fig_spr != null and fig_tint.is_equal_approx(want_fig),
+			"%s's live tint is the authored identity scaled by the village scalar (want %s, got %s)"
+				% [figure_name, str(want_fig), str(fig_tint)])
+		_check(_tint_mean_lum(fig_tint) >= NPC_BODY_MIN_MEAN_LUMINANCE,
+			"%s is not a dark lump (live body mean %.2f, floor %.2f)"
+				% [figure_name, _tint_mean_lum(fig_tint), NPC_BODY_MIN_MEAN_LUMINANCE])
+	var thin_figures: Array[String] = []
+	var figure_names: Array = ["Edrik", "Yorek", "Bran", "Mila", "Seris", "Alvena"]
+	for i in range(figure_names.size()):
+		for j in range(i + 1, figure_names.size()):
+			var fig_dist := _tint_distance(
+				figure_tints[figure_names[i]] as Color, figure_tints[figure_names[j]] as Color)
+			if fig_dist < NPC_IDENTITY_MARGIN_VILLAGE:
+				thin_figures.append("%s-%s %.2f" % [figure_names[i], figure_names[j], fig_dist])
+	_check(thin_figures.is_empty(),
+		"the six live village figures are six distinct people, pairwise distance >= %.2f (%s)"
+			% [NPC_IDENTITY_MARGIN_VILLAGE, ", ".join(thin_figures)])
+
 	# --- the screenshot probe must not carry the travel toast -------------------
 	# Every zone frame the owner reviewed showed a duplicate `Зона: ...` line:
 	# the HUD names the zone permanently, and the capture grabbed its frame
@@ -12602,6 +12640,29 @@ func _atlas_floor_darkest(path: String) -> Color:
 	return darkest
 
 
+## The LIGHTEST pixel of a zone's WALKABLE floor cells (grass x 0..15, dirt
+## x 16..31) — the mirror of `_atlas_floor_darkest`. A DARK silhouette outline
+## is chosen to separate on the light end of a light floor, so judging it only
+## against the darkest pixel would flatter it: the pixel it must clear on a
+## bright zone (village/forest grass) is the brightest one, where a light floor
+## is closest to a light outline. Readability rules measure the outline against
+## BOTH extremes of the walkable band, never just one.
+func _atlas_floor_lightest(path: String) -> Color:
+	var img := _atlas_image(path)
+	if img == null or img.get_width() < 32 or img.get_height() < 16:
+		return Color(0.0, 0.0, 0.0)
+	var lightest := Color(0.0, 0.0, 0.0)
+	var lightest_l := -1.0
+	for y in range(16):
+		for x in range(32):
+			var c := img.get_pixel(x, y)
+			var l := _wcag_lum(c)
+			if l > lightest_l:
+				lightest_l = l
+				lightest = c
+	return lightest
+
+
 ## Largest share of any single RGB value inside a zone's floor sample (the two
 ## walkable cells, 512 px). CRITIC-P1-01 closes at 20%.
 func _atlas_floor_max_share(path: String) -> float:
@@ -12850,18 +12911,100 @@ const NPC_READABLE_INVENTORY: Dictionary = {
 	"res://scripts/npcs/smith.gd": ["village"],
 }
 
-## The tint each NPC script authors for itself (Edrik's scene ships no
-## modulate, so his is white). The zone scalar multiplies exactly this on the
-## first processed frame; a spawning zone script may paint its own figure tint
-## after `add_child` (Nela, Oren, the village herbwives), and the live groups
-## pin those figures against their own authored colours.
+## The tint each NPC script authors for itself. Edrik's scene ships no
+## modulate: the base `Npc` now paints its own `IDENTITY_TINT` (the headman's
+## warm brown) in `_ready`, which is the tint a bare `Npc` and the headman
+## alike wear under the zone's body pass. The body pass moves exactly this
+## tint along the value axis by the zone scalar's luminance
+## (`Npc.scale_npc_tint`) on the first processed frame; a spawning zone script
+## may paint its own figure tint after `add_child` (Nela, Oren, the village
+## herbwives), and the live groups pin those figures against their own
+## authored colours.
 const NPC_AUTHORED_TINTS: Dictionary = {
-	"res://scenes/npcs/edrik.tscn": Color(1.0, 1.0, 1.0),
-	"res://scripts/npcs/villager.gd": Color(0.66, 0.92, 0.62),
-	"res://scripts/npcs/pilgrim.gd": Color(0.62, 0.62, 0.66),
-	"res://scripts/npcs/merchant.gd": Color(0.62, 0.86, 1.0),
-	"res://scripts/npcs/smith.gd": Color(1.0, 0.66, 0.42),
+	"res://scenes/npcs/edrik.tscn": Color(0.72, 0.46, 0.24),
+	"res://scripts/npcs/villager.gd": Color(0.55, 0.95, 0.60),
+	"res://scripts/npcs/pilgrim.gd": Color(0.62, 0.46, 0.88),
+	"res://scripts/npcs/merchant.gd": Color(0.30, 0.55, 0.95),
+	"res://scripts/npcs/smith.gd": Color(0.42, 0.45, 0.50),
 }
+
+## The full named cast's authored identity tints, including the figures whose
+## tint a zone script paints after `add_child` (the herbwives in `village.gd`,
+## Nela in `dungeon.gd`, Oren in `fortress.gd`) — those files are outside this
+## pass, so their colours are pinned here as data, and the live village,
+## dungeon and fortress groups re-read them off the standing figures. The
+## pairwise claims below use this table: NPCs who can never share a frame
+## (Nela in the undercroft, Seris at the mill) are only required to separate
+## from the cast they stand beside; NPCs who CAN share one (the pilgrim beside
+## Nela in the undercroft, beside Oren in the garrison) must separate from
+## both. The margin is a real RGB distance, not a name difference: two figures
+## one shared sprite apart are the same silhouette, and their tint is the only
+## thing that makes them two people.
+const NPC_IDENTITY_TINTS: Dictionary = {
+	"Edrik": Color(0.72, 0.46, 0.24),	# headman — warm earth brown
+	"Yorek": Color(0.30, 0.55, 0.95),	# trader — deep azure
+	"Bran": Color(0.42, 0.45, 0.50),	# smith — sooty charcoal
+	"Mila": Color(0.55, 0.85, 0.55),	# herbwife — herb green
+	"Seris": Color(0.62, 0.78, 0.95),	# miller — pale wheat-blue
+	"Alvena": Color(0.95, 0.80, 0.55),	# tanner — tannery wheat
+	"Nela": Color(0.70, 0.74, 0.82),	# watchwoman — undercroft steel
+	"Oren": Color(0.85, 0.72, 0.40),	# officer — garrison ochre
+	"Pilgrim": Color(0.62, 0.46, 0.88),	# pilgrim — grey-violet
+}
+
+## Where each figure actually stands, so the pairwise rule below can tell a
+## pair that can share a frame from a pair that never can. The six villagers
+## are scheduled inside the walls, Nela stands her undercroft post, Oren his
+## sanctum post, and the pilgrim walks the four wild zones — so Seris and
+## Nela, or Alvena and Oren, are two different-looking people the player can
+## never see side by side, while the pilgrim beside Nela and beside Oren is a
+## pair that must read apart on one frame.
+const NPC_SPAWN_ZONES: Dictionary = {
+	"Edrik": ["village"],
+	"Yorek": ["village"],
+	"Bran": ["village"],
+	"Mila": ["village"],
+	"Seris": ["village"],
+	"Alvena": ["village"],
+	"Nela": ["dungeon"],
+	"Oren": ["fortress"],
+	"Pilgrim": ["forest", "ruins", "dungeon", "fortress"],
+}
+
+## The smallest RGB distance the cast's pairs are held to, in three tiers.
+## The village six are the frame the owner reviewed as "six identical dark
+## lumps" and carry the wide margin; any pair that can share a frame (the
+## pilgrim beside Nela in the undercroft, beside Oren in the garrison) carries
+## the cross margin; a pair from disjoint zones only has to be two different
+## tints at all — the same shared sprite under near-equal tints is the same
+## person twice somewhere on the map, and no two figures are allowed that.
+## All three tiers sit far above the ~0.02 distance the crushed 0.5 scalar
+## left between two mid-bright pastels after scaling.
+const NPC_IDENTITY_MARGIN_VILLAGE := 0.30
+const NPC_IDENTITY_MARGIN_CROSS := 0.25
+const NPC_IDENTITY_MARGIN_DISTINCT := 0.10
+
+## The floor every NPC's final body tint must clear, as the mean of its RGB
+## channels after the display clamp. The old village scalar left the cast at
+## means around 0.15 — dark lumps; the body pass's value floor keeps every
+## figure above this on every floor of every zone it stands in.
+const NPC_BODY_MIN_MEAN_LUMINANCE := 0.25
+
+
+## The RGB distance between two tints — the plain measure of "not the same
+## colour". Two identical blobs score 0.0; the village cast's closest pair
+## must clear `NPC_IDENTITY_MARGIN_VILLAGE`.
+func _tint_distance(a: Color, b: Color) -> float:
+	return Vector3(a.r - b.r, a.g - b.g, a.b - b.b).length()
+
+
+## The mean of a tint's RGB channels after clamping to the displayable range,
+## the "mean body luminance" the readability floor is stated in: the display
+## renders `tex * modulate` clamped to [0, 1], so a modulate channel above 1
+## (dark-zone scalars push it there) is not brighter on screen.
+func _tint_mean_lum(c: Color) -> float:
+	var clamped := c.clamp(Color(0.0, 0.0, 0.0, 1.0), Color(1.0, 1.0, 1.0, 1.0))
+	return (clamped.r + clamped.g + clamped.b) / 3.0
 
 ## The village shares the forest palette and the ZoneBase readability defaults
 ## on purpose (it is a clearing in the same wood), so its outline and scalar
@@ -13204,14 +13347,38 @@ func _test_enemy_roster() -> void:
 			"outline": zinst.call("enemy_outline_color"),
 			"scalar": zinst.call("enemy_body_tint"),
 			"darkest": _atlas_floor_darkest(atlas),
+			"lightest": _atlas_floor_lightest(atlas),
+			"floors": _atlas_floor_colors(atlas),
 		}
 		zinst.free()
+	# The outline is one colour per zone, so every NPC standing in a zone wears
+	# the same ring; the per-NPC material identity is pinned in the loop below.
+	# The ring must clear 3:1 against BOTH extremes of the walkable floor band,
+	# not just the darkest pixel: a dark outline is picked to separate on the
+	# LIGHT end of a light floor, so the brightest walkable pixel is the one a
+	# village/forest outline could quietly fail while still passing the darkest.
 	for zone_id: String in npc_zone_readability.keys():
 		var zr: Dictionary = npc_zone_readability[zone_id]
-		var contrast := _wcag_contrast(zr["outline"] as Color, zr["darkest"] as Color)
-		_check(contrast >= 3.0,
+		var dark_c := _wcag_contrast(zr["outline"] as Color, zr["darkest"] as Color)
+		var light_c := _wcag_contrast(zr["outline"] as Color, zr["lightest"] as Color)
+		_check(dark_c >= 3.0,
 			"%s NPC outline clears 3:1 against the darkest walkable floor pixel (%.2f:1, darkest %s)"
-				% [zone_id, contrast, str(zr["darkest"])])
+				% [zone_id, dark_c, str(zr["darkest"])])
+		_check(light_c >= 3.0,
+			"%s NPC outline clears 3:1 against the lightest walkable floor pixel (%.2f:1, lightest %s)"
+				% [zone_id, light_c, str(zr["lightest"])])
+	# The village is a LIGHT zone (bright forest-atlas grass), so its outline has
+	# to be a DARK one — the owner's frame-review rule, stated as a luminance
+	# margin rather than only a contrast ratio, so a future flip of the village
+	# to the dungeon's light outline fails HERE even before the contrast check
+	# catches it. The village outline's WCAG luminance must sit a real margin
+	# below the grass mean it is drawn on.
+	var village_zr: Dictionary = npc_zone_readability["village"]
+	var village_grass: Color = (village_zr["floors"] as Dictionary)["grass"]
+	var village_outline_lum := _wcag_lum(village_zr["outline"] as Color)
+	_check(village_outline_lum <= _wcag_lum(village_grass) - 0.2,
+		"the village outline is dark against the bright grass (outline lum %.3f, grass lum %.3f, margin must be >= 0.2)"
+			% [village_outline_lum, _wcag_lum(village_grass)])
 	for scene_path: String in NPC_READABLE_INVENTORY.keys():
 		for zone_id: String in (NPC_READABLE_INVENTORY[scene_path] as Array):
 			var zr: Dictionary = npc_zone_readability[zone_id]
@@ -13263,13 +13430,112 @@ func _test_enemy_roster() -> void:
 				_check(String(mat.shader.code).contains("outline_color.a * modulate_alpha")
 						and String(mat.shader.code).contains("modulate_alpha = COLOR.a"),
 					"%s ring alpha comes from the vertex-stage modulate, not the pre-multiplied fragment COLOR" % label)
-			var want: Color = (NPC_AUTHORED_TINTS[scene_path] as Color) * (zr["scalar"] as Color)
+			var want: Color = npc_cls.call("scale_npc_tint",
+				NPC_AUTHORED_TINTS[scene_path] as Color, zr["scalar"] as Color)
 			var got: Color = spr.modulate if spr != null else Color(0.0, 0.0, 0.0)
 			_check(got.is_equal_approx(want),
-				"%s body tint is the authored tint scaled by the zone scalar (want %s, got %s)"
+				"%s body tint is the authored tint moved along the value axis by the zone scalar (want %s, got %s)"
 					% [label, str(want), str(got)])
+			# No zone may crush a figure below the readability floor: the mean
+			# of the final modulate's channels, after the display clamp, stays
+			# above it on every floor of every zone the script stands in.
+			_check(_tint_mean_lum(got) >= NPC_BODY_MIN_MEAN_LUMINANCE,
+				"%s body is not crushed below the floor (mean %.2f)"
+					% [label, _tint_mean_lum(got)])
 			fake_zone.queue_free()
 			await process_frame
+
+	# --- 2d. the cast reads as distinct people, not identical blobs ------------
+	# The owner's second frame review: the village contrast measured fine
+	# (9.24:1) and the six villagers still looked like six of the same dark
+	# lump, because the inherited 0.5 body scalar crushed every identity tint
+	# toward black. Two claims pin the fix as data: every authored identity
+	# tint is a real distance from every other tint of a cast that can share
+	# its frame, and no final body tint sits below the luminance floor.
+	# The claim is on the FINAL modulate, not the authored promise: a figure
+	# is judged by the tint it actually wears, so each pair is measured after
+	# `scale_npc_tint` moved both identities through the scalar of a zone they
+	# share. Pairs that share no zone are measured on their home zones' finals
+	# and held to the distinctness tier only — Seris at the mill and Nela at
+	# her undercroft post can never occupy one frame, and the files painting
+	# four of the nine tints (`village.gd`'s spawn calls, `dungeon.gd`,
+	# `fortress.gd`) are outside this pass anyway.
+	var identity_names: Array = NPC_IDENTITY_TINTS.keys()
+	var village_cast: Array = ["Edrik", "Yorek", "Bran", "Mila", "Seris", "Alvena"]
+	var thin_pairs: Array[String] = []
+	for i in range(identity_names.size()):
+		for j in range(i + 1, identity_names.size()):
+			var name_a: String = String(identity_names[i])
+			var name_b: String = String(identity_names[j])
+			var zones_a: Array = NPC_SPAWN_ZONES[name_a] as Array
+			var zones_b: Array = NPC_SPAWN_ZONES[name_b] as Array
+			var shared: Array[String] = []
+			for zone_id3: String in zones_a:
+				if zones_b.has(zone_id3):
+					shared.append(zone_id3)
+			var margin := NPC_IDENTITY_MARGIN_DISTINCT
+			if not shared.is_empty():
+				margin = NPC_IDENTITY_MARGIN_VILLAGE \
+					if village_cast.has(name_a) and village_cast.has(name_b) \
+					else NPC_IDENTITY_MARGIN_CROSS
+			# Shared pair: measure both under the scalar of every zone they
+			# share (the pilgrim must read apart from Nela on the undercroft
+			# floor, not under some other zone's scalar). Disjoint pair:
+			# measure each figure's FINAL modulate — the tint it actually
+			# wears on its own post — because two figures who never share a
+			# frame only have to be two different people, and because a
+			# dark-zone scalar drives every value to 1.0, which would collapse
+			# any two hues measured under it and prove nothing about a pair
+			# that can never meet.
+			if shared.is_empty():
+				var home_a: Color = npc_cls.call("scale_npc_tint",
+					NPC_IDENTITY_TINTS[name_a] as Color,
+					(npc_zone_readability[String(zones_a[0])] as Dictionary)["scalar"] as Color)
+				var home_b: Color = npc_cls.call("scale_npc_tint",
+					NPC_IDENTITY_TINTS[name_b] as Color,
+					(npc_zone_readability[String(zones_b[0])] as Dictionary)["scalar"] as Color)
+				var home_dist := _tint_distance(home_a, home_b)
+				if home_dist < margin:
+					thin_pairs.append("%s@%s-%s@%s %.2f<%.2f" % [name_a,
+						String(zones_a[0]), name_b, String(zones_b[0]),
+						home_dist, margin])
+			for zone_id4: String in shared:
+				var final_a: Color = npc_cls.call("scale_npc_tint",
+					NPC_IDENTITY_TINTS[name_a] as Color,
+					(npc_zone_readability[zone_id4] as Dictionary)["scalar"] as Color)
+				var final_b: Color = npc_cls.call("scale_npc_tint",
+					NPC_IDENTITY_TINTS[name_b] as Color,
+					(npc_zone_readability[zone_id4] as Dictionary)["scalar"] as Color)
+				var dist := _tint_distance(final_a, final_b)
+				if dist < margin:
+					thin_pairs.append("%s-%s in %s %.2f<%.2f" \
+						% [name_a, name_b, zone_id4, dist, margin])
+	_check(thin_pairs.is_empty(),
+		"every pair of the nine FINAL identity modulates clears its margin (%s)"
+			% ", ".join(thin_pairs))
+	# The value axis is the only axis the body pass may move: scaling a tint
+	# through any zone scalar must return the same hue and saturation it was
+	# authored with, or the characters change identity with the weather.
+	var hue_drift: Array[String] = []
+	for scene_path2: String in NPC_AUTHORED_TINTS.keys():
+		var authored2: Color = NPC_AUTHORED_TINTS[scene_path2] as Color
+		for zone_id2: String in ["village", "forest", "ruins", "dungeon", "fortress"]:
+			var scaled2: Color = npc_cls.call("scale_npc_tint", authored2,
+				(npc_zone_readability[zone_id2] as Dictionary)["scalar"] as Color)
+			# NB: this build exposes the HSV axes as `Color.h/s/v` properties
+			# (the same pair `Enemy.readable_body_tint` reads); stock 4.x
+			# `to_hsv()` does not exist here.
+			# A 1e-3 tolerance, not `is_equal_approx`: the scaled colour is
+			# rebuilt through `from_hsv`, so the axes are re-derived from RGB
+			# and carry float round-off, not an identity change.
+			if absf(authored2.h - scaled2.h) > 0.001 \
+					or absf(authored2.s - scaled2.s) > 0.001:
+				hue_drift.append("%s in %s (dh %.4f ds %.4f)" % [
+					scene_path2.get_file(), zone_id2,
+					authored2.h - scaled2.h, authored2.s - scaled2.s])
+	_check(hue_drift.is_empty(),
+		"the body pass moves only the value axis — hue and saturation survive every zone (%s)"
+			% ", ".join(hue_drift))
 
 	_clear_enemies()
 	await process_frame
@@ -14969,8 +15235,9 @@ func _test_new_npc_and_quests() -> void:
 					== nela_npc_cls.call("outline_material", nela_outline),
 			"Nela wears the undercroft's light silhouette outline")
 		_check(nela_spr != null
-				and nela_spr.modulate.is_equal_approx(Color(0.70, 0.74, 0.82) * nela_scalar),
-			"Nela's tint is the undercroft grey scaled by the zone scalar (got %s)"
+				and nela_spr.modulate.is_equal_approx(
+					nela_npc_cls.call("scale_npc_tint", Color(0.70, 0.74, 0.82), nela_scalar)),
+			"Nela's tint is the undercroft grey moved along the value axis by the zone scalar (got %s)"
 				% str(nela_spr.modulate if nela_spr != null else Color()))
 		var nela_lum := 0.0
 		if nela_spr != null:
@@ -15065,9 +15332,16 @@ func _test_new_npc_and_quests() -> void:
 					== oren_npc_cls.call("outline_material", oren_outline),
 			"Oren wears the fortress's light silhouette outline")
 		_check(oren_spr != null
-				and oren_spr.modulate.is_equal_approx(Color(0.85, 0.72, 0.40) * oren_scalar),
-			"Oren's tint is the garrison ochre scaled by the zone scalar (got %s)"
+				and oren_spr.modulate.is_equal_approx(
+					oren_npc_cls.call("scale_npc_tint", Color(0.85, 0.72, 0.40), oren_scalar)),
+			"Oren's tint is the garrison ochre moved along the value axis by the zone scalar (got %s)"
 				% str(oren_spr.modulate if oren_spr != null else Color()))
+		# The officer must not be crushed either — same floor as the village
+		# cast and the undercroft watchwoman, measured on his live modulate.
+		var oren_mean := _tint_mean_lum(
+			oren_spr.modulate if oren_spr != null else Color(0.0, 0.0, 0.0))
+		_check(oren_mean >= NPC_BODY_MIN_MEAN_LUMINANCE,
+			"Oren's body is not crushed below the floor (mean %.2f)" % oren_mean)
 
 		qm.reset()
 		_satisfy_gates("q12_officers_seal")

@@ -106,20 +106,52 @@ static func apply_npc_outline(node: Node, sprite: Sprite2D) -> void:
 	sprite.material = outline_material(zone_outline_color(node))
 
 
-## The body pass: scale whatever tint the character authored in `_ready` (or
-## the zone script painted over it right after `add_child`) by the zone's
-## brightness scalar, so the same figure sits bright on the dark floors and
-## dark on the light ones. The hue — the character's identity — survives; only
-## the value moves. Nela's undercroft grey (0.70, 0.74, 0.82) over the shared
-## brown NPC sprite rendered as a near-black blob (darkest pixels 32, 29, 29);
-## scaled by the undercroft scalar it renders as a light readable figure.
+## The headman's identity tint: a warm earth brown on the shared NPC sprite.
+## The base `Npc` IS Edrik's class the same way it already carries his default
+## `display_name` and `quest_id` (`edrik.tscn` overrides neither with a tint),
+## and every subclass authors its own `modulate` in its `_ready` after
+## `super()`, so this lands on the headman (and a bare `Npc`) only.
+const IDENTITY_TINT := Color(0.72, 0.46, 0.24)
+
+## The floor the body pass never lets a zone push a figure below, on the HSV
+## value axis. The owner's frame review found the whole village cast rendering
+## as six near-identical dark blobs: the village inherited the enemy scalar
+## 0.5, and a per-channel `modulate *= 0.5` on mid-bright pastel identities
+## lands at WCAG luminance ~0.15 — a dark lump no hue survives reading in.
+## 0.45 keeps every figure a clearly lit person on any floor while staying
+## below the light floors' own luminance, so the dark silhouette ring keeps
+## its contrast the zone chose for it.
+const NPC_BODY_MIN_VALUE := 0.45
+
+## The body pass: move the VALUE (brightness) axis of whatever tint the
+## character authored in `_ready` (or the zone script painted over it right
+## after `add_child`) by the zone scalar's luminance, and never touch the hue
+## or saturation — the character's identity. The old per-channel multiply was
+## tuned around the enemies' near-white hues (`Enemy.readable_body_tint`,
+## untouched here); on the NPCs' coloured tints it only crushed them toward
+## black. Value scaling keeps the six villagers six different people: Mila's
+## herb green and Seris's mill blue stay green and blue at the village scalar,
+## not two darker copies of the same brown blob. Dark-zone scalars (> 1) still
+## brighten — Nela's undercroft grey rides to v 1.0 and renders as a light
+## readable figure — clamping at 1.0 exactly where the display clamps
+## `tex * modulate`. The floor stops the crush from the other side: the ruins
+## scalar 0.32 used to drive the pilgrim's cloak to v 0.27; it now lands on
+## the floor.
+static func scale_npc_tint(tint: Color, scalar: Color) -> Color:
+	# NB: this engine build exposes the HSV axes as `Color.h/s/v` properties
+	# and `Color.from_hsv` (the same pair `Enemy.readable_body_tint` uses);
+	# the stock 4.x `to_hsv()` does not exist here.
+	var value := clampf(tint.v * scalar.get_luminance(), NPC_BODY_MIN_VALUE, 1.0)
+	return Color.from_hsv(tint.h, tint.s, value, tint.a)
+
+
 static func scale_npc_body(node: Node, sprite: Sprite2D) -> void:
 	if sprite == null or not is_instance_valid(sprite):
 		return
 	var scalar := zone_body_scalar(node)
 	if scalar == Color(1.0, 1.0, 1.0):
 		return
-	sprite.modulate *= scalar
+	sprite.modulate = scale_npc_tint(sprite.modulate, scalar)
 
 ## The quest this instance hands out. Per-instance (set on `edrik.tscn`, and on
 ## any code-built villager) rather than a hardcoded constant, so a second quest
@@ -152,6 +184,13 @@ func _ready() -> void:
 	add_to_group("interactable")
 	if sprite_texture != null:
 		sprite.texture = sprite_texture
+	# The headman's identity tint (see `IDENTITY_TINT`). Guarded like the
+	# subclass tints: a bare `Npc` built without the world's sprite has none.
+	# Subclasses overwrite this in their own `_ready` after `super()`, and a
+	# spawning zone may still paint its figure tint after `add_child` — both
+	# win over the default exactly as they won over the old white.
+	if sprite != null and is_instance_valid(sprite):
+		sprite.modulate = IDENTITY_TINT
 	# Readability pass (mirrors `Enemy._ready`): the zone's silhouette ring goes
 	# on immediately; the zone-scaled body tint lands on the first processed
 	# frame, after any tint the spawning zone script paints in this same frame.

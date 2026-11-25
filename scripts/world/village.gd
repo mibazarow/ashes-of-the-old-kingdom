@@ -105,6 +105,20 @@ func tile_atlas_path() -> String:
 	return ATLAS_FOREST
 
 
+## Readability (the owner's frame review that found six identical dark blobs):
+## the village does NOT inherit the base 0.5 enemy scalar. That scalar was
+## tuned for near-white enemy hues on the forest's bright grass, and the
+## village is the one zone with no enemies at all — `Enemy` turns back at
+## `SAFE_ZONE_RECT` and this zone spawns nothing — so this scalar is read only
+## by the NPC body pass (`Npc.scale_npc_body`). The inherited 0.5 crushed all
+## six identity tints toward black; ~0.88 keeps the light-zone rule (a body
+## sits a step under the bright grass so the dark ring separates) while
+## leaving every figure clearly lit and clearly itself. The faint warm shift
+## is the village hearth light; its luminance is what the body pass applies.
+func enemy_body_tint() -> Color:
+	return Color(0.90, 0.88, 0.84)
+
+
 func zone_id() -> String:
 	return "village"
 

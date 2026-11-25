@@ -43,15 +43,17 @@ func _ready() -> void:
 	display_name = "Пепельный Паломник"
 	speaker_id = "pilgrim"
 	super()
-	# A grey cloak on the one shared NPC sprite (no new sprite file): distinct from
-	# the herbwife's green, the merchant's blue, the smith's forge orange and the
-	# undercroft watchwoman's cool grey. Guarded because a bare `Pilgrim` built
-	# without the world's sprite has none. Identity hue only: the zone's
-	# brightness scalar is multiplied into it on the first processed frame by
-	# the body pass in `Npc._process`, so the same grey cloak sits bright on the
-	# dark undercroft and fortress floors and dark on the light forest ones.
+	# A grey-violet cloak on the one shared NPC sprite (no new sprite file):
+	# the violet cast is what keeps him a person and not a second grey blob —
+	# distinct from the herbwife's green, the merchant's azure, the smith's
+	# charcoal and the undercroft watchwoman's cool steel. Guarded because a
+	# bare `Pilgrim` built without the world's sprite has none. Identity hue
+	# only: the zone's brightness scalar moves the value axis of this tint on
+	# the first processed frame (`Npc.scale_npc_tint`), so the same cloak sits
+	# bright on the dark undercroft and fortress floors and dark on the light
+	# forest ones, never crushed below the body pass's floor.
 	if sprite != null and is_instance_valid(sprite):
-		sprite.modulate = Color(0.62, 0.62, 0.66)
+		sprite.modulate = Color(0.62, 0.46, 0.88)
 
 
 ## The conversation this instance owns: `pilgrim_<zone_id>`.
